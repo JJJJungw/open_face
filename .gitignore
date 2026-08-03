@@ -1,0 +1,30 @@
+# weights & third-party repo (setup_weights.py 로 받음 — 커밋하지 않음)
+weights/*.pt
+weights/*.onnx
+third_party/
+
+# 입출력 영상
+*.mp4
+*.avi
+*.mov
+*.mkv
+!docs/**/*.mp4
+
+# python
+__pycache__/
+*.py[cod]
+*.egg-info/
+.eggs/
+build/
+dist/
+.venv/
+venv/
+env/
+
+# jupyter
+.ipynb_checkpoints/
+
+# os / editor
+.DS_Store
+.vscode/
+.idea/

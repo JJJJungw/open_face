@@ -1,0 +1,8 @@
+torch>=1.13
+torchvision>=0.14
+opencv-python>=4.7
+numpy>=1.23
+supervision>=0.18
+# ffmpeg 는 시스템 패키지로 별도 설치 필요 (오디오 합성용)
+#   Ubuntu/Debian:  sudo apt install ffmpeg
+#   macOS (brew):   brew install ffmpeg
