@@ -5,18 +5,25 @@
 - box     : 단색 박스로 완전히 가림 (가장 강함, 유틸리티 0).
 """
 
+import math
+
 import cv2
 import numpy as np
 
 
 def pad_box(box, pad, w, h):
-    """박스를 pad 비율만큼 확장하고 프레임 안으로 클램프."""
+    """박스를 pad 비율만큼 확장하고 프레임 안으로 클램프.
+
+    정수화는 **항상 바깥쪽**으로 한다(왼쪽/위는 내림, 오른쪽/아래는 올림).
+    ``int()`` 는 0 방향으로 자르기 때문에 오른쪽/아래 경계에서 최대 1px 이
+    깎이는데, 비식별화 도구에서 1px 이 덜 가려지는 쪽으로 틀리면 안 된다.
+    """
     x1, y1, x2, y2 = box[:4]
     bw, bh = x2 - x1, y2 - y1
     x1 -= bw * pad; x2 += bw * pad
     y1 -= bh * pad; y2 += bh * pad
-    return (int(max(0, x1)), int(max(0, y1)),
-            int(min(w, x2)), int(min(h, y2)))
+    return (int(math.floor(max(0, x1))), int(math.floor(max(0, y1))),
+            int(math.ceil(min(w, x2))), int(math.ceil(min(h, y2))))
 
 
 def mosaic(frame, box, scale=0.06):

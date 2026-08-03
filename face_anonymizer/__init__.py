@@ -1,7 +1,6 @@
 """face_anonymizer — YOLO-FaceV2 + ByteTrack 기반 영상 얼굴 비식별화."""
 
 from .pipeline import (
-    Cancelled,
     Result,
     VideoAnonymizer,
     VideoInfo,
@@ -10,9 +9,13 @@ from .pipeline import (
     probe,
 )
 
+# FaceDetector 는 일부러 빼 둔다. `from face_anonymizer import *` 는 __all__ 의
+# 모든 이름을 getattr 하므로, 여기 넣으면 아래 __getattr__ 가 발동해 torch 를
+# 끌고 온다 — "torch 없이 파이프라인만 쓴다" 는 약속이 별표 임포트에서 깨진다.
+# 명시적 접근(`from face_anonymizer import FaceDetector`)은 그대로 동작한다.
 __all__ = [
-    "VideoAnonymizer", "FaceDetector", "Result", "VideoInfo", "probe",
-    "VideoOpenError", "VideoWriteError", "Cancelled",
+    "VideoAnonymizer", "Result", "VideoInfo", "probe",
+    "VideoOpenError", "VideoWriteError",
 ]
 __version__ = "0.2.0"
 

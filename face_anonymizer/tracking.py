@@ -6,9 +6,11 @@
   2. 트랙이 관측된 프레임들 사이의 빈 구간을 선형 보간으로 메꾸며,
   3. 마지막 관측 이후 linger 프레임 동안 박스를 유지한다.
 
-프레임 스킵(detect_every > 1) 을 쓰면 검출하지 않은 프레임은 애초에 관측이
-없으므로, 2번 보간이 그 구간을 덮는 유일한 안전장치가 된다. 그래서 스킵을
-켜면서 보간을 끄는 조합은 파이프라인에서 막아 둔다.
+검출은 모든 프레임에서 돌린다. 프레임을 건너뛰어 GPU 시간을 아끼는 선택지도
+있었지만, 건너뛴 구간의 커버리지가 대상의 움직임에 좌우돼(무작위 보행 영상
+100개 중 33개에서 얼굴이 노출) 보장할 수 없었다. 비식별화 도구에서 조용히
+새는 손잡이를 두는 것보다 느린 편이 낫다고 판단했다. 처리량은 배치 추론과
+FP16 으로 올린다.
 """
 
 from collections import defaultdict
@@ -17,34 +19,25 @@ import numpy as np
 import supervision as sv
 
 
-def track_video_boxes(detections_per_step, fps=30.0, frame_indices=None):
-    """검출 결과를 ByteTrack 에 순차 투입해 트랙 이력을 만든다.
+def track_video_boxes(detections_per_frame, fps=30.0):
+    """프레임별 검출을 ByteTrack 에 순차 투입해 트랙 이력을 만든다.
 
     Parameters
     ----------
-    detections_per_step : list[list[tuple]]
-        각 추적 스텝의 [(x1,y1,x2,y2,score), ...]. 시간 순서대로.
+    detections_per_frame : list[list[tuple]]
+        각 프레임의 [(x1,y1,x2,y2,score), ...]. 프레임 순서대로.
     fps : float
-        ByteTrack frame_rate 힌트. 프레임 스킵을 쓰면 실제 검출 주기
-        (원본 fps / detect_every) 를 넘겨야 트랙 유지 시간이 맞는다.
-    frame_indices : list[int] | None
-        각 스텝이 대응하는 원본 프레임 번호. None 이면 0,1,2,... 로 간주.
-        프레임 스킵을 쓸 때 결과를 원본 프레임 좌표계로 되돌리는 데 쓴다.
+        ByteTrack frame_rate 힌트.
 
     Returns
     -------
     track_hist : dict[int, dict[int, tuple]]
         track_hist[track_id][frame_idx] = (x1,y1,x2,y2)
     """
-    if frame_indices is None:
-        frame_indices = range(len(detections_per_step))
-    elif len(frame_indices) != len(detections_per_step):
-        raise ValueError("frame_indices length must match detections_per_step")
-
     tracker = sv.ByteTrack(frame_rate=max(1, int(round(fps))))
     track_hist = defaultdict(dict)
 
-    for frame_idx, raw in zip(frame_indices, detections_per_step):
+    for frame_idx, raw in enumerate(detections_per_frame):
         if raw:
             dets = sv.Detections(
                 xyxy=np.array([b[:4] for b in raw], dtype=float),
@@ -86,7 +79,7 @@ def interpolate(frame_dets, track_hist, total_frames, linger=5):
     두 가지를 채운다.
 
     * **관측 사이의 gap** — 앞뒤 관측이 모두 있으므로 선형 보간으로 정확히 메운다.
-      프레임 스킵(detect_every)으로 생긴 구멍도 여기서 덮인다.
+      검출기가 몇 프레임을 놓쳐도 여기서 덮인다.
     * **마지막 관측 이후 linger 구간** — 뒤쪽 관측이 없어 위치를 알 수 없다.
       마지막 박스를 그대로 유지하면 움직이는 대상이 박스 밖으로 빠져나가므로,
       최근 이동 속도에 비례해 시간이 지날수록 박스를 키운다. 방향을 추정해

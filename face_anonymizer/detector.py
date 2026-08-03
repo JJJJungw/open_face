@@ -11,9 +11,12 @@ setup_weights.py 로 third_party/YOLO-FaceV2 에 클론해 둔 뒤 사용한다.
 좌표 변환은 geometry.py 로, 픽셀 처리는 anonymize.py 로 분리해 두었다.
 """
 
+import contextlib
 import logging
+import math
 import os
 import sys
+import threading
 
 import numpy as np
 import torch
@@ -26,6 +29,40 @@ log = logging.getLogger(__name__)
 _HERE = os.path.dirname(os.path.abspath(__file__))
 DEFAULT_REPO = os.path.abspath(os.path.join(_HERE, "..", "third_party", "YOLO-FaceV2"))
 DEFAULT_WEIGHTS = os.path.abspath(os.path.join(_HERE, "..", "weights", "yolo-facev2.pt"))
+
+# RLock: 중첩 호출이 생겨도 데드락으로 프로세스 전체를 막지 않는다.
+_LOAD_LOCK = threading.RLock()
+
+
+@contextlib.contextmanager
+def _patched_torch_load():
+    """체크포인트 로드 동안만 ``weights_only=False`` 를 강제한다.
+
+    torch>=2.6 은 ``torch.load`` 의 ``weights_only`` 기본값이 True 라 YOLOv5
+    형식(모델 객체를 담은) 체크포인트를 못 읽는다.
+
+    단순히 감쌌다 되돌리면 **동시에 두 검출기를 만들 때 영구히 오염된다**:
+    T1 이 원본을 저장하고 L1 을 설치, T2 가 L1 을 "원본"으로 저장하고 L2 설치,
+    T1 이 원본 복원, T2 가 L1 복원 — 이후 프로세스의 모든 torch.load 가
+    조용히 임의 객체를 unpickle 한다. 서버에서 워커별로 지연 로드하면
+    실제로 일어나는 순서다. 그래서 락으로 직렬화하고, 복원할 때는 내가 설치한
+    함수가 그대로 있을 때만 되돌린다.
+    """
+    with _LOAD_LOCK:
+        original = torch.load
+
+        def _loader(*a, **k):
+            return original(*a, **{**k, "weights_only": False})
+
+        torch.load = _loader
+        try:
+            yield
+        finally:
+            if torch.load is _loader:
+                torch.load = original
+            else:                       # 누군가 그 사이에 또 바꿨다 — 덮지 않는다
+                log.warning("torch.load was replaced during model load; "
+                            "leaving the current implementation in place")
 
 
 class FaceDetector:
@@ -65,13 +102,7 @@ class FaceDetector:
             device or ("cuda:0" if torch.cuda.is_available() else "cpu")
         )
 
-        # torch>=2.6 은 torch.load 의 weights_only 기본값이 True 라 YOLOv5 형식
-        # (모델 객체를 담은) 체크포인트 로드가 실패한다. 체크포인트 로드 구간에서만
-        # False 로 강제하고, 끝나면 finally 로 원래 torch.load 를 반드시 되돌린다.
-        # (전역 상태를 영구히 오염시키지 않기 위함)
-        _orig_load = torch.load
-        torch.load = lambda *a, **k: _orig_load(*a, **{**k, "weights_only": False})
-        try:
+        with _patched_torch_load():
             model = None
             for kwargs in ({"device": self.device}, {"map_location": self.device}, {}):
                 try:
@@ -79,8 +110,6 @@ class FaceDetector:
                     break
                 except TypeError:
                     continue
-        finally:
-            torch.load = _orig_load
         if model is None:
             raise RuntimeError("attempt_load() signature mismatch for this repo version.")
 
@@ -95,9 +124,18 @@ class FaceDetector:
             self.model.half()
 
         self.stride = int(self.model.stride.max()) if hasattr(self.model, "stride") else 32
-        self.imgsz, self.conf, self.iou = imgsz, conf, iou
-        log.info("FaceDetector ready: device=%s half=%s imgsz=%s",
-                 self.device, self.half, self.imgsz)
+        # YOLOv5 계열은 입력이 stride 배수여야 한다. 아니면 forward 에서
+        # 어긋나거나 터진다. 항상 위로 올림해 안전한 쪽으로 맞춘다.
+        self.imgsz = self.snap_imgsz(imgsz)
+        if self.imgsz != imgsz:
+            log.info("imgsz %d -> %d (stride %d 배수로 스냅)",
+                     imgsz, self.imgsz, self.stride)
+        self.conf, self.iou = conf, iou
+        log.info("FaceDetector ready: device=%s half=%s imgsz=%s stride=%s",
+                 self.device, self.half, self.imgsz, self.stride)
+
+    def snap_imgsz(self, imgsz):
+        return max(self.stride, int(math.ceil(imgsz / self.stride) * self.stride))
 
     # ------------------------------------------------------------------ #
 
@@ -159,18 +197,18 @@ class FaceDetector:
 
     @staticmethod
     def _score(pred):
-        """objectness x class conf.
+        """스코어 = objectness.
 
-        단일 클래스(얼굴)이므로 클래스 conf 는 마지막 열이지만, 포크에 따라
-        랜드마크 열이 뒤에 오는 변형이 있다. 값이 확률 범위를 벗어나면
-        랜드마크로 보고 objectness 만 사용한다.
+        원래는 objectness x class-conf 를 쓰려고 마지막 열을 클래스 conf 로
+        해석했다. 그런데 포크에 따라 그 자리에 랜드마크 좌표가 온다. 값이
+        확률 범위 안이면 클래스 conf 로 보는 휴리스틱을 넣었더니, 정규화된
+        랜드마크가 [0,1] 에 들어오는 경우 obj 0.95 x 0.01 = 0.0095 로 스코어가
+        무너져 **영상 내내 얼굴이 검출되지 않는** 조용한 사고가 났다.
+
+        단일 클래스(얼굴) 모델에서 class-conf 는 거의 항상 1 에 가깝고 곱해도
+        실익이 없다. 틀렸을 때 과검출(안전)로 기우는 objectness 단독을 쓴다.
         """
-        scores = pred[:, 4]
-        if pred.shape[0] > 0 and pred.shape[1] > 5:
-            cls_conf = pred[:, -1]
-            if float(cls_conf.min()) >= 0.0 and float(cls_conf.max()) <= 1.0:
-                scores = scores * cls_conf
-        return scores
+        return pred[:, 4]
 
     def _decode(self, pred, conf, iou, r, padx, pady, width, height):
         """모델 출력 한 장 → [(x1, y1, x2, y2, score), ...] (원본 좌표계)."""

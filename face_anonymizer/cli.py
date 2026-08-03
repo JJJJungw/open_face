@@ -4,7 +4,7 @@
     face-anonymize input.mp4
     face-anonymize input.mp4 -o out.mp4 --method mosaic --conf 0.20 --imgsz 1280
     face-anonymize input.mp4 --method box
-    face-anonymize input.mp4 --detect-every 3 --batch-size 16   # GPU 처리량 우선
+    face-anonymize input.mp4 --batch-size 16                    # GPU 처리량 우선
 
 종료 코드
     0    성공
@@ -19,7 +19,7 @@ import os
 import sys
 
 from . import __version__
-from .pipeline import Cancelled, VideoOpenError, VideoWriteError
+from .pipeline import VideoOpenError, VideoWriteError
 
 
 def build_parser():
@@ -53,8 +53,6 @@ def build_parser():
                    help="FP16 강제 해제")
 
     g = p.add_argument_group("처리량")
-    g.add_argument("--detect-every", type=int, default=1, metavar="N",
-                   help="N 프레임마다 검출. 사이 구간은 추적 보간이 덮는다")
     g.add_argument("--batch-size", type=int, default=1, metavar="N",
                    help="한 번에 모델에 넣을 프레임 수 (GPU 에서 클수록 빠름)")
 
@@ -65,7 +63,6 @@ def build_parser():
 
     g = p.add_argument_group("출력")
     g.add_argument("--no-audio", action="store_true", help="원본 오디오를 합성하지 않음")
-    g.add_argument("--fourcc", default="mp4v", help="VideoWriter fourcc 코드")
     g.add_argument("-q", "--quiet", action="store_true", help="경고 이상만 출력")
     g.add_argument("-v", "--verbose", action="store_true", help="디버그 로그 출력")
     return p
@@ -106,12 +103,6 @@ def main(argv=None):
         format="%(message)s",
     )
 
-    if args.detect_every > 1 and args.no_interp:
-        parser.error(
-            "--detect-every 는 트랙 보간이 있어야 안전하다 "
-            "(건너뛴 프레임이 그대로 노출된다). --no-interp 와 함께 쓸 수 없다."
-        )
-
     out = args.output or (os.path.splitext(args.input)[0] + "_anon.mp4")
 
     detector_kwargs = {"device": args.device, "half": args.half, "imgsz": args.imgsz}
@@ -125,9 +116,9 @@ def main(argv=None):
             args.input, out,
             method=args.method, imgsz=args.imgsz, conf=args.conf, iou=args.iou,
             pad=args.pad, mosaic_scale=args.mosaic_scale, linger=args.linger,
-            interp=not args.no_interp, detect_every=args.detect_every,
-            batch_size=args.batch_size, keep_audio=not args.no_audio,
-            fourcc=args.fourcc, progress=ProgressBar(not args.quiet),
+            interp=not args.no_interp, batch_size=args.batch_size,
+            keep_audio=not args.no_audio,
+            progress=ProgressBar(not args.quiet),
         )
     except (FileNotFoundError, VideoOpenError, VideoWriteError) as e:
         print(f"error: {e}", file=sys.stderr)
@@ -135,7 +126,7 @@ def main(argv=None):
     except ValueError as e:
         print(f"error: {e}", file=sys.stderr)
         return 2
-    except (KeyboardInterrupt, Cancelled):
+    except KeyboardInterrupt:
         print("\ninterrupted", file=sys.stderr)
         return 130
 
