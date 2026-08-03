@@ -1,8 +1,13 @@
+# 런타임 (검출기 포함)
 torch>=1.13
 torchvision>=0.14
 opencv-python>=4.7
 numpy>=1.23
-supervision>=0.18
+
+# ByteTrack. supervision 0.29 에서 sv.ByteTrack 이 deprecated 되었고 0.30 에서
+# 제거 예정이라 상한을 건다. 올릴 때는 tracking.py 의 트래커 교체가 함께 필요하다.
+supervision>=0.18,<0.30
+
 # ffmpeg 는 시스템 패키지로 별도 설치 필요 (오디오 합성용)
 #   Ubuntu/Debian:  sudo apt install ffmpeg
 #   macOS (brew):   brew install ffmpeg

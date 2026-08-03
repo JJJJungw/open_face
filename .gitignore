@@ -21,6 +21,9 @@ dist/
 venv/
 env/
 
+# pytest
+.pytest_cache/
+
 # jupyter
 .ipynb_checkpoints/
 
