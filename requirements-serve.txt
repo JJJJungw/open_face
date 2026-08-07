@@ -1,0 +1,5 @@
+# HTTP API + 웹 UI 전용. 코어(requirements.txt)에 더해서 설치한다.
+#   pip install -r requirements.txt -r requirements-serve.txt
+fastapi>=0.110
+uvicorn[standard]>=0.27
+python-multipart>=0.0.9

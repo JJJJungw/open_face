@@ -49,6 +49,42 @@ res = anonymizer.process("input.mp4", "output_anon.mp4",
 print(res.frames, res.raw_boxes, res.filled_boxes, res.audio)
 ```
 
+## HTTP API + 웹 UI
+
+```bash
+pip install -r requirements.txt -r requirements-serve.txt
+uvicorn face_anonymizer.server:app --host 0.0.0.0 --port 8000
+```
+
+브라우저로 열면 영상을 끌어다 놓고 진행률·fps·남은 시간을 보면서 처리하고 결과를 내려받을 수 있다.
+
+| 엔드포인트 | 설명 |
+|---|---|
+| `GET /` | 웹 UI |
+| `GET /api/health` | 모델 로드 여부, 디바이스, 큐 상태 |
+| `POST /api/jobs` | 영상 업로드 → `202` + 작업 id (multipart) |
+| `GET /api/jobs` | 작업 목록 |
+| `GET /api/jobs/{id}` | 진행률 · 단계 · fps · ETA · 완료 시 통계 |
+| `GET /api/jobs/{id}/download` | 결과 영상 |
+| `DELETE /api/jobs/{id}` | 작업과 파일 삭제 (진행 중이면 409) |
+
+```bash
+curl -F file=@in.mp4 -F method=mosaic -F conf=0.4 -F batch_size=32 \
+     http://localhost:8000/api/jobs
+curl http://localhost:8000/api/jobs/<id>
+curl -O -J http://localhost:8000/api/jobs/<id>/download
+```
+
+**추론은 한 번에 하나만 돈다.** GPU 한 장에 검출기 하나를 올려 두고 워커 스레드 하나가 큐를 소비한다. 요청마다 스레드를 띄우면 VRAM 이 터지거나 서로 느려지기만 하고, 총 처리량은 오히려 직렬화하는 쪽이 높다.
+
+환경 변수로 `FA_DEVICE`, `FA_IMGSZ`, `FA_JOBS_DIR`, `FA_MAX_UPLOAD_MB`(기본 2048), `FA_JOB_TTL_MIN`(기본 120, 완료 후 자동 삭제)을 조정한다.
+
+인증이 없으므로 공개 주소에 그대로 띄우지 말 것. 원격 테스트는 SSH 터널이 안전하다.
+
+```bash
+ssh -i key.pem -L 8000:localhost:8000 ubuntu@<host>
+```
+
 ## 주요 파라미터
 
 | 옵션 | 기본 | 설명 |
@@ -82,7 +118,7 @@ pytest
 
 반대로 오디오 합성 실패는 결과물을 버릴 이유가 아니다. ffmpeg 가 없거나 실패해도 익명화된 영상은 출력 경로에 남기고 `Result.audio` 로 이유를 알린다.
 
-서버로 붙이려면 `VideoAnonymizer` 를 프로세스당 하나 만들어 재사용하고, 영상 처리는 분 단위라 요청을 붙들지 말고 작업 큐로 넘기는 편이 낫다. GPU 는 하나이므로 워커도 하나여야 VRAM 이 안 터진다.
+서버(`server.py`)도 같은 원칙이다. 작업이 실패해도 상태와 사유를 `status=error` 로 남기고 프로세스는 계속 산다.
 
 ## 알려진 제약
 
@@ -103,7 +139,9 @@ face_anonymizer/
 ├── tracking.py     # ByteTrack + 트랙 보간
 ├── anonymize.py    # 모자이크/블러/박스
 ├── pipeline.py     # 전체 파이프라인
-└── cli.py          # 커맨드라인
+├── cli.py          # 커맨드라인
+├── server.py       # HTTP API (FastAPI, 작업 큐)
+└── webui.py        # 웹 UI (단일 HTML 문자열)
 ```
 
 ## 라이선스
