@@ -16,6 +16,7 @@ import os
 import shutil
 import subprocess
 import tempfile
+import time
 from collections import defaultdict
 from dataclasses import dataclass
 
@@ -48,6 +49,16 @@ class VideoInfo:
 
 
 @dataclass
+class Timing:
+    """단계별 소요 시간(초). 벽시계 기준."""
+    detect: float = 0.0
+    track: float = 0.0
+    render: float = 0.0
+    audio: float = 0.0
+    total: float = 0.0
+
+
+@dataclass
 class Result:
     output: str
     frames: int           # 렌더한 프레임 수
@@ -56,6 +67,28 @@ class Result:
     method: str
     audio: str            # 'ok' | 'no-audio' | 'disabled' | 'ffmpeg-...'
     video: VideoInfo = None
+    timing: Timing = None
+
+    @property
+    def fps(self):
+        """전체 처리 속도(프레임/초). 두 번 훑는 시간이 모두 포함된 실효값."""
+        if not self.timing or self.timing.total <= 0:
+            return 0.0
+        return self.frames / self.timing.total
+
+    @property
+    def realtime_factor(self):
+        """영상 길이 대비 배속. 1 이상이면 실시간보다 빠르게 처리한 것."""
+        if not (self.video and self.timing) or self.timing.total <= 0:
+            return 0.0
+        return (self.frames / self.video.fps) / self.timing.total
+
+    @property
+    def detect_fps(self):
+        """검출 단계만의 속도. GPU/배치 설정을 조절할 때 보는 값."""
+        if not self.timing or self.timing.detect <= 0:
+            return 0.0
+        return self.frames / self.timing.detect
 
 
 def sane_fps(value, default=DEFAULT_FPS):
@@ -165,6 +198,7 @@ class VideoAnonymizer:
         info = probe(input_path)
         outdir = os.path.dirname(os.path.abspath(output_path))
         os.makedirs(outdir, exist_ok=True)
+        t_start = time.perf_counter()
 
         def report(stage, done):
             if progress is not None:
@@ -174,10 +208,14 @@ class VideoAnonymizer:
         log.info("[1/3] detecting: %s (%dx%d @%.2ffps, batch=%d)",
                  os.path.basename(input_path), info.width, info.height,
                  info.fps, batch_size)
+        t0 = time.perf_counter()
         per_frame, raw_boxes, total = self._detect(
             input_path, imgsz, conf, iou, batch_size, report)
+        t_detect = time.perf_counter() - t0
         if total == 0:
             raise VideoOpenError(f"no frames decoded from {input_path}")
+        log.info("      %d frames, %d boxes — %.1fs (%.1f fps)",
+                 total, raw_boxes, t_detect, total / t_detect if t_detect else 0)
 
         # ---- 2차 준비: 추적 + 보간 ----
         frame_dets = defaultdict(list)
@@ -185,12 +223,15 @@ class VideoAnonymizer:
             for b in raw:
                 frame_dets[i].append(tuple(b[:4]))   # 원본 검출은 무조건 익명화
 
-        filled = 0
+        filled, t_track = 0, 0.0
         if interp:
             log.info("[2/3] tracking + interpolating (누출 방지)")
+            t0 = time.perf_counter()
             tracks = track_video_boxes(per_frame, fps=info.fps)
             _, filled = interpolate(frame_dets, tracks, total, linger=linger)
-            log.info("      tracks=%d filled_boxes=%d", len(tracks), filled)
+            t_track = time.perf_counter() - t0
+            log.info("      tracks=%d filled_boxes=%d — %.1fs",
+                     len(tracks), filled, t_track)
         elif linger:
             log.warning("interp=False 라 linger=%d 는 적용되지 않는다", linger)
 
@@ -202,16 +243,30 @@ class VideoAnonymizer:
         try:
             ext = os.path.splitext(output_path)[1] or ".mp4"
             noaudio = os.path.join(tmpdir, "noaudio" + ext)
+            t0 = time.perf_counter()
             rendered = self._render(input_path, noaudio, info, frame_dets,
                                     method, pad, mosaic_scale, total, report)
+            t_render = time.perf_counter() - t0
+            log.info("      %d frames — %.1fs (%.1f fps)", rendered, t_render,
+                     rendered / t_render if t_render else 0)
+            t0 = time.perf_counter()
             status = _mux_audio(noaudio, input_path, output_path, keep_audio)
+            t_audio = time.perf_counter() - t0
         finally:
             shutil.rmtree(tmpdir, ignore_errors=True)
 
+        timing = Timing(detect=t_detect, track=t_track, render=t_render,
+                        audio=t_audio, total=time.perf_counter() - t_start)
+        result = Result(output=output_path, frames=rendered, raw_boxes=raw_boxes,
+                        filled_boxes=filled, method=method, audio=status,
+                        video=info, timing=timing)
         log.info("done: %s | frames=%d boxes=%d(+%d) audio=%s",
                  output_path, rendered, raw_boxes, filled, status)
-        return Result(output=output_path, frames=rendered, raw_boxes=raw_boxes,
-                      filled_boxes=filled, method=method, audio=status, video=info)
+        log.info("      %.1fs 소요 · %.1f fps · 실시간 대비 %.2fx "
+                 "(검출 %.1fs / 추적 %.1fs / 렌더 %.1fs / 오디오 %.1fs)",
+                 timing.total, result.fps, result.realtime_factor,
+                 timing.detect, timing.track, timing.render, timing.audio)
+        return result
 
     # ------------------------------------------------------------------ #
 

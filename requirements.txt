@@ -11,3 +11,17 @@ supervision>=0.18,<0.30
 # ffmpeg 는 시스템 패키지로 별도 설치 필요 (오디오 합성용)
 #   Ubuntu/Debian:  sudo apt install ffmpeg
 #   macOS (brew):   brew install ffmpeg
+
+# YOLO-FaceV2 리포(YOLOv5 계열) 코드가 임포트하는 것들. 우리 코드가 직접 쓰지는
+# 않지만, 체크포인트를 unpickle 하려면 리포의 models/*, utils/* 가 임포트돼야 하고
+# 그 과정에서 아래가 전부 필요하다. 빠지면 ModuleNotFoundError 로 검출기 생성이
+# 실패한다 (models/common.py -> utils/general.py -> utils/plots.py 순).
+pandas
+requests
+PyYAML
+tqdm
+matplotlib
+seaborn
+scipy
+Pillow
+thop

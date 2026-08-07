@@ -17,6 +17,7 @@ import argparse
 import logging
 import os
 import sys
+import time
 
 from . import __version__
 from .pipeline import VideoOpenError, VideoWriteError
@@ -68,24 +69,46 @@ def build_parser():
     return p
 
 
+def fmt_dur(sec):
+    """초 → 'M:SS' (한 시간 넘으면 'H:MM:SS')."""
+    sec = int(max(0, sec))
+    h, rem = divmod(sec, 3600)
+    m, s = divmod(rem, 60)
+    return f"{h}:{m:02d}:{s:02d}" if h else f"{m}:{s:02d}"
+
+
 class ProgressBar:
-    """의존성 없는 한 줄 진행률 표시. 파이프로 넘길 때는 자동으로 조용해진다."""
+    """의존성 없는 한 줄 진행률 표시. 파이프로 넘길 때는 자동으로 조용해진다.
+
+    단계가 바뀌면 타이머를 리셋한다. 검출(GPU)과 렌더(CPU+디스크)는 속도가
+    몇 배씩 차이 나므로, 합쳐서 평균 내면 남은 시간 추정이 무의미해진다.
+    """
 
     def __init__(self, enabled=True, stream=None):
         self.stream = stream or sys.stderr
         self.enabled = bool(enabled and self.stream.isatty())
+        self.stage = None
+        self.t0 = 0.0
         self.last = -1
 
     def __call__(self, stage, done, total):
         if not self.enabled or not total:
             return
+        if stage != self.stage:
+            if self.stage is not None and self.last < 100:
+                self.stream.write("\n")     # 이전 단계 줄을 덮어쓰지 않는다
+            self.stage, self.t0, self.last = stage, time.perf_counter(), -1
         pct = int(100 * min(1.0, done / total))
         if pct == self.last:
             return
         self.last = pct
+        elapsed = time.perf_counter() - self.t0
+        fps = done / elapsed if elapsed > 0 else 0.0
+        eta = (total - done) / fps if fps > 0 and done < total else 0.0
         filled = pct * 30 // 100
         self.stream.write(
-            f"\r{stage:>7} [{'#' * filled}{'.' * (30 - filled)}] {pct:3d}%"
+            f"\r{stage:>7} [{'#' * filled}{'.' * (30 - filled)}] {pct:3d}% "
+            f"{fps:7.1f}f/s  {fmt_dur(elapsed)} 경과  ETA {fmt_dur(eta)}   "
         )
         self.stream.flush()
         if pct >= 100:
@@ -131,8 +154,15 @@ def main(argv=None):
         return 130
 
     if not args.quiet:
+        t = res.timing
+        dur = res.frames / res.video.fps if res.video and res.video.fps else 0
         print(f"{res.output}  frames={res.frames} "
               f"boxes={res.raw_boxes}(+{res.filled_boxes} 보간) audio={res.audio}")
+        print(f"  영상 {fmt_dur(dur)} | 처리 {fmt_dur(t.total)} "
+              f"({res.fps:.1f} fps, 실시간 대비 {res.realtime_factor:.2f}x)")
+        print(f"  검출 {fmt_dur(t.detect)} ({res.detect_fps:.1f} fps) · "
+              f"추적 {fmt_dur(t.track)} · 렌더 {fmt_dur(t.render)} · "
+              f"오디오 {fmt_dur(t.audio)}")
     if res.audio.startswith("ffmpeg-"):
         print(f"warning: 오디오를 합성하지 못했다 ({res.audio}). 영상은 정상 출력됐다.",
               file=sys.stderr)
