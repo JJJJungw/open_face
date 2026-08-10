@@ -71,6 +71,8 @@ def build_parser():
     g = p.add_argument_group("출력")
     g.add_argument("--crf", type=int, default=None, metavar="N",
                    help="H.264 품질 (낮을수록 고화질/큰 파일, 기본 23)")
+    g.add_argument("--bitrate-ratio", type=float, default=None, metavar="R",
+                   help="출력 비트레이트 상한 = 원본 x R (기본 1.0, 0 이면 무제한)")
     g.add_argument("--no-audio", action="store_true", help="원본 오디오를 합성하지 않음")
     g.add_argument("-q", "--quiet", action="store_true", help="경고 이상만 출력")
     g.add_argument("-v", "--verbose", action="store_true", help="디버그 로그 출력")
@@ -152,6 +154,8 @@ def main(argv=None):
             allow_partial=args.allow_partial,
             min_detection_rate=args.min_detection_rate,
             **({"crf": args.crf} if args.crf is not None else {}),
+            **({"bitrate_ratio": args.bitrate_ratio}
+               if args.bitrate_ratio is not None else {}),
             progress=ProgressBar(not args.quiet),
         )
     except (FileNotFoundError, VideoOpenError, VideoWriteError,

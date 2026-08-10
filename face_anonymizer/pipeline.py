@@ -70,9 +70,19 @@ DECODE_TOLERANCE_MIN = 5      # 짧은 영상에서 비율만으로 판단하지
 DEFAULT_CRF = int(os.environ.get("FA_CRF", "23"))
 ENCODER_CANDIDATES = (
     # (인코더, 품질 옵션 이름, 추가 옵션) — 앞에서부터 되는 것을 쓴다.
-    ("h264_nvenc", "-cq", ("-preset", "p4")),      # NVIDIA GPU
-    ("libx264", "-crf", ("-preset", "veryfast")),  # CPU
+    ("h264_nvenc", "-cq", ("-preset", "p4", "-rc", "vbr")),   # NVIDIA GPU
+    ("libx264", "-crf", ("-preset", "veryfast")),             # CPU
 )
+
+# 출력 비트레이트 상한 = 원본 비트레이트 x 이 값.
+#
+# CRF 만 쓰면 "목표 화질"로 인코딩하므로, 이미 많이 압축된 원본을 받으면
+# 결과물이 원본보다 커진다(실측: 1.89 -> 2.96 Mbps, 파일 46MB -> 70MB).
+# 비식별화 결과물에 원본 이상의 화질이 필요할 이유가 없고, 서비스에서는
+# 다운로드 용량이 곧 비용이다. CRF 는 그대로 두고 상한만 걸어(capped CRF)
+# 단순한 장면은 더 작게, 복잡한 장면도 원본을 넘지 않게 한다.
+# 0 이면 상한 없음.
+DEFAULT_BITRATE_RATIO = float(os.environ.get("FA_BITRATE_RATIO", "1.0"))
 
 
 @dataclass
@@ -262,6 +272,32 @@ def pick_encoder(timeout=60):
     return None
 
 
+def video_bitrate(path, timeout=FFMPEG_TIMEOUT):
+    """원본 비디오 비트레이트(bps).
+
+    스트림 값이 없는 컨테이너가 흔해서 파일 크기/길이로도 물러선다(오디오가
+    섞여 약간 과대추정되지만 상한 용도로는 충분하다).
+    """
+    p = _run(["ffprobe", "-v", "error", "-select_streams", "v:0",
+              "-show_entries", "stream=bit_rate", "-of", "default=nk=1:nw=1",
+              path], timeout)
+    if p is not None and p.returncode == 0:
+        try:
+            v = int(p.stdout.strip())
+            if v > 0:
+                return v
+        except ValueError:
+            pass
+    dur = video_duration(path, timeout)
+    try:
+        size = os.path.getsize(path)
+    except OSError:
+        return None
+    if dur and size:
+        return int(size * 8 / dur)
+    return None
+
+
 def video_frame_count(path, timeout=FFMPEG_TIMEOUT):
     """파일에 실제로 들어 있는 비디오 프레임 수와 길이.
 
@@ -289,7 +325,8 @@ def video_frame_count(path, timeout=FFMPEG_TIMEOUT):
 
 
 def finalize_output(noaudio, original, output, keep_audio=True,
-                    expected_frames=None, crf=DEFAULT_CRF, timeout=FFMPEG_TIMEOUT):
+                    expected_frames=None, crf=DEFAULT_CRF,
+                    bitrate_ratio=DEFAULT_BITRATE_RATIO, timeout=FFMPEG_TIMEOUT):
     """중간 산출물을 최종 결과물로 만든다 — H.264 재인코딩 + 오디오 합성 + 검증.
 
     네 가지를 못 박는다.
@@ -344,8 +381,15 @@ def finalize_output(noaudio, original, output, keep_audio=True,
         cmd += ["-map", "0:v:0", "-an"]
     # -shortest 없음(위 1번). +faststart 는 moov 를 앞으로 옮겨 부분 다운로드
     # 상태에서도 재생이 시작되게 한다.
-    cmd += ["-c:v", encoder, qflag, str(crf), *extra, "-pix_fmt", "yuv420p",
-            "-movflags", "+faststart", out_tmp]
+    cmd += ["-c:v", encoder, qflag, str(crf), *extra, "-pix_fmt", "yuv420p"]
+    if bitrate_ratio:
+        src_bps = video_bitrate(original, timeout)
+        if src_bps:
+            cap = int(src_bps * bitrate_ratio)
+            cmd += ["-maxrate", str(cap), "-bufsize", str(cap * 2)]
+            log.info("비트레이트 상한 %.2f Mbps (원본 %.2f Mbps)",
+                     cap / 1e6, src_bps / 1e6)
+    cmd += ["-movflags", "+faststart", out_tmp]
 
     p = _run(cmd, timeout)
     if p is None:
@@ -467,7 +511,8 @@ class VideoAnonymizer:
     def process(self, input_path, output_path, method="mosaic", imgsz=960,
                 conf=0.25, iou=0.45, pad=0.15, mosaic_scale=0.06, linger=5,
                 interp=True, batch_size=1, keep_audio=True, progress=None,
-                allow_partial=False, min_detection_rate=None, crf=DEFAULT_CRF):
+                allow_partial=False, min_detection_rate=None, crf=DEFAULT_CRF,
+                bitrate_ratio=DEFAULT_BITRATE_RATIO):
         """영상 한 편을 익명화하고 Result 를 돌려준다.
 
         progress : callable(stage, done, total) | None
@@ -543,7 +588,8 @@ class VideoAnonymizer:
                      rendered / t_render if t_render else 0)
             t0 = time.perf_counter()
             status = finalize_output(noaudio, input_path, output_path, keep_audio,
-                                     expected_frames=rendered, crf=crf)
+                                     expected_frames=rendered, crf=crf,
+                                     bitrate_ratio=bitrate_ratio)
             t_audio = time.perf_counter() - t0
         finally:
             shutil.rmtree(tmpdir, ignore_errors=True)
