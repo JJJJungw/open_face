@@ -63,6 +63,10 @@ INDEX_HTML = r"""<!doctype html>
   .stats b{font-size:15px;font-weight:600;font-variant-numeric:tabular-nums}
   video{width:100%;border-radius:8px;margin-top:12px;background:#000}
   .err{color:var(--err);font-size:13px;margin-top:8px;word-break:break-all}
+  .warn{background:rgba(255,107,107,.1);border:1px solid var(--err);
+        border-radius:8px;padding:10px 12px;margin-top:12px;
+        color:var(--err);font-size:12.5px;line-height:1.5}
+  .warn b{display:block;margin-bottom:3px}
   a.dl{display:inline-block;background:var(--ok);color:#04140d;text-decoration:none;
        border-radius:8px;padding:8px 15px;font-weight:600;font-size:13px}
 </style>
@@ -198,7 +202,12 @@ function card(j) {
     body = `<div class="err">${j.error}</div>`;
   } else {
     const r = j.result, t = r.timing;
-    body = `<div class="bar"><i style="width:100%"></i></div>
+    const W = { 'no-detections':
+                  '얼굴이 하나도 검출되지 않았습니다 — 원본이 그대로 출력됐습니다. '
+                  + '임계값(conf)을 낮추거나 영상 회전을 확인하세요.' };
+    const warn = (r.warnings || []).length ? `<div class="warn"><b>확인 필요</b>${
+        r.warnings.map(w => W[w] || w).join('<br>')}</div>` : '';
+    body = `<div class="bar"><i style="width:100%"></i></div>${warn}
       <div class="stats">
         <div><span>처리 시간</span><b>${fmt(r.seconds)}</b></div>
         <div><span>처리 속도</span><b>${r.fps} f/s</b></div>
@@ -206,6 +215,7 @@ function card(j) {
         <div><span>프레임</span><b>${r.frames}</b></div>
         <div><span>검출 박스</span><b>${r.raw_boxes}</b></div>
         <div><span>보간 박스</span><b>${r.filled_boxes}</b></div>
+        <div><span>검출된 프레임</span><b>${(r.detection_rate*100).toFixed(1)}%</b></div>
       </div>
       <div class="meta" style="margin-top:10px">
         검출 ${fmt(t.detect)} · 추적 ${fmt(t.track)} · 렌더 ${fmt(t.render)} ·

@@ -46,12 +46,27 @@ class VideoWriteError(RuntimeError):
     """출력을 신뢰할 수 없음 (인코더 실패, 크기/프레임 수 불일치)."""
 
 
+class DecodeIncompleteError(VideoOpenError):
+    """디코딩이 영상 끝에 도달하기 전에 멈췄음 (손상된 파일, 디코더 문제)."""
+
+
+class DetectionSanityError(RuntimeError):
+    """검출률이 요구 수준에 못 미침 — 설정/입력이 잘못됐을 가능성이 크다."""
+
+
+# 디코딩 누락 허용치. 컨테이너 인덱스와 실제 디코딩 결과는 마지막 GOP 처리
+# 방식 때문에 한두 장 어긋날 수 있어, 그 폭까지는 정상으로 본다.
+DECODE_TOLERANCE = 0.005
+DECODE_TOLERANCE_MIN = 2
+
+
 @dataclass
 class VideoInfo:
     fps: float
     width: int
     height: int
-    frame_count: int      # 컨테이너 메타값. 부정확할 수 있어 진행률 추정에만 쓴다.
+    frame_count: int      # 가장 믿을 만한 프레임 수 (아래 count_source 참고)
+    count_source: str = "container"   # 'packets' | 'container' | 'unknown'
 
 
 @dataclass
@@ -74,6 +89,13 @@ class Result:
     audio: str            # 'ok' | 'no-audio' | 'disabled' | 'ffmpeg-...'
     video: VideoInfo = None
     timing: Timing = None
+    detected_frames: int = 0          # 검출이 하나라도 있었던 프레임 수
+    warnings: tuple = ()              # 결과를 그대로 믿으면 안 되는 사유들
+
+    @property
+    def detection_rate(self):
+        """검출이 잡힌 프레임 비율. 0 이면 원본이 그대로 나갔다는 뜻이다."""
+        return self.detected_frames / self.frames if self.frames else 0.0
 
     @property
     def fps(self):
@@ -127,7 +149,17 @@ def probe(path):
         cap.release()
     if w <= 0 or h <= 0:
         raise VideoOpenError(f"video reports invalid frame size {w}x{h}: {path}")
-    return VideoInfo(fps=fps, width=w, height=h, frame_count=max(0, n))
+
+    # CAP_PROP_FRAME_COUNT 는 추정값이라 틀릴 수 있다. ffprobe 로 컨테이너
+    # 인덱스를 실제로 세면 "몇 장이 들어 있어야 하는가" 를 알 수 있고, 그래야
+    # 디코딩이 중간에 끊긴 것을 잡아낼 수 있다(안 그러면 조용히 통과한다).
+    count, source = max(0, n), ("container" if n > 0 else "unknown")
+    if shutil.which("ffprobe"):
+        pkt, _dur = video_frame_count(path)
+        if pkt:
+            count, source = pkt, "packets"
+    return VideoInfo(fps=fps, width=w, height=h,
+                     frame_count=count, count_source=source)
 
 
 def _unlink(path):
@@ -252,6 +284,70 @@ def _mux_audio(noaudio, original, output, keep_audio=True, expected_frames=None,
     return "ok"
 
 
+def check_decode_complete(decoded, info, allow_partial=False):
+    """디코딩이 영상 끝까지 갔는지 확인.
+
+    ``cap.read()`` 가 False 를 돌려주는 건 "스트림 끝" 과 "디코드 실패" 둘 다다.
+    구분하지 않고 break 하면, 손상된 GOP 나 부분 읽기에서 **영상 뒷부분이 결과물에
+    통째로 없는데 정상 종료**한다. 1·2차 패스의 프레임 수를 비교하는 검사도
+    둘 다 같은 지점에서 끊기면 통과하므로 이걸 못 잡는다.
+
+    실측: 컨테이너에 600프레임이 선언된 파일에서 241프레임만 렌더되고 성공 반환.
+    게다가 CLI 는 잘린 프레임 수로 길이를 계산해 출력하므로 원본이 얼마나 길었는지
+    조차 화면에서 사라진다.
+
+    Returns 경고 문자열 리스트.
+    """
+    if info.count_source == "unknown" or info.frame_count <= 0:
+        log.warning("프레임 수를 확인할 수 없어 디코딩 완결성 검사를 건너뛴다")
+        return ["decode-unverified"]
+
+    missing = info.frame_count - decoded
+    allowed = max(DECODE_TOLERANCE_MIN, int(info.frame_count * DECODE_TOLERANCE))
+    if missing <= allowed:
+        return []
+
+    msg = (f"디코딩이 중간에 끊겼다: {decoded}/{info.frame_count} 프레임 "
+           f"({missing}장 누락, 출처={info.count_source}). 뒷부분이 결과물에서 "
+           f"통째로 빠진다 — 손상된 파일이거나 디코더 문제다.")
+    if allow_partial:
+        log.warning("%s (allow_partial 이라 계속 진행한다)", msg)
+        return [f"decode-partial: {decoded}/{info.frame_count}"]
+    raise DecodeIncompleteError(
+        msg + " 의도한 것이면 allow_partial=True (CLI: --allow-partial).")
+
+
+def check_detections(raw_boxes, detected_frames, total, min_rate=None):
+    """검출 결과가 신뢰할 만한지 확인.
+
+    검출 0건은 예외를 던지지 않는다 — 얼굴이 없는 영상은 정당하게 0 이다.
+    하지만 가중치 손상, 회전된 영상, 잘못된 imgsz, HDR 톤매핑 실패처럼 **설정이
+    틀린 경우도 결과가 똑같이 0** 이고, 그때 원본이 그대로 출력된다. 원인이
+    무엇이든 결과가 조용한 게 문제이므로, 판단은 호출자에게 넘기되 사실은
+    반드시 드러낸다.
+
+    ``min_rate`` 를 주면 그 미만일 때 실패시킨다 (얼굴이 반드시 있는 영상을
+    처리하는 파이프라인용).
+
+    Returns 경고 문자열 리스트.
+    """
+    rate = detected_frames / total if total else 0.0
+    warnings = []
+    if raw_boxes == 0:
+        warnings.append("no-detections")
+        log.error("검출 0건 — 원본이 그대로 출력된다. conf/imgsz/가중치/영상 "
+                  "회전을 확인하라.")
+    elif rate < 0.01:
+        warnings.append(f"low-detection-rate: {rate:.2%}")
+        log.warning("검출률 %.2f%% (%d/%d 프레임) — 비정상적으로 낮다",
+                    rate * 100, detected_frames, total)
+    if min_rate is not None and rate < min_rate:
+        raise DetectionSanityError(
+            f"검출률 {rate:.2%} 가 요구치 {min_rate:.2%} 에 못 미친다 "
+            f"({detected_frames}/{total} 프레임, 박스 {raw_boxes}개)")
+    return warnings
+
+
 class VideoAnonymizer:
     """영상 얼굴 비식별화기.
 
@@ -273,7 +369,8 @@ class VideoAnonymizer:
 
     def process(self, input_path, output_path, method="mosaic", imgsz=960,
                 conf=0.25, iou=0.45, pad=0.15, mosaic_scale=0.06, linger=5,
-                interp=True, batch_size=1, keep_audio=True, progress=None):
+                interp=True, batch_size=1, keep_audio=True, progress=None,
+                allow_partial=False, min_detection_rate=None):
         """영상 한 편을 익명화하고 Result 를 돌려준다.
 
         progress : callable(stage, done, total) | None
@@ -303,13 +400,17 @@ class VideoAnonymizer:
                  os.path.basename(input_path), info.width, info.height,
                  info.fps, batch_size)
         t0 = time.perf_counter()
-        per_frame, raw_boxes, total = self._detect(
+        per_frame, raw_boxes, detected_frames, total = self._detect(
             input_path, imgsz, conf, iou, batch_size, report)
         t_detect = time.perf_counter() - t0
         if total == 0:
             raise VideoOpenError(f"no frames decoded from {input_path}")
-        log.info("      %d frames, %d boxes — %.1fs (%.1f fps)",
-                 total, raw_boxes, t_detect, total / t_detect if t_detect else 0)
+        warnings = check_decode_complete(total, info, allow_partial)
+        warnings += check_detections(raw_boxes, detected_frames, total,
+                                     min_detection_rate)
+        log.info("      %d frames, %d boxes (%d프레임에서 검출) — %.1fs (%.1f fps)",
+                 total, raw_boxes, detected_frames, t_detect,
+                 total / t_detect if t_detect else 0)
 
         # ---- 2차 준비: 추적 + 보간 ----
         frame_dets = defaultdict(list)
@@ -352,9 +453,13 @@ class VideoAnonymizer:
 
         timing = Timing(detect=t_detect, track=t_track, render=t_render,
                         audio=t_audio, total=time.perf_counter() - t_start)
+        if status not in ("ok", "no-audio", "disabled"):
+            warnings.append(f"audio: {status}")
         result = Result(output=output_path, frames=rendered, raw_boxes=raw_boxes,
                         filled_boxes=filled, method=method, audio=status,
-                        video=info, timing=timing)
+                        video=info, timing=timing,
+                        detected_frames=detected_frames,
+                        warnings=tuple(warnings))
         log.info("done: %s | frames=%d boxes=%d(+%d) audio=%s",
                  output_path, rendered, raw_boxes, filled, status)
         log.info("      %.1fs 소요 · %.1f fps · 실시간 대비 %.2fx "
@@ -373,10 +478,10 @@ class VideoAnonymizer:
             raise VideoOpenError(f"cannot open video: {path}")
 
         per_frame, pending = [], []
-        raw_boxes = 0
+        raw_boxes = detected_frames = 0
 
         def flush():
-            nonlocal raw_boxes
+            nonlocal raw_boxes, detected_frames
             if not pending:
                 return
             results = self.detector.detect_batch(
@@ -387,6 +492,7 @@ class VideoAnonymizer:
             for dets in results:
                 per_frame.append(list(dets))
                 raw_boxes += len(dets)
+                detected_frames += bool(dets)
             pending.clear()
 
         idx = 0
@@ -405,7 +511,7 @@ class VideoAnonymizer:
         finally:
             cap.release()
         report("detect", idx)
-        return per_frame, raw_boxes, idx
+        return per_frame, raw_boxes, detected_frames, idx
 
     def _render(self, path, out_path, info, frame_dets, method, pad,
                 mosaic_scale, expected, report):

@@ -141,6 +141,10 @@ def _run(job_id):
                 "frames": res.frames, "raw_boxes": res.raw_boxes,
                 "filled_boxes": res.filled_boxes, "method": res.method,
                 "audio": res.audio,
+                # 결과를 그대로 믿으면 안 되는 사유. UI 가 배너로 띄운다.
+                "warnings": list(res.warnings),
+                "detected_frames": res.detected_frames,
+                "detection_rate": round(res.detection_rate, 4),
                 "fps": round(res.fps, 1),
                 "detect_fps": round(res.detect_fps, 1),
                 "realtime_factor": round(res.realtime_factor, 2),

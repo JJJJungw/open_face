@@ -20,7 +20,7 @@ import sys
 import time
 
 from . import __version__
-from .pipeline import VideoOpenError, VideoWriteError
+from .pipeline import DetectionSanityError, VideoOpenError, VideoWriteError
 
 
 def build_parser():
@@ -61,6 +61,12 @@ def build_parser():
     g.add_argument("--linger", type=int, default=5,
                    help="트랙 소실 후 박스 유지 프레임 수")
     g.add_argument("--no-interp", action="store_true", help="트랙 보간 끄기")
+
+    g = p.add_argument_group("검증")
+    g.add_argument("--allow-partial", action="store_true",
+                   help="디코딩이 중간에 끊겨도 진행 (기본: 실패 처리)")
+    g.add_argument("--min-detection-rate", type=float, default=None, metavar="R",
+                   help="검출된 프레임 비율이 R 미만이면 실패 (예: 0.5)")
 
     g = p.add_argument_group("출력")
     g.add_argument("--no-audio", action="store_true", help="원본 오디오를 합성하지 않음")
@@ -141,9 +147,12 @@ def main(argv=None):
             pad=args.pad, mosaic_scale=args.mosaic_scale, linger=args.linger,
             interp=not args.no_interp, batch_size=args.batch_size,
             keep_audio=not args.no_audio,
+            allow_partial=args.allow_partial,
+            min_detection_rate=args.min_detection_rate,
             progress=ProgressBar(not args.quiet),
         )
-    except (FileNotFoundError, VideoOpenError, VideoWriteError) as e:
+    except (FileNotFoundError, VideoOpenError, VideoWriteError,
+            DetectionSanityError) as e:
         print(f"error: {e}", file=sys.stderr)
         return 1
     except ValueError as e:
@@ -163,11 +172,18 @@ def main(argv=None):
         print(f"  검출 {fmt_dur(t.detect)} ({res.detect_fps:.1f} fps) · "
               f"추적 {fmt_dur(t.track)} · 렌더 {fmt_dur(t.render)} · "
               f"오디오 {fmt_dur(t.audio)}")
-    # 접두사 검사는 새 실패 사유(frame-loss, verify-failed)를 놓친다.
-    # 정상으로 볼 값만 나열하고 나머지는 전부 경고한다.
-    if res.audio not in ("ok", "no-audio", "disabled"):
-        print(f"warning: 오디오를 합성하지 못했다 ({res.audio}). "
-              "영상은 익명화된 상태로 정상 출력됐다.", file=sys.stderr)
+    # 결과를 그대로 믿으면 안 되는 사유는 stdout 요약이 아니라 stderr 로,
+    # 눈에 띄게 낸다. 조용히 지나가면 파이프라인에 그대로 흘러든다.
+    for w in res.warnings:
+        if w == "no-detections":
+            print("warning: 얼굴이 하나도 검출되지 않았다 — 원본이 그대로 "
+                  "출력됐다. conf/imgsz/가중치/영상 회전을 확인하라.",
+                  file=sys.stderr)
+        elif w.startswith("audio:"):
+            print(f"warning: 오디오를 합성하지 못했다 ({w[7:]}). "
+                  "영상은 익명화된 상태로 정상 출력됐다.", file=sys.stderr)
+        else:
+            print(f"warning: {w}", file=sys.stderr)
     return 0
 
 
