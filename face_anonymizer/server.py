@@ -401,8 +401,9 @@ async def create_job(
     ext = os.path.splitext(file.filename or "")[1].lower()
     if ext not in VIDEO_EXT:
         raise HTTPException(400, f"지원하지 않는 확장자: {ext or '(없음)'}")
-    # imgsz 는 stride 배수여야 한다. 클라이언트가 아무 값이나 보내도 여기서 맞춘다.
-    imgsz = max(32, round(imgsz / 32) * 32)
+    # stride 배수 맞추기는 검출기가 한다(geometry.snap_to_stride). 여기서
+    # 또 계산하면 규칙이 두 벌이 되고 실제로 서로 달랐다(round vs ceil).
+    imgsz = max(320, min(int(imgsz), 2048))
 
     jid = uuid.uuid4().hex[:12]
     workdir = os.path.join(JOBS_DIR, jid)

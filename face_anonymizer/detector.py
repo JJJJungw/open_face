@@ -13,7 +13,6 @@ setup_weights.py 로 third_party/YOLO-FaceV2 에 클론해 둔 뒤 사용한다.
 
 import contextlib
 import logging
-import math
 import os
 import sys
 import threading
@@ -22,7 +21,7 @@ import numpy as np
 import torch
 import torchvision
 
-from .geometry import letterbox, unletterbox
+from .geometry import letterbox, snap_to_stride, unletterbox
 
 log = logging.getLogger(__name__)
 
@@ -135,7 +134,7 @@ class FaceDetector:
                  self.device, self.half, self.imgsz, self.stride)
 
     def snap_imgsz(self, imgsz):
-        return max(self.stride, int(math.ceil(imgsz / self.stride) * self.stride))
+        return snap_to_stride(imgsz, self.stride)
 
     # ------------------------------------------------------------------ #
 
@@ -164,7 +163,10 @@ class FaceDetector:
         """
         if not frames:
             return []
-        imgsz = imgsz or self.imgsz
+        # __init__ 에서 스냅한 값(self.imgsz)은 호출자가 imgsz 를 넘기면 무시됐다.
+        # 파이프라인이 매번 원본 값을 넘기므로 스냅이 사실상 적용되지 않았고,
+        # 로그만 "스냅했다" 고 찍혔다. 실제로 쓰는 지점에서 맞춘다.
+        imgsz = snap_to_stride(imgsz or self.imgsz, self.stride)
         conf = self.conf if conf is None else conf
         iou = self.iou if iou is None else iou
 

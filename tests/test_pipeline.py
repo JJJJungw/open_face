@@ -10,6 +10,7 @@ import pytest
 
 from conftest import FakeDetector, face_rect, read_frames, region_is_obscured
 from face_anonymizer import VideoAnonymizer, VideoOpenError
+from face_anonymizer.geometry import snap_to_stride
 from face_anonymizer.anonymize import pad_box
 from face_anonymizer.geometry import letterbox, unletterbox
 from face_anonymizer.pipeline import sane_fps
@@ -136,3 +137,18 @@ def test_pipeline_does_not_need_torch():
     """CI 에서 2GB 짜리 torch 없이 회귀를 잡을 수 있는 근거."""
     import sys
     assert "torch" not in sys.modules
+
+
+def test_snap_to_stride_rounds_up():
+    """항상 위로 올린다 — 내리면 해상도가 줄어 작은 얼굴을 놓치는 쪽으로 틀린다."""
+    assert snap_to_stride(1000, 32) == 1024
+    assert snap_to_stride(1280, 32) == 1280
+    assert snap_to_stride(960, 32) == 960
+    assert snap_to_stride(1, 32) == 32
+    assert snap_to_stride(700, 16) == 704
+    assert snap_to_stride(1000.4, 32) == 1024
+
+
+def test_snap_to_stride_never_below_stride():
+    assert snap_to_stride(0, 32) == 32
+    assert snap_to_stride(-10, 32) == 32

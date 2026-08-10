@@ -97,12 +97,12 @@ def test_download_before_done_is_409(client, make_video):
     assert client.delete(f"/api/jobs/{jid}").status_code == 409
 
 
-def test_imgsz_is_snapped_to_stride_multiple(client, make_video):
-    """클라이언트가 아무 값이나 보내도 32 배수로 맞춰야 forward 가 안 깨진다."""
+def test_imgsz_is_range_clamped(client, make_video):
+    """서버는 범위만 본다. stride 배수 맞추기는 검출기 몫이다(규칙을 두 벌 두지 않는다)."""
     path, n, size = make_video(frames=6)
     client.attach(size)
-    jid = submit(client, path, imgsz="1000").json()["id"]
-    assert server._JOBS[jid].params["imgsz"] == 992
+    jid = submit(client, path, imgsz="99999").json()["id"]
+    assert server._JOBS[jid].params["imgsz"] == 2048
     wait(client, jid)
 
 
@@ -122,8 +122,9 @@ def test_full_lifecycle_and_no_leak(client, tmp_path, make_video):
     assert res["frames"] == n
     assert res["filled_boxes"] >= 2          # 놓친 두 프레임을 보간이 메웠다
     assert res["fps"] > 0 and res["seconds"] > 0
-    # 단계 시간은 짧은 클립에서 반올림으로 0 이 될 수 있다. 합계로 검증한다.
-    assert sum(res["timing"].values()) <= res["seconds"] + 1e-6
+    # 단계 시간은 짧은 클립에서 반올림으로 0 이 될 수 있어 개별 값은 안 본다.
+    # 각 단계가 반올림된 값이라 합이 총계를 몇 ms 넘길 수 있다.
+    assert sum(res["timing"].values()) <= res["seconds"] + 0.01
 
     r = client.get(f"/api/jobs/{jid}/download")
     assert r.status_code == 200

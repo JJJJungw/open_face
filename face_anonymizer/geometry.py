@@ -10,10 +10,23 @@ detector.py 에서 분리해 둔 이유는 두 가지다.
    명시적으로 주고받는 편이 낫다.
 """
 
+import math
+
 import cv2
 import numpy as np
 
 PAD_COLOR = (114, 114, 114)
+
+
+def snap_to_stride(imgsz, stride=32):
+    """추론 해상도를 stride 배수로 올림.
+
+    YOLOv5 계열은 입력이 stride 배수가 아니면 skip-connection concat 에서
+    크기가 어긋난다. 항상 **위로** 올린다 — 내리면 해상도가 줄어 작은 얼굴을
+    놓치는 쪽으로 틀리기 때문이다.
+    """
+    stride = max(1, int(stride))
+    return max(stride, int(math.ceil(int(imgsz) / stride) * stride))
 
 
 def letterbox(im, new, color=PAD_COLOR):
