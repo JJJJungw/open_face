@@ -61,19 +61,39 @@ uvicorn face_anonymizer.server:app --host 0.0.0.0 --port 8000
 | 엔드포인트 | 설명 |
 |---|---|
 | `GET /` | 웹 UI |
-| `GET /api/health` | 모델 로드 여부, 디바이스, 큐 상태 |
-| `POST /api/jobs` | 영상 업로드 → `202` + 작업 id (multipart) |
-| `GET /api/jobs` | 작업 목록 |
-| `GET /api/jobs/{id}` | 진행률 · 단계 · fps · ETA · 완료 시 통계 |
-| `GET /api/jobs/{id}/download` | 결과 영상 |
+| `GET /api/status` | `{ready, busy, job}` — 오케스트레이터용 최소 응답 |
+| `GET /api/health` | 준비 전 **503**. 디바이스·모델 상태·작업 수 |
+| `POST /api/jobs` | 영상 업로드 → `202` + 작업 id. 처리 중이면 **429**, 준비 전이면 **503** |
+| `GET /api/jobs/{id}` | 진행률 · 단계 · fps · ETA · 완료 시 통계와 경고 |
+| `GET /api/jobs/{id}/download` | 결과 영상 (완료 전 409, 파일 만료 410) |
 | `DELETE /api/jobs/{id}` | 작업과 파일 삭제 (진행 중이면 409) |
+| `GET /api/jobs` | 작업 목록 |
+
+**큐는 바깥에 둔다.** 이 컨테이너는 한 번에 한 편만 처리하고 대기열을 갖지 않는다. 처리 중에 요청이 오면 `429` 와 `Retry-After` 를 준다 — 안에 쌓아 두면 오케스트레이터가 이 인스턴스의 실제 부하를 알 수 없어 재시도할지 다른 인스턴스로 보낼지 결정하지 못한다.
+
+호출 흐름은 이렇다.
 
 ```bash
-curl -F file=@in.mp4 -F method=mosaic -F conf=0.4 -F batch_size=32 \
-     http://localhost:8000/api/jobs
-curl http://localhost:8000/api/jobs/<id>
-curl -O -J http://localhost:8000/api/jobs/<id>/download
+# 1. 여유 있는지 확인 (선택)
+curl -s localhost:8000/api/status          # {"ready":true,"busy":false,"job":null}
+
+# 2. 제출 — 바쁘면 429
+curl -sf -F file=@in.mp4 -F method=mosaic -F conf=0.4 -F batch_size=32 \
+     localhost:8000/api/jobs                # {"id":"ab12...","status":"queued"}
+
+# 3. 진행률 폴링
+curl -s localhost:8000/api/jobs/ab12...     # {"status":"running","stage":"detect","overall":31,"fps":98.4,"eta":42}
+
+# 4. 결과 받기
+curl -sf -OJ localhost:8000/api/jobs/ab12.../download
+
+# 5. 정리
+curl -sX DELETE localhost:8000/api/jobs/ab12...
 ```
+
+완료 응답의 `result.warnings` 는 결과를 그대로 믿으면 안 되는 사유다(`no-detections`, `decode-short`, `frame-loss` 등). 비어 있지 않으면 사람이 확인해야 한다.
+
+**모델은 기동 시 미리 올린다**(`FA_PRELOAD`, 기본 1). 첫 요청 때 로드하면 헬스체크는 이미 통과한 상태라 오케스트레이터가 보낸 첫 요청이 모델 로딩 수십 초를 기다린다. 로드에 실패하면 죽지 않고 `/api/health` 가 `503` 과 사유(`model_error`)를 돌려준다 — 크래시 루프로 재시작하면 로그가 흘러가 원인을 찾기 어렵다.
 
 **추론은 한 번에 하나만 돈다.** GPU 한 장에 검출기 하나를 올려 두고 워커 스레드 하나가 큐를 소비한다. 요청마다 스레드를 띄우면 VRAM 이 터지거나 서로 느려지기만 하고, 총 처리량은 오히려 직렬화하는 쪽이 높다. 프로세스를 여러 개 띄워도(`--workers N`) 작업 디렉터리의 잠금 파일로 직렬화한다.
 

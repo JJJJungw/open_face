@@ -5,10 +5,11 @@
 
 설계상 못 박아 둔 것.
 
-1. **추론은 한 번에 하나만.** GPU 는 한 장뿐이고 검출기도 하나만 올린다.
-   요청마다 스레드를 띄우면 VRAM 이 터지거나 서로 느려지기만 한다. 워커
-   스레드를 하나만 두고 나머지는 큐에서 대기시킨다 — 총 처리량은 오히려 는다.
-   프로세스를 여러 개 띄워도(`--workers N`) 파일 락으로 직렬화한다.
+1. **한 번에 한 편. 대기열은 갖지 않는다.** 이 서비스는 큐를 바깥(오케스트레이터)
+   에 두는 것을 전제로 한다. 처리 중에 요청이 오면 **429 로 거절**하고
+   ``Retry-After`` 를 준다 — 안에 쌓아 두면 바깥 큐가 이 인스턴스의 실제 부하를
+   알 수 없고, 재시도할지 다른 인스턴스로 보낼지 결정하지 못한다.
+   프로세스를 여러 개 띄워도(`--workers N`) 파일 락으로 GPU 를 직렬화한다.
 2. **작업 상태는 디스크에.** 작업별 디렉터리에 ``job.json`` 을 둔다.
    전역 dict 에만 두면 (a) 재시작 시 전부 사라져 폴링 중인 클라이언트가 404 를
    받고, (b) ``--workers 2`` 로 띄우는 순간 업로드는 A 프로세스, 폴링은 B
@@ -23,6 +24,7 @@
     FA_MAX_UPLOAD_MB   업로드 상한         (기본: 2048)
     FA_JOB_TTL_MIN     완료 후 자동 삭제   (기본: 120, 0이면 안 지움)
     FA_SWEEP_SEC       정리 주기           (기본: 300)
+    FA_PRELOAD         기동 시 모델 로드   (기본: 1)
 
 실행
     uvicorn face_anonymizer.server:app --host 0.0.0.0 --port 8000
@@ -45,7 +47,7 @@ try:
 except ImportError:                   # pragma: no cover
     fcntl = None
 
-from fastapi import FastAPI, File, Form, HTTPException, UploadFile
+from fastapi import FastAPI, File, Form, HTTPException, Response, UploadFile
 from fastapi.responses import FileResponse, HTMLResponse
 
 from .anonymize import METHODS
@@ -60,6 +62,8 @@ JOBS_DIR = os.path.abspath(os.environ.get("FA_JOBS_DIR", "jobs"))
 MAX_BYTES = int(os.environ.get("FA_MAX_UPLOAD_MB", 2048)) * 1024 * 1024
 JOB_TTL = int(os.environ.get("FA_JOB_TTL_MIN", 120)) * 60
 SWEEP_SEC = int(os.environ.get("FA_SWEEP_SEC", 300))
+PRELOAD = os.environ.get("FA_PRELOAD", "1") not in ("0", "false", "False")
+RETRY_AFTER = int(os.environ.get("FA_RETRY_AFTER", 30))
 STATE_FILE = "job.json"
 GPU_LOCK_FILE = ".gpu.lock"
 PROGRESS_FLUSH_SEC = 0.5      # 진행률을 디스크에 쓰는 최소 간격
@@ -75,17 +79,37 @@ _LOCK = threading.Lock()
 _anonymizer = None
 _anon_lock = threading.Lock()
 _sweeper = None
+_model_error = None      # 기동 시 모델 로드 실패 사유
+_current = None          # 이 프로세스가 지금 붙잡고 있는 작업 id
 
 
 def get_anonymizer():
-    """검출기 싱글턴. 첫 요청 때 한 번만 올린다 (모델 로드가 수 초 걸린다)."""
+    """검출기 싱글턴.
+
+    기본적으로 기동 시(lifespan) 미리 올린다. 첫 요청 때 로드하면 헬스체크는
+    이미 통과한 상태라, 오케스트레이터가 보낸 첫 요청이 모델 로딩 수십 초를
+    기다리게 된다.
+    """
     global _anonymizer
     with _anon_lock:
         if _anonymizer is None:
             from .pipeline import VideoAnonymizer
-            log.info("loading detector (device=%s imgsz=%d)", DEVICE, IMGSZ)
+            log.info("검출기 로드 중 (device=%s imgsz=%d)", DEVICE, IMGSZ)
             _anonymizer = VideoAnonymizer(device=DEVICE, imgsz=IMGSZ)
+            log.info("검출기 준비 완료")
         return _anonymizer
+
+
+def is_ready():
+    """추론을 받을 수 있는 상태인가."""
+    return _anonymizer is not None and _model_error is None
+
+
+def is_busy():
+    """지금 작업을 붙잡고 있는가. 바깥 큐가 이 값으로 라우팅을 정한다."""
+    with _LOCK:
+        j = _JOBS.get(_current) if _current else None
+        return j is not None and j.status in ("queued", "running")
 
 
 @dataclass
@@ -342,13 +366,21 @@ def _run(job_id):
 
 @asynccontextmanager
 async def lifespan(_app):
-    global _sweeper
+    global _sweeper, _model_error
     os.makedirs(JOBS_DIR, exist_ok=True)
     recover_orphans()
     if SWEEP_SEC > 0 and _sweeper is None:
         _sweeper = threading.Thread(target=_sweep_loop, daemon=True,
                                     name="sweeper")
         _sweeper.start()
+    if PRELOAD:
+        # 여기서 죽이지 않고 사유를 남긴다. 크래시 루프로 재시작하면 로그가
+        # 흘러가서 왜 안 뜨는지 알기 어렵다. health 가 503 으로 이유를 알려준다.
+        try:
+            get_anonymizer()
+        except Exception as e:                  # noqa: BLE001
+            _model_error = f"{type(e).__name__}: {e}"
+            log.exception("모델 로드 실패 — 준비되지 않은 상태로 뜬다")
     yield
 
 
@@ -360,12 +392,25 @@ def index():
     return INDEX_HTML
 
 
+@app.get("/api/status")
+def status():
+    """오케스트레이터용 최소 응답. 디스크를 훑지 않는다."""
+    return {"ready": is_ready(), "busy": is_busy(), "job": _current}
+
+
 @app.get("/api/health")
-def health():
-    loaded = _anonymizer is not None
-    info = {"status": "ok", "model_loaded": loaded,
+def health(response: Response):
+    ready = is_ready()
+    if not ready:
+        # 준비 전에는 컨테이너를 healthy 로 보이게 하면 안 된다. 오케스트레이터가
+        # 트래픽을 보내고, 그 요청이 모델 로딩을 통째로 기다리게 된다.
+        response.status_code = 503
+    info = {"status": "ok" if ready else "not-ready",
+            "ready": ready, "busy": is_busy(), "job": _current,
+            "model_loaded": _anonymizer is not None, "model_error": _model_error,
             "device": DEVICE or "auto", "imgsz": IMGSZ,
             "methods": list(METHODS)}
+    loaded = _anonymizer is not None
     if loaded:
         # 검출기는 주입 가능하므로 FaceDetector 의 속성이 있다고 단정하지 않는다.
         d = _anonymizer.detector
@@ -405,6 +450,13 @@ async def create_job(
     # 또 계산하면 규칙이 두 벌이 되고 실제로 서로 달랐다(round vs ceil).
     imgsz = max(320, min(int(imgsz), 2048))
 
+    if not is_ready():
+        raise HTTPException(503, f"모델이 준비되지 않았다: {_model_error or '로딩 중'}")
+    # 대기열을 갖지 않는다. 바깥 큐가 재시도/라우팅을 정한다.
+    if is_busy():
+        raise HTTPException(429, "처리 중이다. 잠시 후 다시 보내라",
+                            headers={"Retry-After": str(RETRY_AFTER)})
+
     jid = uuid.uuid4().hex[:12]
     workdir = os.path.join(JOBS_DIR, jid)
     os.makedirs(workdir, exist_ok=True)
@@ -433,8 +485,16 @@ async def create_job(
                           batch_size=batch_size, pad=pad,
                           mosaic_scale=mosaic_scale, linger=linger,
                           interp=interp, keep_audio=keep_audio))
+    global _current
     with _LOCK:
+        # 붙잡기와 바쁨 판정이 같은 락 안에 있어야 동시 요청 둘 다 통과하지 않는다.
+        held = _JOBS.get(_current) if _current else None
+        if held is not None and held.status in ("queued", "running"):
+            shutil.rmtree(workdir, ignore_errors=True)
+            raise HTTPException(429, "처리 중이다. 잠시 후 다시 보내라",
+                                headers={"Retry-After": str(RETRY_AFTER)})
         _JOBS[jid] = job
+        _current = jid
     save_job(job)
     # 응답 스냅샷은 제출 **전에** 뜬다. 제출 후에 뜨면 워커가 이미 시작해
     # status 가 running 으로 보일 수 있다 (경합).

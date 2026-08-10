@@ -176,7 +176,9 @@ go.onclick = () => {
     else {
       let m = xhr.responseText;
       try { m = JSON.parse(m).detail; } catch (_) {}
-      alert('실패: ' + m);
+      if (xhr.status === 429) m = '다른 영상을 처리 중입니다. 끝난 뒤 다시 시도하세요.';
+      else if (xhr.status === 503) m = '서버가 아직 준비되지 않았습니다. ' + m;
+      alert(m);
     }
   };
   xhr.onerror = () => { go.textContent = '처리 시작'; go.disabled = false;

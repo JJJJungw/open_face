@@ -28,6 +28,8 @@ def client(tmp_path, monkeypatch):
     monkeypatch.setattr(server, "JOBS_DIR", str(jobs))
     monkeypatch.setattr(server, "_JOBS", {})
     monkeypatch.setattr(server, "_anonymizer", None)
+    monkeypatch.setattr(server, "_current", None)
+    monkeypatch.setattr(server, "_model_error", None)
 
     def attach(size, miss_frames=()):
         anon = VideoAnonymizer(detector=FakeDetector(size, miss_frames))
@@ -77,6 +79,7 @@ def test_health_survives_injected_detector(client):
     ({"file": ("a.mp4", b"x")}, {"conf": "1.5"}),         # 범위 밖 임계값
 ])
 def test_rejects_bad_input(client, files, data):
+    client.attach((320, 240))            # 준비된 서버 기준 (아니면 503 이 먼저)
     assert client.post("/api/jobs", files=files, data=data).status_code == 400
 
 
@@ -142,14 +145,6 @@ def test_full_lifecycle_and_no_leak(client, tmp_path, make_video):
     assert not (tmp_path / "jobs" / jid).exists()
 
 
-def test_jobs_are_serialized(client, make_video):
-    """GPU 는 하나뿐이다 — 동시에 두 건이 추론에 들어가면 안 된다."""
-    path, n, size = make_video(frames=12)
-    client.attach(size)
-    ids = [submit(client, path).json()["id"] for _ in range(3)]
-    for jid in ids:
-        assert wait(client, jid)["status"] == "done"
-    assert server._EXEC._max_workers == 1
 
 
 # ── 상태 영속화 ──────────────────────────────────────────────────────────────
@@ -234,3 +229,77 @@ def test_missing_output_reports_410_not_500(client, tmp_path, make_video):
 @pytest.mark.parametrize("bad", ["../etc", "..", "a/b", ".hidden"])
 def test_job_id_traversal_is_rejected(client, bad):
     assert client.get(f"/api/jobs/{bad}").status_code in (404, 400, 405)
+
+
+# ── 한 번에 한 편 · 대기열 없음 ──────────────────────────────────────────────
+#
+# 큐는 바깥(오케스트레이터)에 둔다. 안에 쌓아 두면 바깥에서 이 인스턴스의 실제
+# 부하를 알 수 없고, 재시도할지 다른 인스턴스로 보낼지 결정하지 못한다.
+
+class SlowDetector:
+    """작업이 확실히 진행 중인 상태를 만들기 위한 느린 검출기."""
+
+    def __init__(self, delay=0.05):
+        self.delay = delay
+
+    def detect_batch(self, frames, imgsz=None, conf=None, iou=None):
+        time.sleep(self.delay)
+        return [[] for _ in frames]
+
+
+def test_second_request_while_busy_is_429(client, make_video, monkeypatch):
+    path, n, size = make_video(frames=40)
+    anon = VideoAnonymizer(detector=SlowDetector())
+    monkeypatch.setattr(server, "get_anonymizer", lambda: anon)
+    monkeypatch.setattr(server, "_anonymizer", anon)
+
+    first = submit(client, path, batch_size="1")
+    assert first.status_code == 202
+
+    second = submit(client, path, batch_size="1")
+    assert second.status_code == 429
+    assert second.headers.get("Retry-After")
+
+    wait(client, first.json()["id"], timeout=60)
+
+
+def test_accepts_again_after_finishing(client, make_video):
+    path, n, size = make_video(frames=8)
+    client.attach(size)
+
+    a = submit(client, path)
+    assert a.status_code == 202
+    wait(client, a.json()["id"])
+
+    b = submit(client, path)
+    assert b.status_code == 202
+    wait(client, b.json()["id"])
+
+
+def test_status_endpoint_reports_ready_and_busy(client, make_video):
+    path, n, size = make_video(frames=8)
+    client.attach(size)
+
+    s = client.get("/api/status").json()
+    assert s["ready"] is True and s["busy"] is False
+
+    jid = submit(client, path).json()["id"]
+    wait(client, jid)
+    assert client.get("/api/status").json()["busy"] is False
+
+
+def test_health_is_503_before_model_is_ready(client):
+    server._anonymizer = None
+    r = client.get("/api/health")
+    assert r.status_code == 503
+    assert r.json()["ready"] is False
+
+
+def test_upload_rejected_when_model_failed(client, make_video):
+    path, n, size = make_video(frames=4)
+    server._anonymizer = None
+    server._model_error = "RuntimeError: 가중치 없음"
+
+    r = submit(client, path)
+    assert r.status_code == 503
+    assert "가중치 없음" in r.json()["detail"]
