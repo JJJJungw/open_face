@@ -109,9 +109,10 @@ def test_timeout_falls_back_to_silent_video(tmp_path, make_video, monkeypatch):
     out = tmp_path / "out.mp4"
 
     real = P._run
+    P.pick_encoder()                       # 인코더 판정은 먼저 끝내 둔다
     monkeypatch.setattr(P, "_run",
                         lambda cmd, timeout=P.FFMPEG_TIMEOUT:
-                        None if cmd[0] == "ffmpeg" else real(cmd, timeout))
+                        None if "-movflags" in cmd else real(cmd, timeout))
 
     res = run(inp, out, size)
 

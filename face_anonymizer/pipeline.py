@@ -54,10 +54,25 @@ class DetectionSanityError(RuntimeError):
     """검출률이 요구 수준에 못 미침 — 설정/입력이 잘못됐을 가능성이 크다."""
 
 
-# 디코딩 누락 허용치. 컨테이너 인덱스와 실제 디코딩 결과는 마지막 GOP 처리
-# 방식 때문에 한두 장 어긋날 수 있어, 그 폭까지는 정상으로 본다.
-DECODE_TOLERANCE = 0.005
-DECODE_TOLERANCE_MIN = 2
+# 디코딩 누락 판정. 서비스에서는 **정상 영상을 거부하는 쪽이 더 큰 사고**라,
+# 명백한 절단일 때만 실패시키고 그 사이는 경고로만 남긴다.
+#
+#   누락 <= WARN      : 정상 (컨테이너 메타 오차, 마지막 GOP 처리 차이)
+#   WARN < 누락 < FAIL: 경고 ('decode-short')
+#   누락 >= FAIL      : 실패 (DecodeIncompleteError)
+DECODE_WARN_RATIO = 0.02
+DECODE_FAIL_RATIO = 0.20
+DECODE_TOLERANCE_MIN = 5      # 짧은 영상에서 비율만으로 판단하지 않게
+
+# 출력 인코딩. mp4v(MPEG-4 Part 2)는 OpenCV VideoWriter 가 쓸 수 있는 사실상
+# 유일한 코덱인데, 같은 화질에 H.264 대비 약 9.5배 크다(1280x720 실측).
+# 어차피 ffmpeg 를 거치므로 그 단계에서 H.264 로 다시 뜬다.
+DEFAULT_CRF = int(os.environ.get("FA_CRF", "23"))
+ENCODER_CANDIDATES = (
+    # (인코더, 품질 옵션 이름, 추가 옵션) — 앞에서부터 되는 것을 쓴다.
+    ("h264_nvenc", "-cq", ("-preset", "p4")),      # NVIDIA GPU
+    ("libx264", "-crf", ("-preset", "veryfast")),  # CPU
+)
 
 
 @dataclass
@@ -150,14 +165,18 @@ def probe(path):
     if w <= 0 or h <= 0:
         raise VideoOpenError(f"video reports invalid frame size {w}x{h}: {path}")
 
-    # CAP_PROP_FRAME_COUNT 는 추정값이라 틀릴 수 있다. ffprobe 로 컨테이너
-    # 인덱스를 실제로 세면 "몇 장이 들어 있어야 하는가" 를 알 수 있고, 그래야
-    # 디코딩이 중간에 끊긴 것을 잡아낼 수 있다(안 그러면 조용히 통과한다).
+    # 기대 프레임 수는 **재생 길이 x fps** 로 잡는다.
+    #
+    # 패킷 수(-count_packets)를 쓰면 안 된다. 앞뒤를 잘라낸 영상은 컨테이너에
+    # edit list 가 붙어 패킷은 그대로 남고 재생 대상만 줄어든다. 실측: 앞 0.7초를
+    # 잘라낸 파일이 패킷 150개, 실제 디코딩 129프레임 — 멀쩡한 영상인데 21장이
+    # 누락된 것처럼 보인다. 아이폰/편집 앱을 거친 영상 상당수가 이 형태다.
+    # format.duration 은 edit list 가 반영된 값이라 이 함정을 피한다.
     count, source = max(0, n), ("container" if n > 0 else "unknown")
     if shutil.which("ffprobe"):
-        pkt, _dur = video_frame_count(path)
-        if pkt:
-            count, source = pkt, "packets"
+        dur = video_duration(path)
+        if dur and fps > 0:
+            count, source = int(round(dur * fps)), "duration"
     return VideoInfo(fps=fps, width=w, height=h,
                      frame_count=count, count_source=source)
 
@@ -188,6 +207,61 @@ def has_audio(path, timeout=FFMPEG_TIMEOUT):
     return bool(p.stdout.strip())
 
 
+def video_duration(path, timeout=FFMPEG_TIMEOUT):
+    """**비디오 스트림**의 재생 길이(초).
+
+    format.duration 을 쓰면 안 된다. 그건 모든 스트림 중 가장 긴 것이라,
+    오디오가 영상보다 길면 프레임 수를 과대추정한다(실측: 영상 1.33초 +
+    오디오 2.0초 파일에서 20프레임을 30프레임으로 계산해 정상 영상을 거부).
+    마이크가 늦게 끊긴 녹화물에서 흔한 형태다.
+
+    스트림 길이도 edit list 는 반영하므로, 앞뒤를 잘라낸 영상에서도 맞는다.
+    """
+    for entry, sel in (("stream=duration", ["-select_streams", "v:0"]),
+                       ("format=duration", [])):
+        p = _run(["ffprobe", "-v", "error", *sel, "-show_entries", entry,
+                  "-of", "default=nk=1:nw=1", path], timeout)
+        if p is None or p.returncode != 0:
+            continue
+        try:
+            d = float(p.stdout.strip())
+        except ValueError:
+            continue
+        if math.isfinite(d) and d > 0:
+            return d
+    return None
+
+
+_encoder = None
+
+
+def pick_encoder(timeout=60):
+    """쓸 수 있는 H.264 인코더를 한 번만 골라 캐시한다.
+
+    NVENC 는 ffmpeg 빌드에 이름이 있어도 드라이버/GPU 가 없으면 실행 시점에
+    실패한다. 그래서 목록 확인이 아니라 **아주 작은 실제 인코딩**으로 판정한다.
+    30분짜리를 돌리다 실패하는 것보다 0.2초를 쓰는 편이 낫다.
+
+    Returns (encoder, quality_flag, extra_opts) | None
+    """
+    global _encoder
+    if _encoder is not None:
+        return _encoder or None
+    forced = os.environ.get("FA_ENCODER")
+    cands = [c for c in ENCODER_CANDIDATES if not forced or c[0] == forced]
+    for enc, qflag, extra in cands:
+        p = _run(["ffmpeg", "-v", "error", "-y", "-f", "lavfi",
+                  "-i", "testsrc=duration=0.1:size=64x64:rate=10",
+                  "-c:v", enc, *extra, "-f", "null", "-"], timeout)
+        if p is not None and p.returncode == 0:
+            log.info("출력 인코더: %s", enc)
+            _encoder = (enc, qflag, extra)
+            return _encoder
+    log.warning("쓸 수 있는 H.264 인코더가 없다 — mp4v 원본을 그대로 내보낸다")
+    _encoder = ()
+    return None
+
+
 def video_frame_count(path, timeout=FFMPEG_TIMEOUT):
     """파일에 실제로 들어 있는 비디오 프레임 수와 길이.
 
@@ -214,22 +288,25 @@ def video_frame_count(path, timeout=FFMPEG_TIMEOUT):
     return n, d
 
 
-def _mux_audio(noaudio, original, output, keep_audio=True, expected_frames=None,
-               timeout=FFMPEG_TIMEOUT):
-    """원본 오디오를 익명화 영상에 합성.
+def finalize_output(noaudio, original, output, keep_audio=True,
+                    expected_frames=None, crf=DEFAULT_CRF, timeout=FFMPEG_TIMEOUT):
+    """중간 산출물을 최종 결과물로 만든다 — H.264 재인코딩 + 오디오 합성 + 검증.
 
-    세 가지를 못 박는다.
+    네 가지를 못 박는다.
 
     1. **익명화된 프레임을 한 장도 잃지 않는다.** 예전에는 ``-shortest`` 를 썼는데
        이건 짧은 쪽에 맞춰 자른다 — 오디오가 영상보다 짧으면 잘리는 건 **영상**
        이다. ffmpeg 는 리턴코드 0 을 주고 파일도 멀쩡해 보여서, 20초/600프레임
-       결과물이 10초/300프레임으로 잘린 채 "ok" 로 보고됐다. 이제 ``-shortest``
-       를 쓰지 않고, 합성 결과의 프레임 수를 세어 원본과 다르면 합성을 버린다.
-    2. **검증 전에는 무음본을 지우지 않는다.** 합성은 임시 파일에 하고, 통과했을
+       결과물이 10초/300프레임으로 잘린 채 "ok" 로 보고됐다. 이제 프레임 수를
+       세어 원본과 다르면 결과를 버린다.
+    2. **검증 전에는 무음본을 지우지 않는다.** 작업은 임시 파일에 하고, 통과했을
        때만 출력 경로로 옮긴다. 어떤 경로로 실패하든 익명화된 영상은 반드시
-       ``output`` 에 남는다 — 오디오가 없어서 결과물이 통째로 없는 게 최악이다.
-    3. **매달리지 않는다.** ffmpeg/ffprobe 는 손상된 스트림이나 네트워크 저장소
-       에서 영원히 블록될 수 있다. 서버에서는 그게 곧 큐 전체의 정지다.
+       ``output`` 에 남는다 — 오디오나 코덱 때문에 결과물이 통째로 없는 게 최악이다.
+    3. **H.264 로 다시 뜬다.** OpenCV VideoWriter 가 쓸 수 있는 mp4v 는 같은
+       화질에 H.264 대비 약 9.5배 크다(1280x720 실측). 다운로드 대역폭과 대기
+       시간이 그만큼 늘고, 재생 호환성도 떨어진다. GPU 가 있으면 NVENC 라
+       비용도 거의 없다.
+    4. **매달리지 않는다.** 서버는 워커가 하나라 한 건이 매달리면 큐 전체가 정지한다.
 
     반환값: 'ok' | 'no-audio' | 'disabled' | 'ffmpeg-missing' | 'ffprobe-failed'
             | 'ffmpeg-timeout' | 'ffmpeg-failed: ...' | 'verify-failed'
@@ -239,49 +316,61 @@ def _mux_audio(noaudio, original, output, keep_audio=True, expected_frames=None,
         shutil.move(noaudio, output)
         return reason
 
-    if not keep_audio:
-        return fallback("disabled")
     if not (shutil.which("ffmpeg") and shutil.which("ffprobe")):
-        log.warning("ffmpeg/ffprobe 없음 — 오디오 없이 출력한다")
+        log.warning("ffmpeg/ffprobe 없음 — 원본 코덱 그대로, 오디오 없이 출력한다")
         return fallback("ffmpeg-missing")
 
-    audio = has_audio(original, timeout)
-    if audio is None:
-        return fallback("ffprobe-failed")
-    if not audio:
-        return fallback("no-audio")
+    status = "ok"
+    if not keep_audio:
+        status = "disabled"
+    else:
+        audio = has_audio(original, timeout)
+        if audio is None:
+            status = "ffprobe-failed"
+        elif not audio:
+            status = "no-audio"
+
+    enc = pick_encoder()
+    if enc is None:
+        return fallback("ffmpeg-missing")
+    encoder, qflag, extra = enc
 
     root, ext = os.path.splitext(noaudio)
-    muxed = root + ".muxed" + (ext or ".mp4")
-    # -shortest 없음(위 1번). +faststart 는 moov 를 앞으로 옮겨 브라우저가
-    # 전체를 받기 전에 재생을 시작할 수 있게 한다 — 웹 UI 미리보기용.
-    cmd = ["ffmpeg", "-y", "-i", noaudio, "-i", original,
-           "-c:v", "copy", "-map", "0:v:0", "-map", "1:a:0",
-           "-movflags", "+faststart", muxed]
+    out_tmp = root + ".final" + (ext or ".mp4")
+    cmd = ["ffmpeg", "-y", "-v", "error", "-i", noaudio]
+    if status == "ok":
+        cmd += ["-i", original, "-map", "0:v:0", "-map", "1:a:0", "-c:a", "aac"]
+    else:
+        cmd += ["-map", "0:v:0", "-an"]
+    # -shortest 없음(위 1번). +faststart 는 moov 를 앞으로 옮겨 부분 다운로드
+    # 상태에서도 재생이 시작되게 한다.
+    cmd += ["-c:v", encoder, qflag, str(crf), *extra, "-pix_fmt", "yuv420p",
+            "-movflags", "+faststart", out_tmp]
+
     p = _run(cmd, timeout)
     if p is None:
-        _unlink(muxed)
+        _unlink(out_tmp)
         return fallback("ffmpeg-timeout")
-    if p.returncode != 0 or not os.path.exists(muxed) or os.path.getsize(muxed) == 0:
-        _unlink(muxed)
-        log.warning("ffmpeg 실패 (%s) — 오디오 없이 출력한다", p.returncode)
+    if p.returncode != 0 or not os.path.exists(out_tmp) or os.path.getsize(out_tmp) == 0:
+        _unlink(out_tmp)
+        log.warning("ffmpeg 실패 (%s) — 원본 코덱 그대로 출력한다", p.returncode)
         return fallback(f"ffmpeg-failed: {p.stderr[-200:].strip()}")
 
     if expected_frames is not None:
-        got, _dur = video_frame_count(muxed, timeout)
+        got, _dur = video_frame_count(out_tmp, timeout)
         if got is None:
-            _unlink(muxed)
-            log.warning("합성 결과를 검증할 수 없다 — 무음본을 쓴다")
+            _unlink(out_tmp)
+            log.warning("결과물을 검증할 수 없다 — 무음본을 쓴다")
             return fallback("verify-failed")
         if got != expected_frames:
-            _unlink(muxed)
-            log.warning("합성 결과가 %d/%d 프레임 — 합성을 버리고 무음본을 쓴다",
+            _unlink(out_tmp)
+            log.warning("결과물이 %d/%d 프레임 — 버리고 무음본을 쓴다",
                         got, expected_frames)
             return fallback(f"frame-loss: {got}/{expected_frames}")
 
-    shutil.move(muxed, output)
+    shutil.move(out_tmp, output)
     os.remove(noaudio)
-    return "ok"
+    return status
 
 
 def check_decode_complete(decoded, info, allow_partial=False):
@@ -302,17 +391,25 @@ def check_decode_complete(decoded, info, allow_partial=False):
         log.warning("프레임 수를 확인할 수 없어 디코딩 완결성 검사를 건너뛴다")
         return ["decode-unverified"]
 
-    missing = info.frame_count - decoded
-    allowed = max(DECODE_TOLERANCE_MIN, int(info.frame_count * DECODE_TOLERANCE))
-    if missing <= allowed:
+    expected = info.frame_count
+    missing = expected - decoded
+    if missing <= max(DECODE_TOLERANCE_MIN, expected * DECODE_WARN_RATIO):
         return []
 
-    msg = (f"디코딩이 중간에 끊겼다: {decoded}/{info.frame_count} 프레임 "
-           f"({missing}장 누락, 출처={info.count_source}). 뒷부분이 결과물에서 "
-           f"통째로 빠진다 — 손상된 파일이거나 디코더 문제다.")
+    ratio = missing / expected
+    detail = (f"{decoded}/{expected} 프레임 ({missing}장 누락, "
+              f"{ratio:.1%}, 출처={info.count_source})")
+    if ratio < DECODE_FAIL_RATIO:
+        # 이 구간은 편집된 파일의 메타 오차일 수도, 진짜 손실일 수도 있다.
+        # 서비스에서 정상 영상을 거부하는 대가가 더 크므로 통과시키되 남긴다.
+        log.warning("디코딩 프레임 수가 예상보다 적다: %s", detail)
+        return [f"decode-short: {decoded}/{expected}"]
+
+    msg = (f"디코딩이 중간에 끊겼다: {detail}. 뒷부분이 결과물에서 통째로 "
+           f"빠진다 — 손상된 파일이거나 디코더 문제다.")
     if allow_partial:
         log.warning("%s (allow_partial 이라 계속 진행한다)", msg)
-        return [f"decode-partial: {decoded}/{info.frame_count}"]
+        return [f"decode-partial: {decoded}/{expected}"]
     raise DecodeIncompleteError(
         msg + " 의도한 것이면 allow_partial=True (CLI: --allow-partial).")
 
@@ -370,7 +467,7 @@ class VideoAnonymizer:
     def process(self, input_path, output_path, method="mosaic", imgsz=960,
                 conf=0.25, iou=0.45, pad=0.15, mosaic_scale=0.06, linger=5,
                 interp=True, batch_size=1, keep_audio=True, progress=None,
-                allow_partial=False, min_detection_rate=None):
+                allow_partial=False, min_detection_rate=None, crf=DEFAULT_CRF):
         """영상 한 편을 익명화하고 Result 를 돌려준다.
 
         progress : callable(stage, done, total) | None
@@ -431,7 +528,7 @@ class VideoAnonymizer:
             log.warning("interp=False 라 linger=%d 는 적용되지 않는다", linger)
 
         # ---- 3차: 렌더 + 오디오 ----
-        log.info("[3/3] rendering (%s)", method)
+        log.info("[3/3] rendering (%s) + 인코딩", method)
         # 중간 산출물은 출력 파일 옆 임시 디렉터리에. 같은 폴더를 노리는
         # 동시 작업끼리 서로를 덮어쓰지 않게 한다.
         tmpdir = tempfile.mkdtemp(prefix=".anon-", dir=outdir)
@@ -445,8 +542,8 @@ class VideoAnonymizer:
             log.info("      %d frames — %.1fs (%.1f fps)", rendered, t_render,
                      rendered / t_render if t_render else 0)
             t0 = time.perf_counter()
-            status = _mux_audio(noaudio, input_path, output_path, keep_audio,
-                                expected_frames=rendered)
+            status = finalize_output(noaudio, input_path, output_path, keep_audio,
+                                     expected_frames=rendered, crf=crf)
             t_audio = time.perf_counter() - t0
         finally:
             shutil.rmtree(tmpdir, ignore_errors=True)

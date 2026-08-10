@@ -26,16 +26,17 @@ class NoFaceDetector:
 
 def run(src, out, size, detector=None, **kw):
     a = VideoAnonymizer(detector=detector or FakeDetector(size))
-    return a.process(str(src), str(out), batch_size=8, keep_audio=False, **kw)
+    kw.setdefault("keep_audio", False)
+    return a.process(str(src), str(out), batch_size=8, **kw)
 
 
 # ── 디코딩 완결성 ────────────────────────────────────────────────────────────
 
-def test_probe_prefers_packet_count(make_video):
-    """ffprobe 로 실제 패킷을 세면 컨테이너 추정값보다 믿을 수 있다."""
+def test_probe_uses_video_stream_duration(make_video):
+    """기대 프레임 수는 비디오 스트림 길이 x fps 로 잡는다."""
     src, n, _ = make_video(frames=30)
     info = probe(src)
-    assert info.count_source in ("packets", "container")
+    assert info.count_source in ("duration", "container")
     assert info.frame_count == n
 
 
@@ -128,3 +129,90 @@ def test_detection_rate_counts_frames_not_boxes(tmp_path, make_video):
 
     assert res.detected_frames == n - 4
     assert res.detection_rate == pytest.approx((n - 4) / n)
+
+
+# ── 실제 파일에서 오탐이 나지 않는가 ─────────────────────────────────────────
+#
+# 검증이 지나치게 빡빡하면 정상 영상을 거부한다. 서비스에서는 그게 더 큰 사고라,
+# 아래 두 형태는 반드시 통과해야 한다.
+
+import shutil as _shutil
+import subprocess as _sp
+
+ffmpeg_only = pytest.mark.skipif(
+    not (_shutil.which("ffmpeg") and _shutil.which("ffprobe")),
+    reason="ffmpeg/ffprobe 없음")
+
+
+@ffmpeg_only
+def test_trimmed_video_is_not_rejected(tmp_path, make_video):
+    """앞부분을 잘라낸 영상(edit list)을 거부하면 안 된다.
+
+    컨테이너에 패킷은 그대로 남고 재생 대상만 줄어든다. 실측: 앞 0.5초를 자른
+    파일이 패킷 30개 / 실제 디코딩 22프레임. 패킷 수를 기준으로 삼으면 멀쩡한
+    영상이 '8장 누락'으로 보인다. 아이폰·편집 앱을 거친 영상 상당수가 이 형태다.
+    """
+    src, n, size = make_video(frames=30, fps=15.0)
+    h264 = tmp_path / "src264.mp4"
+    trimmed = tmp_path / "trimmed.mp4"
+    _sp.run(["ffmpeg", "-v", "error", "-y", "-i", str(src), "-c:v", "libx264",
+             "-g", "250", "-crf", "23", "-preset", "veryfast", str(h264)],
+            check=True)
+    _sp.run(["ffmpeg", "-v", "error", "-y", "-ss", "0.5", "-i", str(h264),
+             "-c", "copy", str(trimmed)], check=True)
+
+    res = run(trimmed, tmp_path / "out.mp4", size)
+
+    assert not [w for w in res.warnings if w.startswith("decode")], res.warnings
+
+
+@ffmpeg_only
+def test_audio_longer_than_video_is_not_rejected(tmp_path, make_video):
+    """오디오가 영상보다 길어도 거부하면 안 된다.
+
+    format.duration 은 모든 스트림 중 가장 긴 값이라, 그걸 기준으로 삼으면
+    영상 1.33초 + 오디오 3초 파일에서 20프레임을 45프레임으로 계산한다.
+    마이크가 늦게 끊긴 녹화물에서 흔하다.
+    """
+    src, n, size = make_video(name="clip.mp4", frames=20, fps=15.0)
+    withaudio = tmp_path / "with_audio.mp4"
+    _sp.run(["ffmpeg", "-v", "error", "-y", "-i", str(src),
+             "-f", "lavfi", "-t", "3.0", "-i", "sine=frequency=440",
+             "-c:v", "copy", "-c:a", "aac", "-map", "0:v:0", "-map", "1:a:0",
+             str(withaudio)], check=True)
+
+    res = run(withaudio, tmp_path / "out.mp4", size, keep_audio=True)
+
+    assert not [w for w in res.warnings if w.startswith("decode")], res.warnings
+    assert res.frames == n
+
+
+@ffmpeg_only
+def test_moderate_gap_warns_but_does_not_fail(tmp_path, make_video, monkeypatch):
+    """애매한 차이는 실패가 아니라 경고다 (정상 영상 거부 방지)."""
+    src, n, size = make_video(frames=100)
+    real = P.probe
+    monkeypatch.setattr(                      # 10% 부족하게 보이도록
+        P, "probe",
+        lambda p: P.VideoInfo(**{**vars(real(p)),
+                                 "frame_count": int(n / 0.9),
+                                 "count_source": "duration"}))
+
+    res = run(src, tmp_path / "out.mp4", size)
+    assert any(w.startswith("decode-short") for w in res.warnings)
+
+
+@ffmpeg_only
+def test_output_is_h264(tmp_path, make_video):
+    """다운로드 결과물은 H.264 여야 한다 (mp4v 는 같은 화질에 약 9.5배)."""
+    if P.pick_encoder() is None:
+        pytest.skip("H.264 인코더 없음")
+    src, n, size = make_video(frames=20)
+    out = tmp_path / "out.mp4"
+
+    run(src, out, size)
+
+    codec = _sp.run(["ffprobe", "-v", "error", "-select_streams", "v:0",
+                     "-show_entries", "stream=codec_name", "-of", "csv=p=0",
+                     str(out)], capture_output=True, text=True).stdout.strip()
+    assert codec == "h264", f"코덱이 {codec}"

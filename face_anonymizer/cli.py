@@ -69,6 +69,8 @@ def build_parser():
                    help="검출된 프레임 비율이 R 미만이면 실패 (예: 0.5)")
 
     g = p.add_argument_group("출력")
+    g.add_argument("--crf", type=int, default=None, metavar="N",
+                   help="H.264 품질 (낮을수록 고화질/큰 파일, 기본 23)")
     g.add_argument("--no-audio", action="store_true", help="원본 오디오를 합성하지 않음")
     g.add_argument("-q", "--quiet", action="store_true", help="경고 이상만 출력")
     g.add_argument("-v", "--verbose", action="store_true", help="디버그 로그 출력")
@@ -149,6 +151,7 @@ def main(argv=None):
             keep_audio=not args.no_audio,
             allow_partial=args.allow_partial,
             min_detection_rate=args.min_detection_rate,
+            **({"crf": args.crf} if args.crf is not None else {}),
             progress=ProgressBar(not args.quiet),
         )
     except (FileNotFoundError, VideoOpenError, VideoWriteError,

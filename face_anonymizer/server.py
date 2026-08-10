@@ -150,11 +150,11 @@ def _run(job_id):
                 "realtime_factor": round(res.realtime_factor, 2),
                 # 짧은 클립에서 소수점 첫째 자리로 반올림하면 단계 시간이
                 # 전부 0.0 이 되어 어디가 느린지 안 보인다.
-                "seconds": round(res.timing.total, 2),
-                "timing": {"detect": round(res.timing.detect, 2),
-                           "track": round(res.timing.track, 2),
-                           "render": round(res.timing.render, 2),
-                           "audio": round(res.timing.audio, 2)},
+                "seconds": round(res.timing.total, 3),
+                "timing": {"detect": round(res.timing.detect, 3),
+                           "track": round(res.timing.track, 3),
+                           "render": round(res.timing.render, 3),
+                           "audio": round(res.timing.audio, 3)},
                 "video": {"width": res.video.width, "height": res.video.height,
                           "fps": round(res.video.fps, 2)},
             }
