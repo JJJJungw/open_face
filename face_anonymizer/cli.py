@@ -67,6 +67,8 @@ def build_parser():
                    help="디코딩이 중간에 끊겨도 진행 (기본: 실패 처리)")
     g.add_argument("--min-detection-rate", type=float, default=None, metavar="R",
                    help="검출된 프레임 비율이 R 미만이면 실패 (예: 0.5)")
+    g.add_argument("--rotate", type=int, default=0, choices=[0, 90, 180, 270],
+                   help="입력을 시계방향으로 회전 (메타데이터 위에 추가로 적용)")
 
     g = p.add_argument_group("출력")
     g.add_argument("--crf", type=int, default=None, metavar="N",
@@ -153,6 +155,7 @@ def main(argv=None):
             keep_audio=not args.no_audio,
             allow_partial=args.allow_partial,
             min_detection_rate=args.min_detection_rate,
+            rotate=args.rotate,
             **({"crf": args.crf} if args.crf is not None else {}),
             **({"bitrate_ratio": args.bitrate_ratio}
                if args.bitrate_ratio is not None else {}),

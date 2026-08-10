@@ -19,7 +19,7 @@ import subprocess
 import tempfile
 import time
 from collections import defaultdict
-from dataclasses import dataclass
+from dataclasses import dataclass, replace
 
 import cv2
 
@@ -31,6 +31,12 @@ from .tracking import interpolate, track_video_boxes
 log = logging.getLogger(__name__)
 
 DEFAULT_FPS = 30.0
+
+# CAP_PROP_ORIENTATION_META 는 시계방향 각도 (실측 확인).
+ROTATE_CODES = {90: cv2.ROTATE_90_CLOCKWISE,
+                180: cv2.ROTATE_180,
+                270: cv2.ROTATE_90_COUNTERCLOCKWISE}
+
 
 # ffmpeg/ffprobe 가 멈췄을 때 기다릴 최대 시간. CLI 라면 Ctrl-C 로 벗어날 수
 # 있지만 서버는 워커가 하나뿐이라, 한 건이 매달리면 큐 전체가 영구 정지하고
@@ -91,7 +97,9 @@ class VideoInfo:
     width: int
     height: int
     frame_count: int      # 가장 믿을 만한 프레임 수 (아래 count_source 참고)
-    count_source: str = "container"   # 'packets' | 'container' | 'unknown'
+    count_source: str = "container"   # 'duration' | 'container' | 'unknown'
+    rotation: int = 0                 # 우리가 직접 적용해야 할 회전(시계방향)
+    meta_rotation: int = 0            # 컨테이너가 선언한 회전 (참고용)
 
 
 @dataclass
@@ -144,6 +152,31 @@ class Result:
         return self.frames / self.timing.detect
 
 
+def rotate_frame(frame, deg):
+    """시계방향 회전. 0/90/180/270 외의 값은 무시한다."""
+    code = ROTATE_CODES.get(int(deg) % 360)
+    return frame if code is None else cv2.rotate(frame, code)
+
+
+def open_capture(path):
+    """영상을 열고, 우리가 직접 적용해야 할 회전 각도를 함께 돌려준다.
+
+    폰 세로 촬영 영상은 픽셀이 가로로 저장되고 "재생할 때 90도 돌려라"는
+    메타데이터가 붙는다 — 비율로는 가로 영상과 구분되지 않는다. 누운 프레임에
+    검출을 돌리면 얼굴을 거의 못 잡는데 크기 검사는 통과해서 조용히 새어 나간다.
+
+    OpenCV 4.5.2+ 는 자동 적용하지만 빌드에 따라 꺼져 있을 수 있어, 명시적으로
+    켜고 안 켜지면 직접 돌린다. Returns (cap, 직접 적용할 각도).
+    """
+    cap = cv2.VideoCapture(path)
+    if not cap.isOpened():
+        return cap, 0
+    cap.set(cv2.CAP_PROP_ORIENTATION_AUTO, 1)
+    auto = bool(cap.get(cv2.CAP_PROP_ORIENTATION_AUTO))
+    meta = int(cap.get(cv2.CAP_PROP_ORIENTATION_META) or 0) % 360
+    return cap, (0 if auto else meta)
+
+
 def sane_fps(value, default=DEFAULT_FPS):
     """컨테이너가 알려 준 fps 를 신뢰할 수 있는 값으로 정규화.
 
@@ -162,7 +195,7 @@ def probe(path):
     """영상 메타데이터. 열 수 없으면 VideoOpenError."""
     if not os.path.exists(path):
         raise VideoOpenError(f"input does not exist: {path}")
-    cap = cv2.VideoCapture(path)
+    cap, rotation = open_capture(path)
     try:
         if not cap.isOpened():
             raise VideoOpenError(f"cannot open video (unsupported or corrupt): {path}")
@@ -170,10 +203,18 @@ def probe(path):
         w = int(cap.get(cv2.CAP_PROP_FRAME_WIDTH) or 0)
         h = int(cap.get(cv2.CAP_PROP_FRAME_HEIGHT) or 0)
         n = int(cap.get(cv2.CAP_PROP_FRAME_COUNT) or 0)
+        meta = int(cap.get(cv2.CAP_PROP_ORIENTATION_META) or 0) % 360
     finally:
         cap.release()
     if w <= 0 or h <= 0:
         raise VideoOpenError(f"video reports invalid frame size {w}x{h}: {path}")
+    # 직접 돌릴 예정이면 보고 크기도 회전 후 기준이어야 한다
+    # (OpenCV 가 처리했다면 PROP 값이 이미 회전 후 크기다).
+    if rotation in (90, 270):
+        w, h = h, w
+    if meta:
+        log.info("회전 메타데이터 %d도 — %s", meta,
+                 "직접 적용한다" if rotation else "OpenCV 가 적용함")
 
     # 기대 프레임 수는 **재생 길이 x fps** 로 잡는다.
     #
@@ -187,8 +228,8 @@ def probe(path):
         dur = video_duration(path)
         if dur and fps > 0:
             count, source = int(round(dur * fps)), "duration"
-    return VideoInfo(fps=fps, width=w, height=h,
-                     frame_count=count, count_source=source)
+    return VideoInfo(fps=fps, width=w, height=h, frame_count=count,
+                     count_source=source, rotation=rotation, meta_rotation=meta)
 
 
 def _unlink(path):
@@ -512,7 +553,7 @@ class VideoAnonymizer:
                 conf=0.25, iou=0.45, pad=0.15, mosaic_scale=0.06, linger=5,
                 interp=True, batch_size=1, keep_audio=True, progress=None,
                 allow_partial=False, min_detection_rate=None, crf=DEFAULT_CRF,
-                bitrate_ratio=DEFAULT_BITRATE_RATIO):
+                bitrate_ratio=DEFAULT_BITRATE_RATIO, rotate=0):
         """영상 한 편을 익명화하고 Result 를 돌려준다.
 
         progress : callable(stage, done, total) | None
@@ -541,12 +582,17 @@ class VideoAnonymizer:
         log.info("[1/3] detecting: %s (%dx%d @%.2ffps, batch=%d)",
                  os.path.basename(input_path), info.width, info.height,
                  info.fps, batch_size)
+        rotate = int(rotate) % 360
+        if rotate in (90, 270):
+            info = replace(info, width=info.height, height=info.width)
+
         t0 = time.perf_counter()
         per_frame, raw_boxes, detected_frames, total = self._detect(
-            input_path, imgsz, conf, iou, batch_size, report)
+            input_path, imgsz, conf, iou, batch_size, report, rotation=rotate)
         t_detect = time.perf_counter() - t0
         if total == 0:
             raise VideoOpenError(f"no frames decoded from {input_path}")
+
         warnings = check_decode_complete(total, info, allow_partial)
         warnings += check_detections(raw_boxes, detected_frames, total,
                                      min_detection_rate)
@@ -582,7 +628,8 @@ class VideoAnonymizer:
             noaudio = os.path.join(tmpdir, "noaudio" + ext)
             t0 = time.perf_counter()
             rendered = self._render(input_path, noaudio, info, frame_dets,
-                                    method, pad, mosaic_scale, total, report)
+                                    method, pad, mosaic_scale, total, report,
+                                    rotation=rotate)
             t_render = time.perf_counter() - t0
             log.info("      %d frames — %.1fs (%.1f fps)", rendered, t_render,
                      rendered / t_render if t_render else 0)
@@ -613,12 +660,13 @@ class VideoAnonymizer:
 
     # ------------------------------------------------------------------ #
 
-    def _detect(self, path, imgsz, conf, iou, batch_size, report):
+    def _detect(self, path, imgsz, conf, iou, batch_size, report, rotation=0):
         """1차 패스 — 프레임을 훑으며 배치 검출. 프레임은 보관하지 않는다."""
-        cap = cv2.VideoCapture(path)
+        cap, auto_rot = open_capture(path)
         if not cap.isOpened():
             cap.release()
             raise VideoOpenError(f"cannot open video: {path}")
+        rotation = (auto_rot + rotation) % 360
 
         per_frame, pending = [], []
         raw_boxes = detected_frames = 0
@@ -644,7 +692,7 @@ class VideoAnonymizer:
                 ok, frame = cap.read()
                 if not ok:
                     break
-                pending.append(frame)
+                pending.append(rotate_frame(frame, rotation) if rotation else frame)
                 if len(pending) >= batch_size:
                     flush()
                 if idx % 30 == 0:
@@ -657,12 +705,13 @@ class VideoAnonymizer:
         return per_frame, raw_boxes, detected_frames, idx
 
     def _render(self, path, out_path, info, frame_dets, method, pad,
-                mosaic_scale, expected, report):
+                mosaic_scale, expected, report, rotation=0):
         """2차 패스 — 박스를 얹어 다시 쓴다."""
-        cap = cv2.VideoCapture(path)
+        cap, auto_rot = open_capture(path)
         if not cap.isOpened():
             cap.release()
             raise VideoOpenError(f"cannot reopen video: {path}")
+        rotation = (auto_rot + rotation) % 360
         writer = cv2.VideoWriter(out_path, cv2.VideoWriter_fourcc(*"mp4v"),
                                  info.fps, (info.width, info.height))
         if not writer.isOpened():
@@ -679,6 +728,8 @@ class VideoAnonymizer:
                 ok, frame = cap.read()
                 if not ok:
                     break
+                if rotation:
+                    frame = rotate_frame(frame, rotation)
                 # VideoWriter.write() 는 크기가 다르면 경고만 찍고 조용히
                 # 아무것도 안 쓴다 — "N 프레임 완료" 를 보고하면서 재생 불가
                 # 파일이 남는다.

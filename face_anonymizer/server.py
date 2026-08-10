@@ -435,8 +435,11 @@ async def create_job(
     with _LOCK:
         _JOBS[jid] = job
     save_job(job)
+    # 응답 스냅샷은 제출 **전에** 뜬다. 제출 후에 뜨면 워커가 이미 시작해
+    # status 가 running 으로 보일 수 있다 (경합).
+    snap = snapshot(job, queued_ahead=_queued_ahead(job))
     _EXEC.submit(_run, jid)
-    return snapshot(job, queued_ahead=_queued_ahead(job))
+    return snap
 
 
 def _queued_ahead(job, jobs=None):
