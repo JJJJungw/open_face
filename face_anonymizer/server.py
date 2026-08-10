@@ -5,11 +5,15 @@
 
 설계상 못 박아 둔 것.
 
-1. **한 번에 한 편. 대기열은 갖지 않는다.** 이 서비스는 큐를 바깥(오케스트레이터)
-   에 두는 것을 전제로 한다. 처리 중에 요청이 오면 **429 로 거절**하고
-   ``Retry-After`` 를 준다 — 안에 쌓아 두면 바깥 큐가 이 인스턴스의 실제 부하를
-   알 수 없고, 재시도할지 다른 인스턴스로 보낼지 결정하지 못한다.
+1. **한 번에 한 편. 대기열은 짧게.** 추론은 워커 스레드 하나가 순차로 돌린다
+   (GPU 한 장에 검출기 하나). 대기열은 ``FA_QUEUE_MAX`` 까지만 받고 넘치면
+   **429 + Retry-After** 로 거절한다 — 무한정 쌓으면 바깥 오케스트레이터가 이
+   인스턴스의 실제 부하를 알 수 없어 다른 곳으로 보낼 판단을 못 한다.
    프로세스를 여러 개 띄워도(`--workers N`) 파일 락으로 GPU 를 직렬화한다.
+
+   상태는 ``queued``(대기) -> ``running``(수행중) -> ``done``(완료) 이고,
+   실패하면 일시적 오류에 한해 ``FA_MAX_ATTEMPTS`` 회까지 다시 큐에 넣은 뒤
+   그래도 안 되면 ``failed``(실패) 로 남긴다.
 2. **작업 상태는 디스크에.** 작업별 디렉터리에 ``job.json`` 을 둔다.
    전역 dict 에만 두면 (a) 재시작 시 전부 사라져 폴링 중인 클라이언트가 404 를
    받고, (b) ``--workers 2`` 로 띄우는 순간 업로드는 A 프로세스, 폴링은 B
@@ -25,6 +29,8 @@
     FA_JOB_TTL_MIN     완료 후 자동 삭제   (기본: 120, 0이면 안 지움)
     FA_SWEEP_SEC       정리 주기           (기본: 300)
     FA_PRELOAD         기동 시 모델 로드   (기본: 1)
+    FA_QUEUE_MAX       대기열 최대 길이    (기본: 10, 넘으면 429)
+    FA_MAX_ATTEMPTS    일시적 오류 재시도  (기본: 3)
 
 실행
     uvicorn face_anonymizer.server:app --host 0.0.0.0 --port 8000
@@ -64,6 +70,12 @@ JOB_TTL = int(os.environ.get("FA_JOB_TTL_MIN", 120)) * 60
 SWEEP_SEC = int(os.environ.get("FA_SWEEP_SEC", 300))
 PRELOAD = os.environ.get("FA_PRELOAD", "1") not in ("0", "false", "False")
 RETRY_AFTER = int(os.environ.get("FA_RETRY_AFTER", 30))
+QUEUE_MAX = int(os.environ.get("FA_QUEUE_MAX", 10))
+MAX_ATTEMPTS = int(os.environ.get("FA_MAX_ATTEMPTS", 3))
+
+# 다시 시도해도 결과가 같은 오류들. 깨진 파일이나 잘못된 인자를 세 번 돌리는 건
+# 그냥 낭비이고, 그동안 뒤에 쌓인 정상 작업이 밀린다.
+PERMANENT_ERRORS = (VideoOpenError, VideoWriteError, ValueError, FileNotFoundError)
 STATE_FILE = "job.json"
 GPU_LOCK_FILE = ".gpu.lock"
 PROGRESS_FLUSH_SEC = 0.5      # 진행률을 디스크에 쓰는 최소 간격
@@ -106,10 +118,15 @@ def is_ready():
 
 
 def is_busy():
-    """지금 작업을 붙잡고 있는가. 바깥 큐가 이 값으로 라우팅을 정한다."""
+    """지금 추론을 돌리고 있는가."""
     with _LOCK:
-        j = _JOBS.get(_current) if _current else None
-        return j is not None and j.status in ("queued", "running")
+        return any(j.status == "running" for j in _JOBS.values())
+
+
+def queue_depth():
+    """대기 중인 작업 수."""
+    with _LOCK:
+        return sum(1 for j in _JOBS.values() if j.status == "queued")
 
 
 @dataclass
@@ -118,7 +135,8 @@ class Job:
     name: str
     params: dict
     workdir: str
-    status: str = "queued"        # queued | running | done | error
+    status: str = "queued"        # queued(대기) | running(수행중) | done(완료) | failed(실패)
+    attempts: int = 0             # 시도 횟수 (재시도 포함)
     stage: str = ""               # detect | render
     done: int = 0
     total: int = 0
@@ -214,6 +232,7 @@ def snapshot(j, queued_ahead=0):
         "id": j.id, "name": j.name, "status": j.status, "stage": j.stage,
         "percent": pct, "overall": overall, "fps": round(fps, 1),
         "eta": round(eta), "error": j.error, "result": j.result,
+        "attempts": j.attempts, "max_attempts": MAX_ATTEMPTS,
         "queued_ahead": queued_ahead,
     }
 
@@ -261,7 +280,7 @@ def recover_orphans():
             live = j.id in _JOBS
         if live or j.status not in ("queued", "running"):
             continue
-        j.status = "error"
+        j.status = "failed"
         j.error = "서버가 재시작되어 작업이 중단됐다. 다시 올려 주세요."
         j.finished = time.time()
         save_job(j)
@@ -307,12 +326,37 @@ class gpu_lock:
         return False
 
 
+def _fail_or_retry(j, exc, permanent):
+    """실패 처리. 일시적 오류면 다시 큐에 넣는다.
+
+    같은 입력으로 같은 결과가 나올 오류(깨진 파일, 잘못된 인자)는 재시도하지
+    않는다 — 세 번 돌려도 결과가 같고 그동안 뒤에 쌓인 정상 작업이 밀린다.
+    """
+    msg = f"{type(exc).__name__}: {exc}"
+    retryable = not permanent and j.attempts < MAX_ATTEMPTS
+    with _LOCK:
+        j.error = msg
+        if retryable:
+            j.status, j.done, j.total, j.stage = "queued", 0, 0, ""
+        else:
+            j.status, j.finished = "failed", time.time()
+    save_job(j)
+    if retryable:
+        log.warning("작업 %s 실패 (%d/%d회) — 다시 시도한다: %s",
+                    j.id, j.attempts, MAX_ATTEMPTS, msg)
+        _EXEC.submit(_run, j.id)
+    else:
+        log.error("작업 %s 실패 (%d회 시도, %s): %s", j.id, j.attempts,
+                  "재시도 불가" if permanent else "재시도 소진", msg)
+
+
 def _run(job_id):
     with _LOCK:
         j = _JOBS.get(job_id)
         if j is None:
             return
         j.status, j.stage_t0 = "running", time.time()
+        j.attempts += 1
         params, workdir, name = dict(j.params), j.workdir, j.name
     save_job(j)
 
@@ -352,16 +396,13 @@ def _run(job_id):
                 "video": {"width": res.video.width, "height": res.video.height,
                           "fps": round(res.video.fps, 2)},
             }
-    except (VideoOpenError, VideoWriteError, ValueError, FileNotFoundError) as e:
-        with _LOCK:
-            j.status, j.error, j.finished = "error", str(e), time.time()
+            j.error = ""
+        save_job(j)
+    except PERMANENT_ERRORS as e:
+        _fail_or_retry(j, e, permanent=True)
     except Exception as e:                      # noqa: BLE001 — 워커가 조용히 죽으면 안 된다
-        log.exception("job %s failed", job_id)
-        with _LOCK:
-            j.status = "error"
-            j.error = f"{type(e).__name__}: {e}"
-            j.finished = time.time()
-    save_job(j)
+        log.exception("작업 %s 실패", job_id)
+        _fail_or_retry(j, e, permanent=False)
 
 
 @asynccontextmanager
@@ -395,7 +436,8 @@ def index():
 @app.get("/api/status")
 def status():
     """오케스트레이터용 최소 응답. 디스크를 훑지 않는다."""
-    return {"ready": is_ready(), "busy": is_busy(), "job": _current}
+    return {"ready": is_ready(), "busy": is_busy(),
+            "queued": queue_depth(), "queue_max": QUEUE_MAX}
 
 
 @app.get("/api/health")
@@ -406,7 +448,7 @@ def health(response: Response):
         # 트래픽을 보내고, 그 요청이 모델 로딩을 통째로 기다리게 된다.
         response.status_code = 503
     info = {"status": "ok" if ready else "not-ready",
-            "ready": ready, "busy": is_busy(), "job": _current,
+            "ready": ready, "busy": is_busy(), "queued": queue_depth(),
             "model_loaded": _anonymizer is not None, "model_error": _model_error,
             "device": DEVICE or "auto", "imgsz": IMGSZ,
             "methods": list(METHODS)}
@@ -452,11 +494,6 @@ async def create_job(
 
     if not is_ready():
         raise HTTPException(503, f"모델이 준비되지 않았다: {_model_error or '로딩 중'}")
-    # 대기열을 갖지 않는다. 바깥 큐가 재시도/라우팅을 정한다.
-    if is_busy():
-        raise HTTPException(429, "처리 중이다. 잠시 후 다시 보내라",
-                            headers={"Retry-After": str(RETRY_AFTER)})
-
     jid = uuid.uuid4().hex[:12]
     workdir = os.path.join(JOBS_DIR, jid)
     os.makedirs(workdir, exist_ok=True)
@@ -487,11 +524,10 @@ async def create_job(
                           interp=interp, keep_audio=keep_audio))
     global _current
     with _LOCK:
-        # 붙잡기와 바쁨 판정이 같은 락 안에 있어야 동시 요청 둘 다 통과하지 않는다.
-        held = _JOBS.get(_current) if _current else None
-        if held is not None and held.status in ("queued", "running"):
+        # 대기열 길이 확인과 등록이 같은 락 안에 있어야 동시 요청이 상한을 넘지 않는다.
+        if sum(1 for o in _JOBS.values() if o.status == "queued") >= QUEUE_MAX:
             shutil.rmtree(workdir, ignore_errors=True)
-            raise HTTPException(429, "처리 중이다. 잠시 후 다시 보내라",
+            raise HTTPException(429, f"대기열이 가득 찼다 ({QUEUE_MAX}건)",
                                 headers={"Retry-After": str(RETRY_AFTER)})
         _JOBS[jid] = job
         _current = jid

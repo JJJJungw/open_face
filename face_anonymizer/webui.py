@@ -176,7 +176,7 @@ go.onclick = () => {
     else {
       let m = xhr.responseText;
       try { m = JSON.parse(m).detail; } catch (_) {}
-      if (xhr.status === 429) m = '다른 영상을 처리 중입니다. 끝난 뒤 다시 시도하세요.';
+      if (xhr.status === 429) m = '대기열이 가득 찼습니다. 잠시 후 다시 시도하세요.';
       else if (xhr.status === 503) m = '서버가 아직 준비되지 않았습니다. ' + m;
       alert(m);
     }
@@ -188,9 +188,9 @@ go.onclick = () => {
 
 function card(j) {
   const cls = j.status === 'done' ? 'done'
-            : j.status === 'error' ? 'err'
+            : j.status === 'failed' ? 'err'
             : j.status === 'running' ? 'run' : '';
-  const label = { queued: '대기', running: '처리 중', done: '완료', error: '실패' }[j.status];
+  const label = { queued: '대기', running: '수행중', done: '완료', failed: '실패' }[j.status];
   let body = '';
   if (j.status === 'running') {
     const stage = j.stage === 'detect' ? '검출' : j.stage === 'render' ? '렌더' : '준비';
@@ -198,10 +198,11 @@ function card(j) {
       <div class="meta">${stage} ${j.percent}% · 전체 ${j.overall}% ·
         ${j.fps.toFixed(1)} f/s · 남은 시간 ${fmt(j.eta)}</div>`;
   } else if (j.status === 'queued') {
+    const retry = j.attempts ? ` · 재시도 ${j.attempts}/${j.max_attempts}` : '';
     body = `<div class="bar"><i style="width:0"></i></div>
-      <div class="meta">앞에 ${j.queued_ahead}건 대기 중</div>`;
-  } else if (j.status === 'error') {
-    body = `<div class="err">${j.error}</div>`;
+      <div class="meta">앞에 ${j.queued_ahead}건 대기 중${retry}</div>`;
+  } else if (j.status === 'failed') {
+    body = `<div class="err">${j.error} (${j.attempts}회 시도)</div>`;
   } else {
     const r = j.result, t = r.timing;
     const W = { 'no-detections':

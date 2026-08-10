@@ -46,7 +46,7 @@ def wait(c, jid, timeout=30.0):
     deadline = time.time() + timeout
     while time.time() < deadline:
         s = c.get(f"/api/jobs/{jid}").json()
-        if s["status"] in ("done", "error"):
+        if s["status"] in ("done", "failed"):
             return s
         time.sleep(0.02)
     raise AssertionError(f"작업이 {timeout}s 안에 끝나지 않았다")
@@ -196,7 +196,7 @@ def test_orphaned_running_job_is_marked_failed(client, tmp_path, make_video):
 
     assert server.recover_orphans() == 1
     s = client.get(f"/api/jobs/{jid}").json()
-    assert s["status"] == "error" and "재시작" in s["error"]
+    assert s["status"] == "failed" and "재시작" in s["error"]
 
 
 def test_sweep_removes_expired_jobs(client, tmp_path, make_video, monkeypatch):
@@ -247,20 +247,85 @@ class SlowDetector:
         return [[] for _ in frames]
 
 
-def test_second_request_while_busy_is_429(client, make_video, monkeypatch):
+def test_queue_accepts_up_to_limit_then_429(client, make_video, monkeypatch):
+    """대기열은 상한까지만. 무한정 쌓으면 바깥에서 부하를 알 수 없다."""
+    monkeypatch.setattr(server, "QUEUE_MAX", 2)
     path, n, size = make_video(frames=40)
     anon = VideoAnonymizer(detector=SlowDetector())
     monkeypatch.setattr(server, "get_anonymizer", lambda: anon)
     monkeypatch.setattr(server, "_anonymizer", anon)
 
-    first = submit(client, path, batch_size="1")
-    assert first.status_code == 202
+    ids = []
+    codes = []
+    for _ in range(5):
+        r = submit(client, path, batch_size="1")
+        codes.append(r.status_code)
+        if r.status_code == 202:
+            ids.append(r.json()["id"])
 
-    second = submit(client, path, batch_size="1")
-    assert second.status_code == 429
-    assert second.headers.get("Retry-After")
+    assert 202 in codes and 429 in codes, codes
+    rejected = [c for c in codes if c == 429]
+    assert rejected, "상한을 넘겨도 계속 받았다"
+    for jid in ids:
+        wait(client, jid, timeout=90)
 
-    wait(client, first.json()["id"], timeout=60)
+
+def test_transient_failure_is_retried(client, make_video, monkeypatch):
+    """일시적 오류는 다시 큐에 넣는다."""
+    monkeypatch.setattr(server, "MAX_ATTEMPTS", 3)
+    path, n, size = make_video(frames=6)
+    calls = {"n": 0}
+
+    class Flaky:
+        def detect_batch(self, frames, imgsz=None, conf=None, iou=None):
+            calls["n"] += 1
+            if calls["n"] <= 2:
+                raise RuntimeError("CUDA out of memory")
+            return [[] for _ in frames]
+
+    anon = VideoAnonymizer(detector=Flaky())
+    monkeypatch.setattr(server, "get_anonymizer", lambda: anon)
+    monkeypatch.setattr(server, "_anonymizer", anon)
+
+    jid = submit(client, path).json()["id"]
+    s = wait(client, jid, timeout=60)
+
+    assert s["status"] == "done", s.get("error")
+    assert s["attempts"] == 3
+
+
+def test_retries_are_exhausted_then_failed(client, make_video, monkeypatch):
+    monkeypatch.setattr(server, "MAX_ATTEMPTS", 2)
+    path, n, size = make_video(frames=6)
+
+    class AlwaysBroken:
+        def detect_batch(self, frames, imgsz=None, conf=None, iou=None):
+            raise RuntimeError("일시적인 척하는 영구 오류")
+
+    anon = VideoAnonymizer(detector=AlwaysBroken())
+    monkeypatch.setattr(server, "get_anonymizer", lambda: anon)
+    monkeypatch.setattr(server, "_anonymizer", anon)
+
+    jid = submit(client, path).json()["id"]
+    s = wait(client, jid, timeout=60)
+
+    assert s["status"] == "failed"
+    assert s["attempts"] == 2
+    assert "일시적인 척하는" in s["error"]
+
+
+def test_permanent_error_is_not_retried(client, tmp_path, monkeypatch):
+    """깨진 입력은 세 번 돌려도 결과가 같다 — 바로 실패로 둔다."""
+    monkeypatch.setattr(server, "MAX_ATTEMPTS", 3)
+    client.attach((320, 240))
+    broken = tmp_path / "broken.mp4"
+    broken.write_bytes(b"not a video at all" * 100)
+
+    jid = submit(client, broken).json()["id"]
+    s = wait(client, jid, timeout=30)
+
+    assert s["status"] == "failed"
+    assert s["attempts"] == 1, "재시도하면 안 된다"
 
 
 def test_accepts_again_after_finishing(client, make_video):
@@ -276,12 +341,13 @@ def test_accepts_again_after_finishing(client, make_video):
     wait(client, b.json()["id"])
 
 
-def test_status_endpoint_reports_ready_and_busy(client, make_video):
+def test_status_endpoint_reports_ready_and_queue(client, make_video):
     path, n, size = make_video(frames=8)
     client.attach(size)
 
     s = client.get("/api/status").json()
     assert s["ready"] is True and s["busy"] is False
+    assert s["queued"] == 0 and s["queue_max"] == server.QUEUE_MAX
 
     jid = submit(client, path).json()["id"]
     wait(client, jid)

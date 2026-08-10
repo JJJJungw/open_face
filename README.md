@@ -61,21 +61,32 @@ uvicorn face_anonymizer.server:app --host 0.0.0.0 --port 8000
 | 엔드포인트 | 설명 |
 |---|---|
 | `GET /` | 웹 UI |
-| `GET /api/status` | `{ready, busy, job}` — 오케스트레이터용 최소 응답 |
+| `GET /api/status` | `{ready, busy, queued, queue_max}` — 오케스트레이터용 최소 응답 |
 | `GET /api/health` | 준비 전 **503**. 디바이스·모델 상태·작업 수 |
-| `POST /api/jobs` | 영상 업로드 → `202` + 작업 id. 처리 중이면 **429**, 준비 전이면 **503** |
+| `POST /api/jobs` | 영상 업로드 → `202` + 작업 id. 대기열이 차면 **429**, 준비 전이면 **503** |
 | `GET /api/jobs/{id}` | 진행률 · 단계 · fps · ETA · 완료 시 통계와 경고 |
 | `GET /api/jobs/{id}/download` | 결과 영상 (완료 전 409, 파일 만료 410) |
 | `DELETE /api/jobs/{id}` | 작업과 파일 삭제 (진행 중이면 409) |
 | `GET /api/jobs` | 작업 목록 |
 
-**큐는 바깥에 둔다.** 이 컨테이너는 한 번에 한 편만 처리하고 대기열을 갖지 않는다. 처리 중에 요청이 오면 `429` 와 `Retry-After` 를 준다 — 안에 쌓아 두면 오케스트레이터가 이 인스턴스의 실제 부하를 알 수 없어 재시도할지 다른 인스턴스로 보낼지 결정하지 못한다.
+**한 번에 한 편, 대기열은 짧게.** 추론은 워커 스레드 하나가 순차로 돌린다(GPU 한 장에 검출기 하나). 대기열은 `FA_QUEUE_MAX`(기본 10)까지만 받고 넘치면 `429` 와 `Retry-After` 를 준다 — 무한정 쌓으면 오케스트레이터가 이 인스턴스의 실제 부하를 알 수 없어 다른 곳으로 보낼 판단을 못 한다.
+
+작업 상태는 넷이다.
+
+| 상태 | 뜻 |
+|---|---|
+| `queued` | 대기 |
+| `running` | 수행중 (`stage` 가 `detect`/`render`, `overall` 이 진행률) |
+| `done` | 완료 (`result` 에 통계) |
+| `failed` | 실패 (`error` 에 사유, `attempts` 에 시도 횟수) |
+
+**실패하면 재시도한다.** 일시적 오류(CUDA OOM, ffmpeg 실패, 디스크 문제)는 `FA_MAX_ATTEMPTS`(기본 3)회까지 다시 큐에 넣고, 소진되면 `failed` 로 남긴다. 다만 **같은 입력으로 같은 결과가 나올 오류는 재시도하지 않는다** — 깨진 파일이나 잘못된 인자(`VideoOpenError`, `VideoWriteError`, `ValueError`, `FileNotFoundError`)를 세 번 돌려도 결과가 같고, 그동안 뒤에 쌓인 정상 작업만 밀린다. 이 경우 `attempts` 가 1 로 남는다.
 
 호출 흐름은 이렇다.
 
 ```bash
 # 1. 여유 있는지 확인 (선택)
-curl -s localhost:8000/api/status          # {"ready":true,"busy":false,"job":null}
+curl -s localhost:8000/api/status          # {"ready":true,"busy":false,"queued":0,"queue_max":10}
 
 # 2. 제출 — 바쁘면 429
 curl -sf -F file=@in.mp4 -F method=mosaic -F conf=0.4 -F batch_size=32 \
