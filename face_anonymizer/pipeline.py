@@ -321,7 +321,7 @@ class VideoAnonymizer:
         if interp:
             log.info("[2/3] tracking + interpolating (누출 방지)")
             t0 = time.perf_counter()
-            tracks = track_video_boxes(per_frame, fps=info.fps)
+            tracks = track_video_boxes(per_frame, fps=info.fps, conf=conf)
             _, filled = interpolate(frame_dets, tracks, total, linger=linger)
             t_track = time.perf_counter() - t0
             log.info("      tracks=%d filled_boxes=%d — %.1fs",

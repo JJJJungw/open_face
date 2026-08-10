@@ -51,9 +51,10 @@ class FakeDetector:
     보는 데 쓴다.
     """
 
-    def __init__(self, size, miss_frames=()):
+    def __init__(self, size, miss_frames=(), score=0.9):
         self.w, self.h = size
         self.miss = set(miss_frames)
+        self.score = score          # 저신뢰 검출에서 추적이 도는지 보려고 조절한다
         self.batch_sizes = []
         self._n = 0
 
@@ -65,7 +66,7 @@ class FakeDetector:
             if i in self.miss:
                 out.append([])
             else:
-                out.append([(*map(float, face_rect(i, self.w, self.h)), 0.9)])
+                out.append([(*map(float, face_rect(i, self.w, self.h)), self.score)])
         return out
 
 
