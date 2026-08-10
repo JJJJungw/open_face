@@ -61,15 +61,19 @@ uvicorn face_anonymizer.server:app --host 0.0.0.0 --port 8000
 | 엔드포인트 | 설명 |
 |---|---|
 | `GET /` | 웹 UI |
-| `GET /api/status` | `{ready, busy, queued, queue_max}` — 오케스트레이터용 최소 응답 |
+| `GET /api/status` | `{ready, busy, queued, free_mb}` — 오케스트레이터용 최소 응답 |
 | `GET /api/health` | 준비 전 **503**. 디바이스·모델 상태·작업 수 |
-| `POST /api/jobs` | 영상 업로드 → `202` + 작업 id. 대기열이 차면 **429**, 준비 전이면 **503** |
+| `POST /api/jobs` | 영상 업로드 → `202` + 작업 id. 준비 전 **503**, 디스크 부족 **507** |
 | `GET /api/jobs/{id}` | 진행률 · 단계 · fps · ETA · 완료 시 통계와 경고 |
 | `GET /api/jobs/{id}/download` | 결과 영상 (완료 전 409, 파일 만료 410) |
 | `DELETE /api/jobs/{id}` | 작업과 파일 삭제 (진행 중이면 409) |
-| `GET /api/jobs` | 작업 목록 |
+| `GET /api/jobs?limit=&status=` | 작업 목록 (최신순, 기본 100건, 상태 필터) |
 
-**한 번에 한 편, 대기열은 짧게.** 추론은 워커 스레드 하나가 순차로 돌린다(GPU 한 장에 검출기 하나). 대기열은 `FA_QUEUE_MAX`(기본 10)까지만 받고 넘치면 `429` 와 `Retry-After` 를 준다 — 무한정 쌓으면 오케스트레이터가 이 인스턴스의 실제 부하를 알 수 없어 다른 곳으로 보낼 판단을 못 한다.
+**한 번에 한 편.** 추론은 워커 스레드 하나가 순차로 돌린다(GPU 한 장에 검출기 하나).
+
+**대기열은 개수로 막지 않는다.** 전체 수행처럼 한꺼번에 수백 건을 넣는 사용이 정상이고, 개수는 애초에 잘못된 기준이다 — 10건이 50MB 짜리면 아무것도 아니고 2GB 짜리면 이미 위험하다. 대기 중인 작업은 입력 파일을 디스크에 들고 있으므로 진짜 제약은 거기다. 여유 공간이 `FA_MIN_FREE_MB`(기본 2048) 밑이면 `507` 로 거절한다. 개수 상한이 필요하면 `FA_QUEUE_MAX` 로 켤 수 있다(기본 0 = 무제한).
+
+수백 건이 쌓여도 폴링이 느려지지 않게, `GET /api/jobs/{id}` 는 디스크를 훑지 않고 메모리만 본다. 목록은 대기 순번을 한 번에 계산하고(작업마다 전체를 다시 훑으면 O(N²)) 기본 100건까지만 준다. 작업 500건 기준 폴링 0.1ms, 목록 13ms.
 
 작업 상태는 넷이다.
 
@@ -86,7 +90,7 @@ uvicorn face_anonymizer.server:app --host 0.0.0.0 --port 8000
 
 ```bash
 # 1. 여유 있는지 확인 (선택)
-curl -s localhost:8000/api/status          # {"ready":true,"busy":false,"queued":0,"queue_max":10}
+curl -s localhost:8000/api/status          # {"ready":true,"busy":false,"queued":0,"free_mb":41230}
 
 # 2. 제출 — 바쁘면 429
 curl -sf -F file=@in.mp4 -F method=mosaic -F conf=0.4 -F batch_size=32 \

@@ -247,8 +247,43 @@ class SlowDetector:
         return [[] for _ in frames]
 
 
-def test_queue_accepts_up_to_limit_then_429(client, make_video, monkeypatch):
-    """대기열은 상한까지만. 무한정 쌓으면 바깥에서 부하를 알 수 없다."""
+def test_queue_is_unlimited_by_default(client, make_video, monkeypatch):
+    """전체 수행처럼 한꺼번에 여러 건 넣는 게 정상이다."""
+    assert server.QUEUE_MAX == 0
+    path, n, size = make_video(frames=6)
+    client.attach(size)
+
+    ids = [submit(client, path).json()["id"] for _ in range(5)]
+    assert len(ids) == 5
+    for jid in ids:
+        assert wait(client, jid, timeout=60)["status"] == "done"
+
+
+def test_rejects_when_disk_is_low(client, make_video, monkeypatch):
+    """대기 중인 작업은 입력 파일을 들고 있다. 진짜 제약은 개수가 아니라 디스크다."""
+    path, n, size = make_video(frames=4)
+    client.attach(size)
+    monkeypatch.setattr(server, "free_mb", lambda: 10)
+    monkeypatch.setattr(server, "MIN_FREE_MB", 2048)
+
+    r = submit(client, path)
+    assert r.status_code == 507
+    assert r.headers.get("Retry-After")
+
+
+def test_list_is_bounded_and_filterable(client, make_video):
+    path, n, size = make_video(frames=4)
+    client.attach(size)
+    for _ in range(3):
+        wait(client, submit(client, path).json()["id"], timeout=60)
+
+    assert len(client.get("/api/jobs?limit=2").json()) == 2
+    done = client.get("/api/jobs?status=done").json()
+    assert done and all(j["status"] == "done" for j in done)
+    assert client.get("/api/jobs?status=failed").json() == []
+
+
+def test_queue_max_still_works_when_set(client, make_video, monkeypatch):
     monkeypatch.setattr(server, "QUEUE_MAX", 2)
     path, n, size = make_video(frames=40)
     anon = VideoAnonymizer(detector=SlowDetector())
@@ -347,7 +382,7 @@ def test_status_endpoint_reports_ready_and_queue(client, make_video):
 
     s = client.get("/api/status").json()
     assert s["ready"] is True and s["busy"] is False
-    assert s["queued"] == 0 and s["queue_max"] == server.QUEUE_MAX
+    assert s["queued"] == 0 and s["free_mb"] > 0
 
     jid = submit(client, path).json()["id"]
     wait(client, jid)

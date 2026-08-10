@@ -5,11 +5,13 @@
 
 설계상 못 박아 둔 것.
 
-1. **한 번에 한 편. 대기열은 짧게.** 추론은 워커 스레드 하나가 순차로 돌린다
-   (GPU 한 장에 검출기 하나). 대기열은 ``FA_QUEUE_MAX`` 까지만 받고 넘치면
-   **429 + Retry-After** 로 거절한다 — 무한정 쌓으면 바깥 오케스트레이터가 이
-   인스턴스의 실제 부하를 알 수 없어 다른 곳으로 보낼 판단을 못 한다.
-   프로세스를 여러 개 띄워도(`--workers N`) 파일 락으로 GPU 를 직렬화한다.
+1. **한 번에 한 편.** 추론은 워커 스레드 하나가 순차로 돌린다(GPU 한 장에
+   검출기 하나). 프로세스를 여러 개 띄워도(`--workers N`) 파일 락으로 GPU 를
+   직렬화한다.
+
+   대기열은 개수로 막지 않는다. 전체 수행처럼 한꺼번에 수백 건을 넣는 사용이
+   정상이기 때문이다. 대신 **디스크 여유 공간**으로 막는다(507) — 대기 중인
+   작업은 입력 파일을 디스크에 들고 있으므로 진짜 제약은 거기다.
 
    상태는 ``queued``(대기) -> ``running``(수행중) -> ``done``(완료) 이고,
    실패하면 일시적 오류에 한해 ``FA_MAX_ATTEMPTS`` 회까지 다시 큐에 넣은 뒤
@@ -29,7 +31,9 @@
     FA_JOB_TTL_MIN     완료 후 자동 삭제   (기본: 120, 0이면 안 지움)
     FA_SWEEP_SEC       정리 주기           (기본: 300)
     FA_PRELOAD         기동 시 모델 로드   (기본: 1)
-    FA_QUEUE_MAX       대기열 최대 길이    (기본: 10, 넘으면 429)
+    FA_QUEUE_MAX       대기열 개수 상한    (기본: 0 = 무제한)
+    FA_MIN_FREE_MB     최소 여유 디스크    (기본: 2048, 미달이면 507)
+    FA_LIST_LIMIT      목록 기본 개수      (기본: 100)
     FA_MAX_ATTEMPTS    일시적 오류 재시도  (기본: 3)
 
 실행
@@ -70,7 +74,12 @@ JOB_TTL = int(os.environ.get("FA_JOB_TTL_MIN", 120)) * 60
 SWEEP_SEC = int(os.environ.get("FA_SWEEP_SEC", 300))
 PRELOAD = os.environ.get("FA_PRELOAD", "1") not in ("0", "false", "False")
 RETRY_AFTER = int(os.environ.get("FA_RETRY_AFTER", 30))
-QUEUE_MAX = int(os.environ.get("FA_QUEUE_MAX", 10))
+# 대기열은 기본적으로 개수로 제한하지 않는다. 전체 수행처럼 한꺼번에 수백 건을
+# 넣는 사용이 정상이고, 개수는 애초에 잘못된 기준이다 — 10건이 50MB 짜리면
+# 아무것도 아니고 2GB 짜리면 이미 위험하다. 진짜 제약은 디스크다(MIN_FREE_MB).
+QUEUE_MAX = int(os.environ.get("FA_QUEUE_MAX", 0))          # 0 = 무제한
+MIN_FREE_MB = int(os.environ.get("FA_MIN_FREE_MB", 2048))   # 0 = 검사 안 함
+LIST_LIMIT = int(os.environ.get("FA_LIST_LIMIT", 100))
 MAX_ATTEMPTS = int(os.environ.get("FA_MAX_ATTEMPTS", 3))
 
 # 다시 시도해도 결과가 같은 오류들. 깨진 파일이나 잘못된 인자를 세 번 돌리는 건
@@ -121,6 +130,24 @@ def is_busy():
     """지금 추론을 돌리고 있는가."""
     with _LOCK:
         return any(j.status == "running" for j in _JOBS.values())
+
+
+def free_mb():
+    """작업 디렉터리가 놓일 볼륨의 여유 공간(MB).
+
+    첫 작업 전에는 JOBS_DIR 이 아직 없을 수 있다. 그때 None 을 돌려주면 디스크
+    검사가 조용히 건너뛰어지므로, 존재하는 상위 경로까지 올라가서 잰다.
+    """
+    path = os.path.abspath(JOBS_DIR)
+    while not os.path.isdir(path):
+        parent = os.path.dirname(path)
+        if parent == path:
+            return None
+        path = parent
+    try:
+        return shutil.disk_usage(path).free // (1024 * 1024)
+    except OSError:
+        return None
 
 
 def queue_depth():
@@ -437,7 +464,7 @@ def index():
 def status():
     """오케스트레이터용 최소 응답. 디스크를 훑지 않는다."""
     return {"ready": is_ready(), "busy": is_busy(),
-            "queued": queue_depth(), "queue_max": QUEUE_MAX}
+            "queued": queue_depth(), "free_mb": free_mb()}
 
 
 @app.get("/api/health")
@@ -449,6 +476,7 @@ def health(response: Response):
         response.status_code = 503
     info = {"status": "ok" if ready else "not-ready",
             "ready": ready, "busy": is_busy(), "queued": queue_depth(),
+            "free_mb": free_mb(),
             "model_loaded": _anonymizer is not None, "model_error": _model_error,
             "device": DEVICE or "auto", "imgsz": IMGSZ,
             "methods": list(METHODS)}
@@ -494,6 +522,12 @@ async def create_job(
 
     if not is_ready():
         raise HTTPException(503, f"모델이 준비되지 않았다: {_model_error or '로딩 중'}")
+    # 대기 중인 작업은 입력 파일을 들고 있다. 디스크가 차면 업로드가 중간에
+    # 깨지거나 처리 중인 작업의 출력까지 같이 망가진다.
+    free = free_mb()
+    if MIN_FREE_MB and free is not None and free < MIN_FREE_MB:
+        raise HTTPException(507, f"디스크 여유 부족 ({free}MB < {MIN_FREE_MB}MB)",
+                            headers={"Retry-After": str(RETRY_AFTER)})
     jid = uuid.uuid4().hex[:12]
     workdir = os.path.join(JOBS_DIR, jid)
     os.makedirs(workdir, exist_ok=True)
@@ -525,7 +559,8 @@ async def create_job(
     global _current
     with _LOCK:
         # 대기열 길이 확인과 등록이 같은 락 안에 있어야 동시 요청이 상한을 넘지 않는다.
-        if sum(1 for o in _JOBS.values() if o.status == "queued") >= QUEUE_MAX:
+        if QUEUE_MAX and sum(1 for o in _JOBS.values()
+                             if o.status == "queued") >= QUEUE_MAX:
             shutil.rmtree(workdir, ignore_errors=True)
             raise HTTPException(429, f"대기열이 가득 찼다 ({QUEUE_MAX}건)",
                                 headers={"Retry-After": str(RETRY_AFTER)})
@@ -539,16 +574,32 @@ async def create_job(
     return snap
 
 
-def _queued_ahead(job, jobs=None):
-    jobs = jobs if jobs is not None else all_jobs()
-    return sum(1 for o in jobs
-               if o.status == "queued" and o.created < job.created)
+def _queued_ahead(job):
+    """앞에 몇 건 대기 중인가. **메모리만** 본다.
+
+    폴링 경로라 여기서 디스크를 훑으면 안 된다. 대기 중인 작업은 이 프로세스의
+    워커가 들고 있으므로 메모리에 있고, 없으면(재시작 후 남은 기록) 어차피
+    대기 중이 아니다.
+    """
+    with _LOCK:
+        return sum(1 for o in _JOBS.values()
+                   if o.status == "queued" and o.created < job.created)
 
 
 @app.get("/api/jobs")
-def list_jobs():
+def list_jobs(limit: int = LIST_LIMIT, status: str = None):
+    """작업 목록. 최신순, 기본 100건.
+
+    대기 순번은 한 번에 계산한다 — 작업마다 전체를 다시 훑으면 O(N^2) 이고,
+    전체 수행으로 수백 건을 넣으면 목록 한 번에 수십만 번 반복하게 된다.
+    """
     jobs = all_jobs()
-    return [snapshot(j, _queued_ahead(j, jobs)) for j in jobs]
+    if status:
+        jobs = [j for j in jobs if j.status == status]
+    order = sorted((j for j in jobs if j.status == "queued"),
+                   key=lambda x: x.created)
+    ahead = {j.id: i for i, j in enumerate(order)}
+    return [snapshot(j, ahead.get(j.id, 0)) for j in jobs[:max(0, limit)]]
 
 
 @app.get("/api/jobs/{jid}")
