@@ -163,9 +163,11 @@ def main(argv=None):
         print(f"  검출 {fmt_dur(t.detect)} ({res.detect_fps:.1f} fps) · "
               f"추적 {fmt_dur(t.track)} · 렌더 {fmt_dur(t.render)} · "
               f"오디오 {fmt_dur(t.audio)}")
-    if res.audio.startswith("ffmpeg-"):
-        print(f"warning: 오디오를 합성하지 못했다 ({res.audio}). 영상은 정상 출력됐다.",
-              file=sys.stderr)
+    # 접두사 검사는 새 실패 사유(frame-loss, verify-failed)를 놓친다.
+    # 정상으로 볼 값만 나열하고 나머지는 전부 경고한다.
+    if res.audio not in ("ok", "no-audio", "disabled"):
+        print(f"warning: 오디오를 합성하지 못했다 ({res.audio}). "
+              "영상은 익명화된 상태로 정상 출력됐다.", file=sys.stderr)
     return 0
 
 

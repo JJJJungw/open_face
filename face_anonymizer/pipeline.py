@@ -10,6 +10,7 @@
 아니므로 영상은 남기고 사유만 알린다.
 """
 
+import json
 import logging
 import math
 import os
@@ -30,6 +31,11 @@ from .tracking import interpolate, track_video_boxes
 log = logging.getLogger(__name__)
 
 DEFAULT_FPS = 30.0
+
+# ffmpeg/ffprobe 가 멈췄을 때 기다릴 최대 시간. CLI 라면 Ctrl-C 로 벗어날 수
+# 있지만 서버는 워커가 하나뿐이라, 한 건이 매달리면 큐 전체가 영구 정지하고
+# health 는 계속 정상을 보고한다.
+FFMPEG_TIMEOUT = float(os.environ.get("FA_FFMPEG_TIMEOUT", "600"))
 
 
 class VideoOpenError(RuntimeError):
@@ -124,11 +130,78 @@ def probe(path):
     return VideoInfo(fps=fps, width=w, height=h, frame_count=max(0, n))
 
 
-def _mux_audio(noaudio, original, output, keep_audio=True):
+def _unlink(path):
+    """실패 경로 정리용. 지워지지 않아도 흐름을 막지 않는다."""
+    try:
+        os.remove(path)
+    except OSError:
+        pass
+
+
+def _run(cmd, timeout=FFMPEG_TIMEOUT):
+    """외부 명령 실행. 멈추면 죽인다. 타임아웃이면 None."""
+    try:
+        return subprocess.run(cmd, capture_output=True, text=True, timeout=timeout)
+    except subprocess.TimeoutExpired:
+        log.warning("%s 타임아웃 (%.0fs)", cmd[0], timeout)
+        return None
+
+
+def has_audio(path, timeout=FFMPEG_TIMEOUT):
+    """오디오 스트림 유무. 판정 자체가 실패하면 None."""
+    p = _run(["ffprobe", "-v", "error", "-select_streams", "a",
+              "-show_entries", "stream=codec_type", "-of", "csv=p=0", path], timeout)
+    if p is None or p.returncode != 0:
+        return None
+    return bool(p.stdout.strip())
+
+
+def video_frame_count(path, timeout=FFMPEG_TIMEOUT):
+    """파일에 실제로 들어 있는 비디오 프레임 수와 길이.
+
+    ``-count_packets`` 는 컨테이너 인덱스만 읽고 디코딩은 하지 않으므로 싸다.
+    컨테이너가 선언한 ``nb_frames`` 메타값과 달리 실제 패킷을 센 값이라,
+    "메타는 600인데 실제로는 300장" 같은 상태를 잡아낼 수 있다.
+
+    Returns (frames, duration). 셀 수 없으면 (None, None).
+    """
+    p = _run(["ffprobe", "-v", "error", "-select_streams", "v:0", "-count_packets",
+              "-show_entries", "stream=nb_read_packets,duration",
+              "-of", "json", path], timeout)
+    if p is None or p.returncode != 0:
+        return None, None
+    try:
+        st = json.loads(p.stdout)["streams"][0]
+        n = int(st["nb_read_packets"])
+    except (ValueError, KeyError, IndexError, TypeError):
+        return None, None
+    try:
+        d = float(st["duration"])
+    except (KeyError, ValueError, TypeError):
+        d = None
+    return n, d
+
+
+def _mux_audio(noaudio, original, output, keep_audio=True, expected_frames=None,
+               timeout=FFMPEG_TIMEOUT):
     """원본 오디오를 익명화 영상에 합성.
 
-    어떤 경로로 실패하든 익명화된 영상은 반드시 ``output`` 에 남긴다.
-    "오디오가 없어서 결과물이 통째로 없다" 는 최악의 트레이드오프다.
+    세 가지를 못 박는다.
+
+    1. **익명화된 프레임을 한 장도 잃지 않는다.** 예전에는 ``-shortest`` 를 썼는데
+       이건 짧은 쪽에 맞춰 자른다 — 오디오가 영상보다 짧으면 잘리는 건 **영상**
+       이다. ffmpeg 는 리턴코드 0 을 주고 파일도 멀쩡해 보여서, 20초/600프레임
+       결과물이 10초/300프레임으로 잘린 채 "ok" 로 보고됐다. 이제 ``-shortest``
+       를 쓰지 않고, 합성 결과의 프레임 수를 세어 원본과 다르면 합성을 버린다.
+    2. **검증 전에는 무음본을 지우지 않는다.** 합성은 임시 파일에 하고, 통과했을
+       때만 출력 경로로 옮긴다. 어떤 경로로 실패하든 익명화된 영상은 반드시
+       ``output`` 에 남는다 — 오디오가 없어서 결과물이 통째로 없는 게 최악이다.
+    3. **매달리지 않는다.** ffmpeg/ffprobe 는 손상된 스트림이나 네트워크 저장소
+       에서 영원히 블록될 수 있다. 서버에서는 그게 곧 큐 전체의 정지다.
+
+    반환값: 'ok' | 'no-audio' | 'disabled' | 'ffmpeg-missing' | 'ffprobe-failed'
+            | 'ffmpeg-timeout' | 'ffmpeg-failed: ...' | 'verify-failed'
+            | 'frame-loss: got/expected'
     """
     def fallback(reason):
         shutil.move(noaudio, output)
@@ -140,20 +213,41 @@ def _mux_audio(noaudio, original, output, keep_audio=True):
         log.warning("ffmpeg/ffprobe 없음 — 오디오 없이 출력한다")
         return fallback("ffmpeg-missing")
 
-    probe_cmd = ["ffprobe", "-v", "error", "-select_streams", "a",
-                 "-show_entries", "stream=codec_type", "-of", "csv=p=0", original]
-    p = subprocess.run(probe_cmd, capture_output=True, text=True)
-    if p.returncode != 0:
-        return fallback(f"ffprobe-failed: {p.stderr[-200:].strip()}")
-    if not p.stdout.strip():
+    audio = has_audio(original, timeout)
+    if audio is None:
+        return fallback("ffprobe-failed")
+    if not audio:
         return fallback("no-audio")
 
+    root, ext = os.path.splitext(noaudio)
+    muxed = root + ".muxed" + (ext or ".mp4")
+    # -shortest 없음(위 1번). +faststart 는 moov 를 앞으로 옮겨 브라우저가
+    # 전체를 받기 전에 재생을 시작할 수 있게 한다 — 웹 UI 미리보기용.
     cmd = ["ffmpeg", "-y", "-i", noaudio, "-i", original,
-           "-c:v", "copy", "-map", "0:v:0", "-map", "1:a:0", "-shortest", output]
-    p = subprocess.run(cmd, capture_output=True, text=True)
-    if p.returncode != 0 or not os.path.exists(output):
+           "-c:v", "copy", "-map", "0:v:0", "-map", "1:a:0",
+           "-movflags", "+faststart", muxed]
+    p = _run(cmd, timeout)
+    if p is None:
+        _unlink(muxed)
+        return fallback("ffmpeg-timeout")
+    if p.returncode != 0 or not os.path.exists(muxed) or os.path.getsize(muxed) == 0:
+        _unlink(muxed)
         log.warning("ffmpeg 실패 (%s) — 오디오 없이 출력한다", p.returncode)
         return fallback(f"ffmpeg-failed: {p.stderr[-200:].strip()}")
+
+    if expected_frames is not None:
+        got, _dur = video_frame_count(muxed, timeout)
+        if got is None:
+            _unlink(muxed)
+            log.warning("합성 결과를 검증할 수 없다 — 무음본을 쓴다")
+            return fallback("verify-failed")
+        if got != expected_frames:
+            _unlink(muxed)
+            log.warning("합성 결과가 %d/%d 프레임 — 합성을 버리고 무음본을 쓴다",
+                        got, expected_frames)
+            return fallback(f"frame-loss: {got}/{expected_frames}")
+
+    shutil.move(muxed, output)
     os.remove(noaudio)
     return "ok"
 
@@ -250,7 +344,8 @@ class VideoAnonymizer:
             log.info("      %d frames — %.1fs (%.1f fps)", rendered, t_render,
                      rendered / t_render if t_render else 0)
             t0 = time.perf_counter()
-            status = _mux_audio(noaudio, input_path, output_path, keep_audio)
+            status = _mux_audio(noaudio, input_path, output_path, keep_audio,
+                                expected_frames=rendered)
             t_audio = time.perf_counter() - t0
         finally:
             shutil.rmtree(tmpdir, ignore_errors=True)
