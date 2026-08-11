@@ -643,7 +643,14 @@ class VideoAnonymizer:
         # 한 프레임도 못 뽑는다. 읽을 수 있는 형태로 만들어 놓고 시작한다.
         from . import ingest             # 지연 임포트 (ingest 가 이 모듈을 쓴다)
         t0 = time.perf_counter()
-        decode_path, ing = ingest.ensure_decodable(input_path, tmpdir)
+        # 전사는 긴 영상이면 수십 초가 걸린다. 그동안 진행률이 안 움직이면
+        # 멈춘 것으로 보인다 — 별도 단계로 보고한다.
+        def on_transcode(done, total):
+            if progress is not None:
+                progress("transcode", done, max(total, done))
+
+        decode_path, ing = ingest.ensure_decodable(input_path, tmpdir,
+                                                   progress=on_transcode)
         t_ingest = time.perf_counter() - t0
 
         info = probe(decode_path)

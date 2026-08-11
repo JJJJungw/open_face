@@ -120,3 +120,35 @@ def test_isopened_alone_is_not_trusted(tmp_path, make_video):
         assert True                       # 정확히 이 상황을 막는 게 이 모듈이다
     else:
         pytest.skip("이 빌드에서는 재현되지 않는다")
+
+
+# ── 전사 진행률 ──────────────────────────────────────────────────────────────
+#
+# 긴 영상은 전사만 수십 초가 걸린다. 그동안 화면이 '준비 0%' 로 멈춰 있어서
+# 두 번째 작업부터 멈춘 것처럼 보였다. 실제로는 돌고 있었다.
+
+def test_transcode_reports_progress(tmp_path, make_video):
+    src, n, _size = make_video(name="src.mp4", frames=30)
+    seen = []
+    dst = str(tmp_path / "out.mp4")
+
+    ingest.transcode(src, dst, progress=lambda d, t: seen.append((d, t)))
+
+    assert seen, "진행률 보고가 한 번도 없었다"
+    done = [d for d, _t in seen]
+    assert done == sorted(done)                 # 뒤로 가지 않는다
+    assert seen[-1][0] == seen[-1][1]           # 마지막 한 칸을 남기지 않는다
+    assert seen[-1][1] > 0
+
+
+def test_expected_frames_counts_the_source(make_video):
+    src, n, _size = make_video(name="counted.mp4", frames=24)
+    got = ingest.expected_frames(src)
+    assert abs(got - n) <= 2, (got, n)
+
+
+def test_transcode_works_without_a_progress_callback(tmp_path, make_video):
+    src, _n, _size = make_video(name="quiet.mp4", frames=8)
+    dst = str(tmp_path / "quiet_out.mp4")
+    assert ingest.transcode(src, dst) == dst
+    assert os.path.getsize(dst) > 0

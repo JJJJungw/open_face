@@ -537,20 +537,34 @@ function avgSeconds(jobs) {
   return d.length ? d.reduce((a, j) => a + j.result.seconds, 0) / d.length : null;
 }
 
+// 작업 한 건에 걸리는 시간. 완료 기록이 있으면 그 평균이 제일 정확하고,
+// 없으면 지금 도는 작업의 진행률로 되짚는다. 첫 배치에서는 완료가 하나도
+// 없으니 평균만 보면 끝날 때까지 '계산 중' 이다 — 그게 이 화면의 버그였다.
+function jobSeconds(jobs, running) {
+  const avg = avgSeconds(jobs);
+  if (avg) return avg;
+  if (running && running.overall >= 5 && running.job_elapsed > 0)
+    return running.job_elapsed * 100 / running.overall;
+  return null;
+}
+
 function kpis(jobs, st) {
   const running = jobs.find(j => j.status === 'running');
   const queued = jobs.filter(j => j.status === 'queued');
   const done = jobs.filter(j => j.status === 'done');
   const failed = jobs.filter(j => j.status === 'failed');
   const avg = avgSeconds(jobs);
+  const per = jobSeconds(jobs, running);
   const remain = (running ? 1 : 0) + queued.length;
-  const etaAll = running ? running.eta + (avg ? queued.length * avg : 0) : null;
+  // 수행중 작업은 '이 작업이 끝나기까지'(job_eta), 대기 작업은 한 건 소요 x 건수.
+  const etaAll = running && per != null
+    ? (running.job_eta || 0) + queued.length * per : null;
   const rf = done.length && done[0].result ? done[0].result.realtime_factor : null;
 
   $('#kpis').innerHTML = `
     <div class="tile hero">
       <div class="lb">전체 남은 시간</div>
-      <div class="v">${etaAll != null && avg ? fmt(etaAll) : (remain ? '계산 중' : '없음')}</div>
+      <div class="v">${etaAll != null ? fmt(etaAll) : (remain ? '계산 중' : '없음')}</div>
       <div class="sub">${remain ? `남은 작업 ${remain}건` : '처리할 작업이 없습니다'}</div>
     </div>
     <div class="tile">
@@ -562,7 +576,8 @@ function kpis(jobs, st) {
       <div class="lb">완료</div>
       <div class="v">${done.length}${failed.length
         ? `<small style="color:var(--critical)"> · 실패 ${failed.length}</small>` : ''}</div>
-      <div class="sub">${avg ? `평균 ${fmt(avg)}` : '기록 없음'}</div>
+      <div class="sub">${avg ? `평균 ${fmt(avg)}`
+        : (per ? `추정 ${fmt(per)}` : '기록 없음')}</div>
     </div>
     <div class="tile">
       <div class="lb">처리 속도</div>
@@ -629,7 +644,8 @@ function card(j) {
                : j.status === 'running' ? 'run' : '';
   let body = '';
   if (j.status === 'running') {
-    const stage = j.stage === 'detect' ? '검출' : j.stage === 'render' ? '렌더' : '준비';
+    const stage = { transcode:'변환 → H.264', detect:'검출', render:'렌더' }[j.stage]
+                || '준비';
     body = `<div class="bar2"><i style="width:${j.overall}%"></i></div>
       <div class="meta">${stage} ${j.percent}% · ${j.fps.toFixed(0)} f/s ·
         남은 시간 ${fmt(j.eta)}</div>

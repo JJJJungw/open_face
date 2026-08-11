@@ -230,6 +230,7 @@ class Job:
     result: dict = field(default_factory=dict)
     created: float = field(default_factory=time.time)
     finished: float = 0.0
+    started: float = 0.0          # 실제로 돌기 시작한 시각 (대기 시간 제외)
     stage_t0: float = 0.0
 
 
@@ -310,13 +311,28 @@ def snapshot(j, queued_ahead=0):
     fps = j.done / elapsed if elapsed > 0 else 0.0
     eta = (j.total - j.done) / fps if fps > 0 and j.done < j.total else 0.0
     # 검출과 렌더가 각각 영상 전체를 한 번씩 훑으므로 절반씩 배분한다.
-    overall = pct // 2 + (50 if j.stage == "render" else 0)
+    # 전사(transcode)는 그 앞 단계라 자기 게이지를 따로 채운다 — 검출이
+    # 시작되면 0 부터 다시 오른다.
+    if j.stage == "transcode":
+        overall = pct
+    else:
+        overall = pct // 2 + (50 if j.stage == "render" else 0)
     if j.status == "done":
         overall = 100
+
+    # 이 작업 하나가 끝나기까지 남은 시간. eta 는 **현재 단계**만 보므로
+    # 검출 중이면 렌더가 통째로 빠져 절반으로 나온다. 대기열 전체 예상을
+    # 세우려면 작업 한 건의 총 소요가 필요해서 진행률로 되짚는다.
+    job_elapsed = time.time() - j.started if j.started else 0.0
+    job_eta = (job_elapsed * (100 - overall) / overall
+               if j.status == "running" and overall > 0
+               and j.stage in ("detect", "render") else 0.0)
+
     return {
         "id": j.id, "name": j.name, "status": j.status, "stage": j.stage,
         "percent": pct, "overall": overall, "fps": round(fps, 1),
-        "eta": round(eta), "error": j.error, "result": j.result,
+        "eta": round(eta), "job_eta": round(job_eta),
+        "job_elapsed": round(job_elapsed), "error": j.error, "result": j.result,
         "attempts": j.attempts, "max_attempts": MAX_ATTEMPTS,
         "s3_key": j.s3_key, "s3_output": j.s3_output,
         "queued_ahead": queued_ahead,
@@ -458,6 +474,7 @@ def _run(job_id):
             save_job(j)
             return
         j.status, j.stage_t0 = "running", time.time()
+        j.started = time.time()
         j.attempts += 1
         params, workdir, name = dict(j.params), j.workdir, j.name
     save_job(j)

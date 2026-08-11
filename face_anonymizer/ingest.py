@@ -20,10 +20,13 @@ H.264 로 옮겨 담고 그 파일을 파이프라인에 준다.
 
 import logging
 import os
+import subprocess
+import time
 
 import cv2
 
-from .pipeline import FFMPEG_TIMEOUT, VideoOpenError, _run, pick_encoder
+from .pipeline import (FFMPEG_TIMEOUT, VideoOpenError, _run, pick_encoder,
+                       video_duration)
 
 log = logging.getLogger(__name__)
 
@@ -63,8 +66,72 @@ def opencv_can_decode(path):
         cap.release()
 
 
-def transcode(src, dst, crf=INGEST_CRF, timeout=None):
-    """ffmpeg 로 H.264 로 옮겨 담는다 (영상만)."""
+def expected_frames(path):
+    """전사 진행률의 분모. 알 수 없으면 0.
+
+    nb_frames 는 컨테이너에 따라 없다. 그때는 길이 x 프레임률로 센다 —
+    진행률 표시용이라 정확할 필요는 없다.
+    """
+    p = _run(["ffprobe", "-v", "error", "-select_streams", "v:0",
+              "-show_entries", "stream=nb_frames,r_frame_rate",
+              "-of", "default=nk=1:nw=1", path])
+    if p is None or p.returncode != 0:
+        return 0
+    lines = [x.strip() for x in p.stdout.splitlines() if x.strip()]
+    fps = 0.0
+    for x in lines:
+        if x.isdigit() and int(x) > 0:
+            return int(x)
+        if "/" in x:
+            try:
+                n, d = x.split("/")
+                fps = float(n) / float(d) if float(d) else 0.0
+            except (ValueError, ZeroDivisionError):
+                fps = 0.0
+    dur = video_duration(path)
+    return int(round(dur * fps)) if dur and fps else 0
+
+
+def _run_with_progress(cmd, total, progress, timeout):
+    """ffmpeg 를 돌리면서 frame= 을 읽어 진행률을 보고한다.
+
+    ``-progress pipe:1`` 은 frame/fps/progress 를 key=value 로 흘려 준다.
+    stderr 로 나오는 통계는 파싱하기 나쁘고 -v error 로 막아 두었다.
+    """
+    cmd = cmd[:1] + ["-progress", "pipe:1", "-nostats"] + cmd[1:]
+    t0 = time.time()
+    proc = subprocess.Popen(cmd, stdout=subprocess.PIPE, stderr=subprocess.PIPE,
+                            text=True)
+    try:
+        for line in proc.stdout:
+            if line.startswith("frame=") and progress is not None and total:
+                try:
+                    n = int(line.split("=", 1)[1])
+                except ValueError:
+                    continue
+                progress(min(n, total), total)
+            if time.time() - t0 > timeout:
+                proc.kill()
+                return None
+    finally:
+        try:
+            proc.stdout.close()
+        except Exception:                           # noqa: BLE001
+            pass
+    err = proc.stderr.read()
+    proc.stderr.close()
+    proc.wait()
+    if progress is not None and total:
+        progress(total, total)                      # 마지막 한 칸을 남기지 않는다
+    return proc.returncode, err
+
+
+def transcode(src, dst, crf=INGEST_CRF, timeout=None, progress=None):
+    """ffmpeg 로 H.264 로 옮겨 담는다 (영상만).
+
+    ``progress`` 는 ``callable(done, total)``. 긴 영상은 전사만 수십 초가
+    걸리는데, 그동안 화면이 '준비 0%' 로 멈춰 있으면 멈춘 것으로 보인다.
+    """
     enc = pick_encoder()
     if enc is None:
         raise TranscodeError("쓸 수 있는 H.264 인코더가 없다")
@@ -73,18 +140,19 @@ def transcode(src, dst, crf=INGEST_CRF, timeout=None):
            "-map", "0:v:0", "-an",
            "-c:v", encoder, qflag, str(crf), *extra,
            "-pix_fmt", "yuv420p", dst]
-    p = _run(cmd, timeout or FFMPEG_TIMEOUT)
-    if p is None:
+    res = _run_with_progress(cmd, expected_frames(src), progress,
+                             timeout or FFMPEG_TIMEOUT)
+    if res is None:
         raise TranscodeError("ffmpeg 타임아웃")
-    if p.returncode != 0 or not os.path.exists(dst) or os.path.getsize(dst) == 0:
-        raise TranscodeError(f"ffmpeg 실패 ({p.returncode}): "
-                             f"{(p.stderr or '')[-200:].strip()}")
+    rc, err = res
+    if rc != 0 or not os.path.exists(dst) or os.path.getsize(dst) == 0:
+        raise TranscodeError(f"ffmpeg 실패 ({rc}): {(err or '')[-200:].strip()}")
     if not opencv_can_decode(dst):
         raise TranscodeError("옮겨 담은 파일도 읽을 수 없다")
     return dst
 
 
-def ensure_decodable(path, workdir, crf=INGEST_CRF):
+def ensure_decodable(path, workdir, crf=INGEST_CRF, progress=None):
     """파이프라인에 넘길 경로를 돌려준다.
 
     Returns (경로, 정보). 정보에는 ``source_codec``, ``transcoded``(bool) 이 담긴다.
@@ -101,7 +169,7 @@ def ensure_decodable(path, workdir, crf=INGEST_CRF):
     os.makedirs(workdir, exist_ok=True)
     dst = os.path.join(workdir, "decodable.mp4")
     try:
-        transcode(path, dst, crf)
+        transcode(path, dst, crf, progress=progress)
     except TranscodeError as e:
         raise TranscodeError(
             f"입력을 읽을 수 없다 (codec={codec or '알 수 없음'}): {e}") from e
