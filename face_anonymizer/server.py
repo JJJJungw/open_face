@@ -749,11 +749,17 @@ async def create_jobs(request: Request):
     진입점을 나누면 클라이언트가 경우마다 분기해야 하고, 화면에도 버튼이 그만큼
     늘어난다. 입력이 무엇이냐만 다르고 나머지는 전부 같다.
 
-    받는 형태 (셋 중 하나)::
+    받는 형태::
 
         multipart/form-data   file=@clip.mp4                     # 업로드 한 건
-        application/json      {"s3_keys": ["a.mp4", "b.mp4"]}    # 고른 것들
-        application/json      {"s3_prefix": "videos/2026-08/"}   # 폴더 통째로
+        application/json      {"s3_keys": ["a.mp4", "b.mp4"]}    # 고른 파일들
+        application/json      {"s3_prefix": "kbs/"}              # 폴더 하나
+        application/json      {"s3_prefix": ["kbs/", "mbc/"]}    # 폴더 여럿
+
+    **파일과 폴더는 같이 보낼 수 있다.** 화면에서 파일 두 개와 폴더 하나를
+    한꺼번에 체크하는 게 자연스럽기 때문이다. 펼친 결과가 겹치면 한 번만
+    넣는다. 업로드(``file``)만 S3 선택과 같이 못 보낸다 — 올라오는 바이트와
+    버킷의 키는 아예 다른 경로다.
 
     옵션은 JSON 이면 ``params``, multipart 면 폼 필드로 준다. 안 주면 서비스
     기본값(GET /api/defaults).
@@ -773,7 +779,7 @@ async def create_jobs(request: Request):
     """
     ctype = (request.headers.get("content-type") or "").split(";")[0].strip()
     upload = None
-    keys, prefix, recursive, skip_processed = [], "", False, False
+    keys, prefixes, recursive, skip_processed = [], [], False, False
 
     if ctype == "application/json":
         try:
@@ -783,7 +789,12 @@ async def create_jobs(request: Request):
         if not isinstance(body, dict):
             raise errors.INVALID_INPUT("객체를 보내라")
         keys = body.get("s3_keys") or []
-        prefix = body.get("s3_prefix") or ""
+        prefixes = body.get("s3_prefix") or body.get("s3_prefixes") or []
+        if isinstance(prefixes, str):               # 한 개는 문자열로도 받는다
+            prefixes = [prefixes]
+        if not isinstance(prefixes, list):
+            raise errors.INVALID_INPUT("s3_prefix 는 문자열이나 배열이어야 한다",
+                                       field="s3_prefix")
         recursive = bool(body.get("recursive"))
         skip_processed = bool(body.get("skip_processed"))
         given = body.get("params") or {}
@@ -798,7 +809,7 @@ async def create_jobs(request: Request):
         one = form.get("s3_key")
         if one:
             keys.append(one)
-        prefix = form.get("s3_prefix") or ""
+        prefixes = [v for v in form.getlist("s3_prefix") if v]
         recursive = str(form.get("recursive", "")).lower() in ("1", "true", "on")
         skip_processed = str(form.get("skip_processed", "")).lower() in (
             "1", "true", "on")
@@ -806,34 +817,43 @@ async def create_jobs(request: Request):
         given = {k: _coerce(k, v) for k, v in given.items()}
 
     uploaded = upload is not None and bool(getattr(upload, "filename", ""))
-    if sum([uploaded, bool(keys), bool(prefix)]) == 0:
+    if not uploaded and not keys and not prefixes:
         raise errors.MISSING_INPUT()
-    if sum([uploaded, bool(keys), bool(prefix)]) > 1:
+    if uploaded and (keys or prefixes):
         raise errors.CONFLICTING_INPUT(
-            "file · s3_keys · s3_prefix 중 하나만 보내라")
+            "업로드(file)와 S3 선택은 같이 보낼 수 없다")
 
     params = resolve_params(given)
 
     # 폴더는 여기서 펼친다. 클라이언트가 목록을 먼저 받아 오게 하면 그 사이에
     # 파일이 늘거나 줄 수 있고, 왕복도 한 번 더 든다.
-    if prefix:
+    if prefixes:
         store = s3mod.get_store()
         if store is None:
             raise errors.S3_NOT_CONFIGURED()
-        if ".." in prefix:
-            raise errors.INVALID_KEY(prefix)
-        try:
-            objs = (store.list_all(prefix) if recursive
-                    else store.list(prefix)[1])
-        except s3mod.S3Error as e:
-            raise (e.problem or errors.S3_UPSTREAM)(str(e)) from e
-        done = store.processed_keys() if skip_processed else set()
-        keys = [o["key"] for o in objs
+        expanded = []
+        for prefix in prefixes:
+            if ".." in prefix:
+                raise errors.INVALID_KEY(prefix)
+            try:
+                objs = (store.list_all(prefix) if recursive
+                        else store.list(prefix)[1])
+            except s3mod.S3Error as e:
+                raise (e.problem or errors.S3_UPSTREAM)(str(e)) from e
+            done = store.processed_keys() if skip_processed else set()
+            expanded += [
+                o["key"] for o in objs
                 if os.path.splitext(o["key"])[1].lower() in VIDEO_EXT
                 and not naming.is_output(o["key"])
                 and (not skip_processed or store.output_key(o["key"]) not in done)]
-        if not keys:
-            raise errors.BATCH_EMPTY(f"{prefix} 에 처리할 영상이 없다")
+        if not expanded and not keys:
+            raise errors.BATCH_EMPTY(
+                f"{' · '.join(prefixes)} 에 처리할 영상이 없다")
+        keys = keys + expanded
+
+    # 폴더를 펼친 결과가 따로 고른 파일과 겹칠 수 있다. 순서는 유지한다 —
+    # 화면에 보인 차례대로 큐에 들어가야 진행 상황이 읽힌다.
+    keys = list(dict.fromkeys(keys))
 
     if BATCH_MAX and len(keys) > BATCH_MAX:
         raise errors.BATCH_TOO_LARGE(f"{len(keys)}건 (상한 {BATCH_MAX})",

@@ -272,9 +272,8 @@ INDEX_HTML = r"""<!doctype html>
             <div class="crumb" id="crumb"></div>
             <div class="search"><input id="q" placeholder="이름으로 검색" autocomplete="off"></div>
             <button class="ghost" onclick="loadObjects()">새로고침</button>
-      <span class="divider"></span>
-      <label class="toggle"><input type="checkbox" id="skipdone" checked><span>처리된 건 건너뛰기</span></label>
-      <button class="ghost" onclick="submitFolder()">폴더 전체 제출</button>
+            <span class="divider"></span>
+            <label class="toggle"><input type="checkbox" id="skipdone" checked><span>처리된 건 건너뛰기</span></label>
           </div>
           <div id="browser"></div>
           <details class="pad" style="border-top:1px solid var(--line)">
@@ -399,15 +398,22 @@ function renderBrowser() {
     el.innerHTML = '<div class="empty">항목이 없습니다</div>';
     return updatePicked();
   }
-  const selectable = objects.filter(o => VIDEO_RE.test(o.key));
-  const allSel = selectable.length && selectable.every(o => S3.selected.has(o.key));
+  // 폴더도 파일과 똑같이 체크해서 고른다. 폴더를 고르면 그 안의 영상 전부가
+  // 들어간다 — 별도의 '폴더 전체 제출' 버튼을 두면 같은 일에 버튼이 둘이 된다.
+  const selectable = folders.concat(objects.filter(o => VIDEO_RE.test(o.key))
+                                           .map(o => o.key));
+  const allSel = selectable.length && selectable.every(k => S3.selected.has(k));
 
   const rows = folders.map(f => {
     const name = f.replace(S3.prefix, '').replace(/\/$/, '');
-    return `<tr><td></td>
+    const sel = S3.selected.has(f);
+    return `<tr class="${sel ? 'sel' : ''}">
+      <td><input type="checkbox" ${sel ? 'checked' : ''}
+            onchange="toggle('${f}', this.checked)"></td>
       <td><div class="key"><span class="ico">▸</span>
         <span class="nm"><a onclick="loadObjects('${f}')">${name}/</a></span></div></td>
-      <td class="num">—</td><td class="when">—</td><td></td></tr>`;
+      <td class="num">—</td><td class="when">—</td>
+      <td><span class="tag plain">폴더</span></td></tr>`;
   }).concat(objects.map(o => {
     const name = o.key.replace(S3.prefix, '');
     const isVideo = VIDEO_RE.test(o.key), sel = S3.selected.has(o.key);
@@ -433,22 +439,33 @@ function renderBrowser() {
   updatePicked();
 }
 
+const isFolder = k => k.endsWith('/');
 function toggle(key, on) { on ? S3.selected.add(key) : S3.selected.delete(key); renderBrowser(); }
 function toggleAll(on) {
   const q = ($('#q').value || '').toLowerCase();
+  S3.folders.filter(f => f.toLowerCase().includes(q))
+    .forEach(f => on ? S3.selected.add(f) : S3.selected.delete(f));
   S3.objects.filter(o => VIDEO_RE.test(o.key) && o.key.toLowerCase().includes(q))
     .forEach(o => on ? S3.selected.add(o.key) : S3.selected.delete(o.key));
   renderBrowser();
 }
+function split() {
+  const all = [...S3.selected];
+  return { files: all.filter(k => !isFolder(k)), dirs: all.filter(isFolder) };
+}
 function updatePicked() {
-  const n = S3.selected.size;
+  const { files, dirs } = split();
   if (picked) {
     $('#picked').innerHTML = `업로드 <b>${picked.name}</b> · ${(picked.size/1048576).toFixed(1)} MB`;
     go.disabled = false;
-  } else {
-    $('#picked').innerHTML = n ? `<b>${n}개</b> 선택됨` : '선택된 항목 없음';
-    go.disabled = n === 0;
+    return;
   }
+  const bits = [];
+  if (files.length) bits.push(`영상 <b>${files.length}개</b>`);
+  if (dirs.length) bits.push(`폴더 <b>${dirs.length}개</b>`);
+  $('#picked').innerHTML = bits.length ? bits.join(' · ') + ' 선택됨'
+                                       : '선택된 항목 없음';
+  go.disabled = !bits.length;
 }
 function setFile(f) { picked = f; S3.selected.clear(); updatePicked(); }
 
@@ -495,30 +512,22 @@ async function submitJobs(body, label) {
 
 go.onclick = () => {
   if (picked) return uploadFile();
-  const keys = [...S3.selected];
-  if (keys.length) return submitJobs({ s3_keys: keys }, `제출 중… ${keys.length}건`);
-};
-
-// 지금 보고 있는 폴더만 넣는다. 하위 폴더까지 훑는 recursive 옵션은 API 에는
-// 남아 있지만 버튼으로는 안 뺀다 — 화면에 보이는 것과 들어가는 것이 달라지면
-// 몇 건이 들어갔는지 눌러 보기 전에는 알 수 없다.
-function submitFolder() {
-  if (!S3.bucket) return;
+  const { files, dirs } = split();
+  if (!files.length && !dirs.length) return;
   const skip = $('#skipdone').checked;
-  const n = S3.objects.filter(o => VIDEO_RE.test(o.key)).length;
-  const done = S3.objects.filter(o => VIDEO_RE.test(o.key) && o.processed).length;
-  if (!n) return alert('이 폴더에 영상이 없습니다');
-  const lines = [
-    `${S3.prefix || '(최상위)'} 의 영상을 비식별화합니다.`,
-    '',
-    `이 폴더의 영상  ${n}개${
-      skip && done ? ` (처리됨 ${done}개 제외 → ${n - done}개)` : ''}`,
-    `이미 처리된 건  ${skip ? '건너뜀' : '다시 처리'}`,
-  ];
-  if (!confirm(lines.join('\n'))) return;
-  return submitJobs({ s3_prefix: S3.prefix, skip_processed: skip },
-                    '폴더 제출 중…');
-}
+
+  // 폴더는 안에 몇 개가 들었는지 화면에 안 보인다. 그것만 한 번 확인받는다.
+  if (dirs.length) {
+    const lines = [`선택한 항목을 비식별화합니다.`, ''];
+    dirs.forEach(d => lines.push(`폴더   ${d}`));
+    if (files.length) lines.push(`영상   ${files.length}개`);
+    lines.push('', `이미 처리된 건  ${skip ? '건너뜀' : '다시 처리'}`);
+    if (!confirm(lines.join('\n'))) return;
+  }
+  const label = dirs.length ? '제출 중…' : `제출 중… ${files.length}건`;
+  return submitJobs({ s3_keys: files, s3_prefix: dirs, skip_processed: skip },
+                    label);
+};
 
 function paramObject() {
   return { method: $('#method').value, conf: +$('#conf').value,

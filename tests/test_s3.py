@@ -274,11 +274,27 @@ def test_rejects_non_video_key(s3client):
 KEY = "videos/2026-08/f_00001_00_0000000_0042000_raw.mp4"
 
 
+def seed(client, n):
+    """버킷에 서로 다른 영상 n 개를 더 넣고 그 키들을 준다.
+
+    같은 키를 여러 번 보내면 이제 한 번만 들어간다(중복 제거). 개수를 보는
+    테스트는 서로 다른 키를 써야 한다.
+    """
+    data = client.store.client.objects[KEY][0]
+    keys = []
+    for i in range(2, 2 + n):
+        k = f"videos/2026-08/f_{i:05d}_00_0000000_0010000_raw.mp4"
+        client.store.client.objects[k] = (data, NOW)
+        keys.append(k)
+    return keys
+
+
 def test_batch_accepts_many_and_reports_each(s3client):
     """한 건이 거절돼도 나머지는 받는다 — 전체를 되돌리면 무엇이 들어갔는지
     호출하는 쪽이 알 수 없다."""
+    (other,) = seed(s3client, 1)
     r = s3client.post("/api/jobs", json={
-        "s3_keys": [KEY, "videos/2026-08/notes.txt", "../escape.mp4", KEY]})
+        "s3_keys": [KEY, "videos/2026-08/notes.txt", "../escape.mp4", other]})
 
     assert r.status_code == 202
     d = r.json()
@@ -303,7 +319,8 @@ def test_batch_rejects_empty_and_oversized(s3client, monkeypatch):
     assert s3client.post("/api/jobs", json={"s3_keys": []}).json()["code"] \
         == "missing_input"
     monkeypatch.setattr(server, "BATCH_MAX", 2)
-    b = s3client.post("/api/jobs", json={"s3_keys": [KEY, KEY, KEY]}).json()
+    b = s3client.post("/api/jobs",
+                      json={"s3_keys": [KEY] + seed(s3client, 2)}).json()
     assert b["code"] == "batch_too_large" and b["limit"] == 2
 
 
@@ -418,7 +435,7 @@ def test_folder_submission_excludes_deid_outputs(s3client):
 
 def test_single_key_and_many_keys_use_the_same_endpoint(s3client):
     one = s3client.post("/api/jobs", json={"s3_keys": [KEY]})
-    many = s3client.post("/api/jobs", json={"s3_keys": [KEY, KEY]})
+    many = s3client.post("/api/jobs", json={"s3_keys": seed(s3client, 2)})
 
     assert one.status_code == many.status_code == 202
     assert set(one.json()) == set(many.json())          # 응답 형태가 같다
@@ -444,21 +461,54 @@ def test_all_rejected_is_an_error_not_202(s3client):
 def test_batch_size_is_unbounded_by_default(s3client, monkeypatch):
     """폴더 하나에 수천 건이 들어 있는 게 정상이다. 상한에 걸려서 사용자가
     폴더를 손으로 쪼개게 만들면 안 된다. 필요하면 FA_BATCH_MAX 로 다시 건다."""
+    three = [KEY] + seed(s3client, 2)
     monkeypatch.setattr(server, "BATCH_MAX", 2)
-    capped = s3client.post("/api/jobs", json={"s3_keys": [KEY, KEY, KEY]})
+    capped = s3client.post("/api/jobs", json={"s3_keys": three})
     assert capped.status_code == 400
     assert capped.json()["code"] == "batch_too_large"
 
     monkeypatch.setattr(server, "BATCH_MAX", 0)          # 기본값
-    r = s3client.post("/api/jobs", json={"s3_keys": [KEY, KEY, KEY]})
+    r = s3client.post("/api/jobs", json={"s3_keys": three})
     assert r.status_code == 202, r.text
     assert len(r.json()["accepted"]) == 3
     for a in r.json()["accepted"]:
         wait(s3client, a["id"], timeout=60)
 
 
-def test_cannot_mix_input_kinds(s3client):
-    r = s3client.post("/api/jobs", json={"s3_keys": [KEY],
-                                         "s3_prefix": "videos/"})
+def test_files_and_folders_can_be_submitted_together(s3client):
+    """화면에서 파일 두 개와 폴더 하나를 같이 체크하는 게 자연스럽다.
+
+    펼친 결과가 겹치면 한 번만 들어가야 한다 — 폴더 안에 있는 파일을 따로
+    체크했다고 두 번 돌 이유가 없다.
+    """
+    other = "videos/2026-09/f_00002_00_0000000_0031000_raw.mp4"
+    s3client.store.client.objects[other] = \
+        (s3client.store.client.objects[KEY][0], NOW)
+
+    r = s3client.post("/api/jobs", json={
+        "s3_keys": [KEY],                       # 폴더를 펼치면 또 나오는 키
+        "s3_prefix": ["videos/2026-08/", "videos/2026-09/"]})
+
+    assert r.status_code == 202, r.text
+    got = [a["s3_key"] for a in r.json()["accepted"]]
+    assert got == [KEY, other]                  # 중복 없이, 고른 순서대로
+    for a in r.json()["accepted"]:
+        wait(s3client, a["id"], timeout=60)
+
+
+def test_prefix_takes_a_single_string_too(s3client):
+    """폴더 하나면 배열로 감싸지 않아도 된다."""
+    r = s3client.post("/api/jobs", json={"s3_prefix": "videos/2026-08/"})
+    assert r.status_code == 202, r.text
+    for a in r.json()["accepted"]:
+        wait(s3client, a["id"], timeout=60)
+
+
+def test_upload_cannot_be_mixed_with_s3_selection(s3client, make_video):
+    """올라오는 바이트와 버킷의 키는 아예 다른 경로다."""
+    src, _n, _size = make_video(name="up.mp4", frames=4)
+    with open(src, "rb") as fh:
+        r = s3client.post("/api/jobs", files={"file": ("up.mp4", fh, "video/mp4")},
+                          data={"s3_key": KEY})
     assert r.status_code == 400
     assert r.json()["code"] == "conflicting_input"
