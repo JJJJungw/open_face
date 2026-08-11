@@ -12,9 +12,9 @@ import pytest
 
 from conftest import FakeDetector, face_rect, region_is_obscured, read_frames
 
-pytest.importorskip("fastapi", reason="requirements-serve.txt 미설치")
-pytest.importorskip("httpx", reason="requirements-serve.txt 미설치")
-pytest.importorskip("multipart", reason="python-multipart 미설치")
+pytest.importorskip("fastapi", reason="pip install -r requirements-serve.txt")
+pytest.importorskip("multipart", reason="pip install -r requirements-serve.txt")
+pytest.importorskip("httpx", reason="pip install -r requirements-dev.txt")
 
 from fastapi.testclient import TestClient           # noqa: E402
 

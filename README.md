@@ -56,7 +56,14 @@ pip install -r requirements.txt -r requirements-serve.txt
 uvicorn face_anonymizer.server:app --host 0.0.0.0 --port 8000
 ```
 
-브라우저로 열면 영상을 끌어다 놓고 진행률·fps·남은 시간을 보면서 처리하고 결과를 내려받을 수 있다.
+브라우저로 열면 S3 를 콘솔처럼 훑으면서 파일이나 폴더를 골라 제출하고, 진행률·fps·남은 시간을 보면서 결과를 내려받을 수 있다.
+
+테스트를 돌리려면 `requirements-dev.txt` 가 더 필요하다. 없으면 서버 테스트가 통째로 skip 된다(`TestClient` 가 httpx 를 쓴다).
+
+```bash
+pip install -r requirements-dev.txt
+pytest -q
+```
 
 | 엔드포인트 | 설명 |
 |---|---|
