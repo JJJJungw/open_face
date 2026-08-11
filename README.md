@@ -69,6 +69,7 @@ uvicorn face_anonymizer.server:app --host 0.0.0.0 --port 8000
 | `DELETE /api/jobs/{id}` | 작업과 파일 삭제 (진행 중이면 409) |
 | `GET /api/jobs?limit=&status=` | 작업 목록 (최신순, 기본 100건, 상태 필터) |
 | `GET /api/s3/objects?prefix=` | 버킷 한 단계 나열 (미설정 시 404) |
+| `GET /api/defaults` | 서비스가 쓰는 처리 파라미터 기본값 |
 
 ## S3
 
@@ -112,6 +113,24 @@ videos/2026-08/f_00001_00_0000000_0042000_raw.mp4
 
 boto3 는 지연 임포트라 S3 를 안 쓰면 설치할 필요가 없다.
 
+## 처리 파라미터
+
+**호출하는 쪽은 입력만 주면 된다.** 튜닝된 값은 서비스가 들고 있어야지, 호출자마다 들고 다니면 어느 설정으로 처리됐는지가 호출 지점마다 달라진다.
+
+| 항목 | 기본 | 환경 변수 |
+|---|---|---|
+| `method` | `mosaic` | `FA_METHOD` |
+| `conf` | `0.25` | `FA_CONF` |
+| `imgsz` | `1280` | `FA_IMGSZ` (검출기와 공유) |
+| `batch_size` | `32` | `FA_BATCH_SIZE` |
+| `pad` | `0.15` | `FA_PAD` |
+| `mosaic_scale` | `0.06` | `FA_MOSAIC_SCALE` |
+| `linger` | `5` | `FA_LINGER` |
+| `interp` / `keep_audio` | on | `FA_INTERP` / `FA_KEEP_AUDIO` |
+| `crf` / `bitrate_ratio` | `23` / `1.0` | `FA_CRF` / `FA_BITRATE_RATIO` |
+
+운영 중 조정은 환경 변수로 하고, 필요할 때만 요청에서 개별 항목을 덮는다(보낸 것만 덮이고 나머지는 기본값). 현재 값은 `GET /api/defaults` 로 확인한다 — 웹 UI 도 컨트롤 초깃값을 여기서 받아 가므로 서버 설정과 화면이 어긋나지 않는다.
+
 **한 번에 한 편.** 추론은 워커 스레드 하나가 순차로 돌린다(GPU 한 장에 검출기 하나).
 
 **대기열은 개수로 막지 않는다.** 전체 수행처럼 한꺼번에 수백 건을 넣는 사용이 정상이고, 개수는 애초에 잘못된 기준이다 — 10건이 50MB 짜리면 아무것도 아니고 2GB 짜리면 이미 위험하다. 대기 중인 작업은 입력 파일을 디스크에 들고 있으므로 진짜 제약은 거기다. 여유 공간이 `FA_MIN_FREE_MB`(기본 2048) 밑이면 `507` 로 거절한다. 개수 상한이 필요하면 `FA_QUEUE_MAX` 로 켤 수 있다(기본 0 = 무제한).
@@ -136,8 +155,8 @@ boto3 는 지연 임포트라 S3 를 안 쓰면 설치할 필요가 없다.
 curl -s localhost:8000/api/status          # {"ready":true,"busy":false,"queued":0,"free_mb":41230}
 
 # 2. 제출 — 바쁘면 429
-curl -sf -F file=@in.mp4 -F method=mosaic -F conf=0.4 -F batch_size=32 \
-     localhost:8000/api/jobs                # {"id":"ab12...","status":"queued"}
+curl -sf -F file=@in.mp4 localhost:8000/api/jobs   # {"id":"ab12...","status":"queued"}
+# S3 입력이면:  -F s3_key=videos/2026-08/f_00001_00_0000000_0042000_raw.mp4
 
 # 3. 진행률 폴링
 curl -s localhost:8000/api/jobs/ab12...     # {"status":"running","stage":"detect","overall":31,"fps":98.4,"eta":42}

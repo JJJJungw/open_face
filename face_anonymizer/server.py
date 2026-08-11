@@ -31,6 +31,12 @@
     FA_JOB_TTL_MIN     완료 후 자동 삭제   (기본: 120, 0이면 안 지움)
     FA_SWEEP_SEC       정리 주기           (기본: 300)
     FA_PRELOAD         기동 시 모델 로드   (기본: 1)
+
+처리 파라미터 기본값 (JOB_DEFAULTS)
+    FA_METHOD mosaic · FA_CONF 0.25 · FA_BATCH_SIZE 32 · FA_PAD 0.15
+    FA_MOSAIC_SCALE 0.06 · FA_LINGER 5 · FA_INTERP 1 · FA_KEEP_AUDIO 1
+    FA_CRF 23 · FA_BITRATE_RATIO 1.0
+    (imgsz 는 FA_IMGSZ 를 검출기와 공유한다)
     FA_QUEUE_MAX       대기열 개수 상한    (기본: 0 = 무제한)
     FA_MIN_FREE_MB     최소 여유 디스크    (기본: 2048, 미달이면 507)
     FA_LIST_LIMIT      목록 기본 개수      (기본: 100)
@@ -66,7 +72,12 @@ from fastapi.responses import FileResponse, HTMLResponse
 from . import naming
 from . import s3 as s3mod
 from .anonymize import METHODS
-from .pipeline import VideoOpenError, VideoWriteError
+from .pipeline import (
+    DEFAULT_BITRATE_RATIO,
+    DEFAULT_CRF,
+    VideoOpenError,
+    VideoWriteError,
+)
 from .webui import INDEX_HTML
 
 log = logging.getLogger(__name__)
@@ -96,6 +107,34 @@ PROGRESS_FLUSH_SEC = 0.5      # 진행률을 디스크에 쓰는 최소 간격
 
 CHUNK = 1 << 20
 VIDEO_EXT = {".mp4", ".mov", ".mkv", ".avi", ".webm", ".m4v"}
+
+
+def _bool_env(name, default):
+    v = os.environ.get(name)
+    return default if v is None else v.strip().lower() not in ("0", "false", "no")
+
+
+# 처리 파라미터 기본값.
+#
+# **호출하는 쪽은 입력만 주면 된다.** 튜닝된 값은 서비스가 들고 있어야지,
+# 호출자마다 들고 다니면 어느 설정으로 처리됐는지가 호출 지점마다 달라진다.
+# 운영 중 조정은 환경 변수로 하고, 필요할 때만 요청에서 개별 항목을 덮는다.
+#
+# imgsz 는 검출기와 같은 값을 쓴다(FA_IMGSZ). 둘이 어긋나면 워밍업한 커널과
+# 실제 추론이 달라진다.
+JOB_DEFAULTS = {
+    "method": os.environ.get("FA_METHOD", "mosaic"),
+    "conf": float(os.environ.get("FA_CONF", "0.25")),
+    "imgsz": IMGSZ,
+    "batch_size": int(os.environ.get("FA_BATCH_SIZE", "32")),
+    "pad": float(os.environ.get("FA_PAD", "0.15")),
+    "mosaic_scale": float(os.environ.get("FA_MOSAIC_SCALE", "0.06")),
+    "linger": int(os.environ.get("FA_LINGER", "5")),
+    "interp": _bool_env("FA_INTERP", True),
+    "keep_audio": _bool_env("FA_KEEP_AUDIO", True),
+    "crf": DEFAULT_CRF,
+    "bitrate_ratio": DEFAULT_BITRATE_RATIO,
+}
 
 # 추론 직렬화. max_workers=1 이 이 서버의 동시성 정책 전부다.
 _EXEC = ThreadPoolExecutor(max_workers=1, thread_name_prefix="anon")
@@ -519,6 +558,16 @@ def health(response: Response):
     return info
 
 
+@app.get("/api/defaults")
+def defaults():
+    """서비스가 쓰는 처리 파라미터 기본값.
+
+    UI 가 컨트롤 초깃값을 여기서 받아 간다 — 화면에 값을 박아 두면 서버 설정을
+    바꿔도 화면은 옛 값을 보내서 둘이 조용히 어긋난다.
+    """
+    return dict(JOB_DEFAULTS)
+
+
 @app.get("/api/s3/objects")
 def s3_objects(prefix: str = ""):
     """버킷을 한 단계씩 나열한다 (S3 콘솔과 같은 방식).
@@ -546,16 +595,26 @@ def s3_objects(prefix: str = ""):
 async def create_job(
     file: UploadFile = File(None),
     s3_key: str = Form(""),
-    method: str = Form("mosaic"),
-    conf: float = Form(0.25),
-    imgsz: int = Form(1280),
-    batch_size: int = Form(16),
-    pad: float = Form(0.15),
-    mosaic_scale: float = Form(0.06),
-    linger: int = Form(5),
-    interp: bool = Form(True),
-    keep_audio: bool = Form(True),
+    # 전부 선택 사항이다. 안 보내면 서비스 기본값(JOB_DEFAULTS)을 쓴다 —
+    # 호출하는 쪽은 입력만 주면 된다.
+    method: str = Form(None),
+    conf: float = Form(None),
+    imgsz: int = Form(None),
+    batch_size: int = Form(None),
+    pad: float = Form(None),
+    mosaic_scale: float = Form(None),
+    linger: int = Form(None),
+    interp: bool = Form(None),
+    keep_audio: bool = Form(None),
+    crf: int = Form(None),
+    bitrate_ratio: float = Form(None),
 ):
+    given = {"method": method, "conf": conf, "imgsz": imgsz,
+             "batch_size": batch_size, "pad": pad, "mosaic_scale": mosaic_scale,
+             "linger": linger, "interp": interp, "keep_audio": keep_audio,
+             "crf": crf, "bitrate_ratio": bitrate_ratio}
+    params = {**JOB_DEFAULTS, **{k: v for k, v in given.items() if v is not None}}
+    method, conf, imgsz = params["method"], params["conf"], params["imgsz"]
     # 입력은 둘 중 하나다 — 업로드한 파일이거나 S3 키.
     if bool(s3_key) == bool(file is not None and file.filename):
         raise HTTPException(400, "file 또는 s3_key 중 하나만 보내라")
@@ -578,6 +637,7 @@ async def create_job(
     # stride 배수 맞추기는 검출기가 한다(geometry.snap_to_stride). 여기서
     # 또 계산하면 규칙이 두 벌이 되고 실제로 서로 달랐다(round vs ceil).
     imgsz = max(320, min(int(imgsz), 2048))
+    params["imgsz"] = imgsz
 
     if not is_ready():
         raise HTTPException(503, f"모델이 준비되지 않았다: {_model_error or '로딩 중'}")
@@ -615,10 +675,7 @@ async def create_job(
             raise HTTPException(400, "빈 파일")
 
     job = Job(id=jid, name=name, workdir=workdir, s3_key=s3_key,
-              params=dict(method=method, conf=conf, imgsz=imgsz,
-                          batch_size=batch_size, pad=pad,
-                          mosaic_scale=mosaic_scale, linger=linger,
-                          interp=interp, keep_audio=keep_audio))
+              params=params)
     global _current
     with _LOCK:
         # 대기열 길이 확인과 등록이 같은 락 안에 있어야 동시 요청이 상한을 넘지 않는다.

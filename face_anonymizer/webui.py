@@ -138,6 +138,12 @@ INDEX_HTML = r"""<!doctype html>
 
   /* ── 폼 ─────────────────────────────────────────────────────────────── */
   .opts{display:grid;grid-template-columns:repeat(auto-fit,minmax(120px,1fr));gap:11px}
+  details > summary{cursor:pointer;font-size:12px;color:var(--dim);
+                    list-style:none;display:flex;align-items:center;gap:7px}
+  details > summary::before{content:'▸';color:var(--faint);font-size:10px}
+  details[open] > summary::before{content:'▾'}
+  details > summary:hover{color:var(--accent-ink)}
+  details > summary #dsum{color:var(--faint);font-size:11.5px}
   label{display:block;font-size:11px;color:var(--faint);margin-bottom:4px}
   select,input[type=number]{width:100%;background:var(--surface);color:var(--fg);
     border:1px solid var(--line);border-radius:7px;padding:6px 8px;font-size:12.5px}
@@ -263,8 +269,9 @@ INDEX_HTML = r"""<!doctype html>
             <button class="ghost" onclick="loadObjects()">새로고침</button>
           </div>
           <div id="browser"></div>
-          <div class="pad" style="border-top:1px solid var(--line)">
-            <div class="opts">
+          <details class="pad" style="border-top:1px solid var(--line)">
+            <summary>상세 설정 <span id="dsum"></span></summary>
+            <div class="opts" style="margin-top:12px">
               <div><label>익명화 방식</label>
                 <select id="method">
                   <option value="mosaic">모자이크</option>
@@ -283,7 +290,7 @@ INDEX_HTML = r"""<!doctype html>
                 <input type="number" id="batch" value="16" min="1" max="64"></div>
               <div class="chk"><input type="checkbox" id="audio" checked><span>오디오 유지</span></div>
             </div>
-          </div>
+          </details>
           <div class="actionbar">
             <span class="n" id="picked">선택된 항목 없음</span>
             <button id="go" disabled>비식별화 시작</button>
@@ -676,6 +683,22 @@ fetch('/api/health').then(r => r.json()).then(h => {
   $('#dev').textContent = h.model_loaded
     ? `${h.device} · half=${h.half} · imgsz ${h.imgsz}` : '모델 준비 중';
 }).catch(() => $('#dev').textContent = '연결 실패');
+
+// 컨트롤 초깃값은 서버에서 받는다. 화면에 박아 두면 서버 설정을 바꿔도
+// 화면은 옛 값을 보내서 둘이 조용히 어긋난다.
+fetch('/api/defaults').then(r => r.json()).then(d => {
+  if (d.method) $('#method').value = d.method;
+  if (d.conf != null) $('#conf').value = d.conf;
+  if (d.imgsz != null) {
+    if (![...$('#imgsz').options].some(o => +o.value === d.imgsz))
+      $('#imgsz').add(new Option(d.imgsz, d.imgsz));
+    $('#imgsz').value = d.imgsz;
+  }
+  if (d.batch_size != null) $('#batch').value = d.batch_size;
+  if (d.keep_audio != null) $('#audio').checked = !!d.keep_audio;
+  $('#dsum').textContent =
+    `(기본 ${d.method} · conf ${d.conf} · ${d.imgsz} · batch ${d.batch_size})`;
+}).catch(() => { $('#dsum').textContent = '(서버 기본값을 쓰지 못함)'; });
 
 setFilter('');
 loadObjects();

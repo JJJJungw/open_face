@@ -404,3 +404,51 @@ def test_upload_rejected_when_model_failed(client, make_video):
     r = submit(client, path)
     assert r.status_code == 503
     assert "가중치 없음" in r.json()["detail"]
+
+
+# ── 기본값 ───────────────────────────────────────────────────────────────────
+#
+# 호출하는 쪽은 입력만 주면 된다. 튜닝된 값은 서비스가 들고 있어야지, 호출자마다
+# 들고 다니면 어느 설정으로 처리됐는지가 호출 지점마다 달라진다.
+
+def test_submit_without_any_parameter(client, make_video):
+    path, n, size = make_video(frames=6)
+    client.attach(size)
+
+    with open(path, "rb") as f:
+        r = client.post("/api/jobs", files={"file": ("clip.mp4", f, "video/mp4")})
+    assert r.status_code == 202, r.text
+    jid = r.json()["id"]
+
+    assert server._JOBS[jid].params == server.JOB_DEFAULTS
+    assert wait(client, jid)["status"] == "done"
+
+
+def test_defaults_endpoint_matches_what_is_used(client):
+    d = client.get("/api/defaults").json()
+    assert d == server.JOB_DEFAULTS
+    for k in ("method", "conf", "imgsz", "batch_size", "keep_audio"):
+        assert k in d
+
+
+def test_given_parameter_overrides_only_that_one(client, make_video):
+    path, n, size = make_video(frames=6)
+    client.attach(size)
+    jid = submit(client, path, conf="0.4").json()["id"]
+
+    p = server._JOBS[jid].params
+    assert p["conf"] == 0.4
+    assert p["method"] == server.JOB_DEFAULTS["method"]
+    assert p["batch_size"] == server.JOB_DEFAULTS["batch_size"]
+    wait(client, jid)
+
+
+def test_defaults_are_a_copy_not_the_live_dict(client, make_video):
+    """작업이 기본값 dict 를 공유하면 한 건의 변경이 이후 전부에 번진다."""
+    path, n, size = make_video(frames=6)
+    client.attach(size)
+    jid = submit(client, path).json()["id"]
+
+    server._JOBS[jid].params["conf"] = 0.99
+    assert server.JOB_DEFAULTS["conf"] != 0.99
+    wait(client, jid)
