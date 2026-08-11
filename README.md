@@ -63,8 +63,7 @@ uvicorn face_anonymizer.server:app --host 0.0.0.0 --port 8000
 | `GET /` | 웹 UI |
 | `GET /api/status` | `{ready, busy, queued, free_mb}` — 오케스트레이터용 최소 응답 |
 | `GET /api/health` | 준비 전 **503**. 디바이스·모델 상태·작업 수 |
-| `POST /api/jobs` | 영상 하나 → `202` + 작업 id (`file` 또는 `s3_key`) |
-| `POST /api/jobs/batch` | 여러 건을 한 번에 → `accepted` / `rejected` |
+| `POST /api/jobs` | **제출은 여기 하나.** 한 건 · 여러 건 · 폴더 전부 |
 | `POST /api/jobs/{id}/cancel` | 취소 (대기 중이면 즉시, 수행 중이면 다음 진행 보고에서) |
 | `GET /api/jobs/{id}/result` | 결과 받는 방법 (S3 면 presigned URL) |
 | `GET /api/problems` | 이 서비스가 낼 수 있는 오류 목록 |
@@ -188,16 +187,36 @@ boto3 는 지연 임포트라 S3 를 안 쓰면 설치할 필요가 없다.
            "retryable": true }
 ```
 
-## 배치
+## 제출
+
+**진입점은 하나다.** 진입점을 나누면 클라이언트가 경우마다 분기해야 하고, 화면에도 버튼이 그만큼 늘어난다. 입력이 무엇이냐만 다르고 나머지는 전부 같다.
 
 ```bash
-curl -X POST localhost:8000/api/jobs/batch -H 'Content-Type: application/json' -d '{
-  "s3_keys": ["videos/2026-08/f_00001_00_0000000_0042000_raw.mp4", "..."],
-  "params": {"conf": 0.4}
-}'
+# 한 건 업로드
+curl -F file=@clip.mp4 localhost:8000/api/jobs
+
+# 고른 것들
+curl -X POST localhost:8000/api/jobs -H 'Content-Type: application/json' \
+  -d '{"s3_keys": ["videos/2026-08/f_00001_00_0000000_0042000_raw.mp4"]}'
+
+# 폴더 통째로
+curl -X POST localhost:8000/api/jobs -H 'Content-Type: application/json' \
+  -d '{"s3_prefix": "videos/2026-08/", "recursive": true, "skip_processed": true}'
 ```
 
-**한 건이 거절돼도 나머지는 받는다.** 500건 배치에서 키 하나가 오타라고 전체를 되돌리면 호출하는 쪽이 무엇이 들어갔는지 알 수 없다. 거절된 항목은 사유(`code`)와 함께 그대로 돌아온다. 상한은 `FA_BATCH_MAX`(기본 500).
+`file` · `s3_keys` · `s3_prefix` 중 **하나만** 보낸다. 옵션은 JSON 이면 `params`, multipart 면 폼 필드로 주고, 안 주면 서비스 기본값이다.
+
+응답은 세 경우 모두 같다.
+
+```json
+{"accepted": [{"id": "ab12...", "name": "...", "s3_key": "..."}],
+ "rejected": [{"s3_key": "...", "error": {"code": "unsupported_media", ...}}],
+ "queued": 3}
+```
+
+**한 건이 거절돼도 나머지는 받는다.** 500건에서 키 하나가 오타라고 전체를 되돌리면 호출하는 쪽이 무엇이 들어갔는지 알 수 없다. 다만 **하나도 못 받았으면 `202` 를 주지 않는다** — 단건 제출이면 그 사유가 곧 응답 코드가 되고(예: `415 unsupported_media`), 여러 건이면 `400` 에 항목별 사유가 담긴다.
+
+폴더는 서버가 펼친다. 클라이언트가 목록을 먼저 받아 오게 하면 그 사이에 파일이 늘거나 줄 수 있고 왕복도 한 번 더 든다. `recursive` 는 하위 폴더까지, `skip_processed` 는 이미 결과물이 있는 건 건너뛴다(폴더를 다시 돌릴 때). 영상 확장자만 골라 넣는다. 상한은 `FA_BATCH_MAX`(기본 500).
 
 ## 결과 받기
 

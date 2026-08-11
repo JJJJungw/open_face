@@ -121,6 +121,31 @@ class S3Store:
             raise wrap(e, "목록 조회 실패") from e
         return folders, objects
 
+    def list_all(self, prefix):
+        """하위 폴더까지 전부. 폴더 단위 제출에 쓴다."""
+        objects, token = [], None
+        try:
+            while True:
+                kw = {"Bucket": self.bucket, "Prefix": prefix,
+                      "MaxKeys": PAGE_MAX}
+                if token:
+                    kw["ContinuationToken"] = token
+                r = self.client.list_objects_v2(**kw)
+                for o in r.get("Contents", []):
+                    if o["Key"].endswith("/"):
+                        continue
+                    m = o.get("LastModified")
+                    objects.append({
+                        "key": o["Key"], "size": o.get("Size"),
+                        "modified": m.isoformat() if hasattr(m, "isoformat") else m,
+                    })
+                token = r.get("NextContinuationToken")
+                if not token:
+                    break
+        except Exception as e:                      # noqa: BLE001
+            raise wrap(e, "목록 조회 실패") from e
+        return objects
+
     def output_key(self, key):
         """입력 키에 대응하는 결과물 키.
 

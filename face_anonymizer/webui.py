@@ -267,6 +267,8 @@ INDEX_HTML = r"""<!doctype html>
             <div class="crumb" id="crumb"></div>
             <div class="search"><input id="q" placeholder="이름으로 검색" autocomplete="off"></div>
             <button class="ghost" onclick="loadObjects()">새로고침</button>
+      <button class="ghost" onclick="submitFolder(false)">폴더 전체</button>
+      <button class="ghost" onclick="submitFolder(true)">하위까지</button>
           </div>
           <div id="browser"></div>
           <details class="pad" style="border-top:1px solid var(--line)">
@@ -289,6 +291,7 @@ INDEX_HTML = r"""<!doctype html>
               <div><label>배치 크기</label>
                 <input type="number" id="batch" value="16" min="1" max="64"></div>
               <div class="chk"><input type="checkbox" id="audio" checked><span>오디오 유지</span></div>
+              <div class="chk"><input type="checkbox" id="skipdone"><span>처리된 건 건너뛰기</span></div>
             </div>
           </details>
           <div class="actionbar">
@@ -463,27 +466,41 @@ function explain(status, text) {
   let p = null; try { p = JSON.parse(text); } catch (_) {}
   return p && p.title ? problemText(p) : (text || `HTTP ${status}`);
 }
-go.onclick = async () => {
-  if (picked) return uploadFile();
-  const keys = [...S3.selected];
-  if (!keys.length) return;
-
-  go.disabled = true; go.textContent = `제출 중… ${keys.length}건`;
-  // 한 번에 보낸다. 건마다 요청하면 수백 건 배치에서 왕복만 수백 번이다.
-  const r = await fetch('/api/jobs/batch', {
+// 제출 진입점은 POST /api/jobs 하나다. 한 건이든 여러 건이든 폴더든 같은 요청,
+// 같은 응답 — 화면에서도 분기가 필요 없다.
+async function submitJobs(body, label) {
+  go.disabled = true;
+  const was = go.textContent;
+  go.textContent = label;
+  const r = await fetch('/api/jobs', {
     method: 'POST', headers: { 'Content-Type': 'application/json' },
-    body: JSON.stringify({ s3_keys: keys, params: paramObject() }),
+    body: JSON.stringify({ ...body, params: paramObject() }),
   });
-  go.textContent = '비식별화 시작';
+  go.textContent = was;
 
-  if (r.status !== 202) { alert(explain(r.status, await r.text())); poll(); return; }
+  if (r.status !== 202) { alert(explain(r.status, await r.text())); poll();
+                          updatePicked(); return; }
   const d = await r.json();
   S3.selected.clear(); renderBrowser(); poll();
   if (d.rejected && d.rejected.length) {
     alert(`${d.accepted.length}건 접수 · ${d.rejected.length}건 거절\n\n`
       + d.rejected.map(x => `${x.s3_key}\n  ${problemText(x.error)}`).join('\n\n'));
   }
+}
+
+go.onclick = () => {
+  if (picked) return uploadFile();
+  const keys = [...S3.selected];
+  if (keys.length) return submitJobs({ s3_keys: keys }, `제출 중… ${keys.length}건`);
 };
+
+function submitFolder(recursive) {
+  if (!S3.bucket) return;
+  const what = recursive ? '하위 폴더까지' : '이 폴더';
+  if (!confirm(`${what} 전체를 비식별화합니다.\n\n${S3.prefix || '(최상위)'}`)) return;
+  return submitJobs({ s3_prefix: S3.prefix, recursive,
+                      skip_processed: $('#skipdone').checked }, '폴더 제출 중…');
+}
 
 function paramObject() {
   return { method: $('#method').value, conf: +$('#conf').value,
@@ -501,7 +518,8 @@ function uploadFile() {
   xhr.onload = () => {
     go.textContent = '비식별화 시작';
     picked = null; fileInput.value = ''; updatePicked();
-    if (xhr.status === 202) poll(); else alert(explain(xhr.status, xhr.responseText));
+    if (xhr.status === 202) poll();
+    else alert(explain(xhr.status, xhr.responseText));
   };
   xhr.onerror = () => { go.textContent = '비식별화 시작'; updatePicked(); alert('업로드 실패'); };
   xhr.send(fd);

@@ -68,7 +68,7 @@ try:
 except ImportError:                   # pragma: no cover
     fcntl = None
 
-from fastapi import FastAPI, File, Form, Response, UploadFile
+from fastapi import FastAPI, Request, Response
 from fastapi.responses import FileResponse, HTMLResponse, RedirectResponse
 
 from . import errors, naming
@@ -652,6 +652,22 @@ def _queued_ahead(job):
                    if o.status == "queued" and o.created < job.created)
 
 
+def _coerce(key, value):
+    """폼은 전부 문자열로 온다. 기본값의 타입에 맞춰 되돌린다."""
+    ref = JOB_DEFAULTS.get(key)
+    if isinstance(ref, bool):
+        return str(value).strip().lower() in ("1", "true", "on", "yes")
+    try:
+        if isinstance(ref, int):
+            return int(float(value))
+        if isinstance(ref, float):
+            return float(value)
+    except (TypeError, ValueError) as e:
+        raise errors.INVALID_INPUT(f"{key} 값이 숫자가 아니다: {value!r}",
+                                   field=key) from e
+    return value
+
+
 def check_admission():
     """받을 수 있는 상태인지. 못 받으면 ProblemError."""
     if not is_ready():
@@ -722,89 +738,116 @@ def enqueue(name, params, s3_key="", jid=None, workdir=None):
     return job, snap
 
 
-@app.post("/api/jobs/batch", status_code=202)
-def create_batch(body: dict):
-    """여러 건을 한 번에 넣는다.
+@app.post("/api/jobs", status_code=202)
+async def create_jobs(request: Request):
+    """**제출은 여기 하나다.** 한 건이든 여러 건이든 폴더든 같은 요청, 같은 응답.
 
-    {"s3_keys": [...], "params": {...}}  ->  {"accepted": [...], "rejected": [...]}
+    진입점을 나누면 클라이언트가 경우마다 분기해야 하고, 화면에도 버튼이 그만큼
+    늘어난다. 입력이 무엇이냐만 다르고 나머지는 전부 같다.
 
-    한 건이 거절돼도 나머지는 받는다 — 500건 배치에서 키 하나가 오타라고 전체를
-    되돌리면 호출하는 쪽이 어느 것이 들어갔는지 알 수 없다. 거절된 항목은
-    사유(code)와 함께 그대로 돌려준다.
+    받는 형태 (셋 중 하나)::
+
+        multipart/form-data   file=@clip.mp4                     # 업로드 한 건
+        application/json      {"s3_keys": ["a.mp4", "b.mp4"]}    # 고른 것들
+        application/json      {"s3_prefix": "videos/2026-08/"}   # 폴더 통째로
+
+    옵션은 JSON 이면 ``params``, multipart 면 폼 필드로 준다. 안 주면 서비스
+    기본값(GET /api/defaults).
+
+    폴더 제출은 ``recursive``(하위 폴더까지, 기본 false)와
+    ``skip_processed``(이미 결과물이 있는 건 건너뛰기, 기본 false)를 받는다.
+
+    응답은 항상 같다::
+
+        {"accepted": [{"id", "name", "s3_key"}],
+         "rejected": [{"s3_key", "error": {...}}],
+         "queued": 3}
+
+    **한 건이 거절돼도 나머지는 받는다.** 500건에서 키 하나가 오타라고 전체를
+    되돌리면 호출하는 쪽이 무엇이 들어갔는지 알 수 없다.
     """
-    keys = body.get("s3_keys") or []
-    if not isinstance(keys, list) or not keys:
-        raise errors.BATCH_EMPTY()
-    if len(keys) > BATCH_MAX:
+    ctype = (request.headers.get("content-type") or "").split(";")[0].strip()
+    upload = None
+    keys, prefix, recursive, skip_processed = [], "", False, False
+
+    if ctype == "application/json":
+        try:
+            body = await request.json()
+        except Exception as e:                      # noqa: BLE001
+            raise errors.INVALID_INPUT("JSON 을 읽을 수 없다") from e
+        if not isinstance(body, dict):
+            raise errors.INVALID_INPUT("객체를 보내라")
+        keys = body.get("s3_keys") or []
+        prefix = body.get("s3_prefix") or ""
+        recursive = bool(body.get("recursive"))
+        skip_processed = bool(body.get("skip_processed"))
+        given = body.get("params") or {}
+        if not isinstance(keys, list):
+            raise errors.INVALID_INPUT("s3_keys 는 배열이어야 한다", field="s3_keys")
+    else:
+        form = await request.form()
+        upload = form.get("file")
+        if isinstance(upload, str):                 # 파일이 아니라 문자열이면 무시
+            upload = None
+        keys = [v for v in form.getlist("s3_keys") if v]
+        one = form.get("s3_key")
+        if one:
+            keys.append(one)
+        prefix = form.get("s3_prefix") or ""
+        recursive = str(form.get("recursive", "")).lower() in ("1", "true", "on")
+        skip_processed = str(form.get("skip_processed", "")).lower() in (
+            "1", "true", "on")
+        given = {k: form.get(k) for k in JOB_DEFAULTS if form.get(k) is not None}
+        given = {k: _coerce(k, v) for k, v in given.items()}
+
+    uploaded = upload is not None and bool(getattr(upload, "filename", ""))
+    if sum([uploaded, bool(keys), bool(prefix)]) == 0:
+        raise errors.MISSING_INPUT()
+    if sum([uploaded, bool(keys), bool(prefix)]) > 1:
+        raise errors.CONFLICTING_INPUT(
+            "file · s3_keys · s3_prefix 중 하나만 보내라")
+
+    params = resolve_params(given)
+
+    # 폴더는 여기서 펼친다. 클라이언트가 목록을 먼저 받아 오게 하면 그 사이에
+    # 파일이 늘거나 줄 수 있고, 왕복도 한 번 더 든다.
+    if prefix:
+        store = s3mod.get_store()
+        if store is None:
+            raise errors.S3_NOT_CONFIGURED()
+        if ".." in prefix:
+            raise errors.INVALID_KEY(prefix)
+        try:
+            objs = (store.list_all(prefix) if recursive
+                    else store.list(prefix)[1])
+        except s3mod.S3Error as e:
+            raise (e.problem or errors.S3_UPSTREAM)(str(e)) from e
+        done = store.processed_keys() if skip_processed else set()
+        keys = [o["key"] for o in objs
+                if os.path.splitext(o["key"])[1].lower() in VIDEO_EXT
+                and (not skip_processed or store.output_key(o["key"]) not in done)]
+        if not keys:
+            raise errors.BATCH_EMPTY(f"{prefix} 에 처리할 영상이 없다")
+
+    if keys and len(keys) > BATCH_MAX:
         raise errors.BATCH_TOO_LARGE(f"{len(keys)}건 (상한 {BATCH_MAX})",
                                      limit=BATCH_MAX)
     check_admission()
-    params = resolve_params(body.get("params") or {})
 
     accepted, rejected = [], []
-    for key in keys:
-        try:
-            if not isinstance(key, str):
-                raise errors.INVALID_KEY(str(key))
-            check_s3_key(key)
-            _job, snap = enqueue(os.path.basename(key), dict(params), s3_key=key)
-            accepted.append({"s3_key": key, "id": snap["id"]})
-        except errors.ProblemError as e:
-            rejected.append({"s3_key": key, "error": e.body()})
-    return {"accepted": accepted, "rejected": rejected,
-            "queued": queue_depth()}
 
-
-@app.post("/api/jobs", status_code=202)
-async def create_job(
-    file: UploadFile = File(None),
-    s3_key: str = Form(""),
-    # 전부 선택 사항이다. 안 보내면 서비스 기본값(JOB_DEFAULTS)을 쓴다 —
-    # 호출하는 쪽은 입력만 주면 된다.
-    method: str = Form(None),
-    conf: float = Form(None),
-    imgsz: int = Form(None),
-    batch_size: int = Form(None),
-    pad: float = Form(None),
-    mosaic_scale: float = Form(None),
-    linger: int = Form(None),
-    interp: bool = Form(None),
-    keep_audio: bool = Form(None),
-    crf: int = Form(None),
-    bitrate_ratio: float = Form(None),
-):
-    uploaded = file is not None and bool(file.filename)
-    if bool(s3_key) == uploaded:
-        raise (errors.CONFLICTING_INPUT() if s3_key else errors.MISSING_INPUT())
-
-    params = resolve_params({
-        "method": method, "conf": conf, "imgsz": imgsz,
-        "batch_size": batch_size, "pad": pad, "mosaic_scale": mosaic_scale,
-        "linger": linger, "interp": interp, "keep_audio": keep_audio,
-        "crf": crf, "bitrate_ratio": bitrate_ratio})
-
-    if s3_key:
-        ext = check_s3_key(s3_key)
-        name = os.path.basename(s3_key)
-    else:
-        name = os.path.basename(file.filename)
+    if uploaded:
+        name = os.path.basename(upload.filename)
         ext = check_video_name(name)
-
-    check_admission()
-
-    jid = new_job_id()
-    workdir = os.path.join(JOBS_DIR, jid)
-    os.makedirs(workdir, exist_ok=True)
-
-    # S3 입력은 워커가 내려받는다. 접수 요청을 붙들고 수백 MB 를 받으면
-    # 클라이언트가 그동안 응답을 기다리게 된다.
-    if not s3_key:
+        jid = new_job_id()
+        workdir = os.path.join(JOBS_DIR, jid)
+        os.makedirs(workdir, exist_ok=True)
         src = os.path.join(workdir, "input" + ext)
         size = 0
         try:
             with open(src, "wb") as f:
                 while True:
-                    chunk = await file.read(CHUNK)
+                    chunk = await upload.read(CHUNK)
                     if not chunk:
                         break
                     size += len(chunk)
@@ -818,9 +861,31 @@ async def create_job(
         if size == 0:
             shutil.rmtree(workdir, ignore_errors=True)
             raise errors.EMPTY_FILE()
+        _job, snap = enqueue(name, params, jid=jid, workdir=workdir)
+        accepted.append({"id": snap["id"], "name": name, "s3_key": None})
+    else:
+        for key in keys:
+            try:
+                if not isinstance(key, str):
+                    raise errors.INVALID_KEY(str(key))
+                check_s3_key(key)
+                name = os.path.basename(key)
+                _job, snap = enqueue(name, dict(params), s3_key=key)
+                accepted.append({"id": snap["id"], "name": name, "s3_key": key})
+            except errors.ProblemError as e:
+                rejected.append({"s3_key": key, "error": e.body()})
 
-    _job, snap = enqueue(name, params, s3_key=s3_key, jid=jid, workdir=workdir)
-    return snap
+    if not accepted and rejected:
+        # 하나도 못 받았으면 202 를 줄 수 없다. 단건 제출이면 그 사유가 곧
+        # 응답 코드가 되고(예: 415), 여러 건이면 항목별 사유를 함께 준다.
+        codes = {r["error"].get("code") for r in rejected}
+        problem = (errors.CATALOG.get(codes.pop()) if len(codes) == 1
+                   else errors.INVALID_INPUT)
+        raise (problem or errors.INVALID_INPUT)(
+            rejected[0]["error"].get("detail", "") if len(rejected) == 1
+            else f"{len(rejected)}건 전부 거절됐다",
+            rejected=rejected)
+    return {"accepted": accepted, "rejected": rejected, "queued": queue_depth()}
 
 
 @app.get("/api/jobs")

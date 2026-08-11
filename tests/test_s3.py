@@ -192,7 +192,7 @@ def test_s3_job_downloads_processes_and_uploads(s3client):
     r = s3client.post("/api/jobs", data={"s3_key": "videos/2026-08/f_00001_00_0000000_0042000_raw.mp4",
                                          "batch_size": "4", "keep_audio": "false"})
     assert r.status_code == 202, r.text
-    jid = r.json()["id"]
+    jid = r.json()["accepted"][0]["id"]
 
     import time
     for _ in range(300):
@@ -250,7 +250,7 @@ KEY = "videos/2026-08/f_00001_00_0000000_0042000_raw.mp4"
 def test_batch_accepts_many_and_reports_each(s3client):
     """한 건이 거절돼도 나머지는 받는다 — 전체를 되돌리면 무엇이 들어갔는지
     호출하는 쪽이 알 수 없다."""
-    r = s3client.post("/api/jobs/batch", json={
+    r = s3client.post("/api/jobs", json={
         "s3_keys": [KEY, "videos/2026-08/notes.txt", "../escape.mp4", KEY]})
 
     assert r.status_code == 202
@@ -264,7 +264,7 @@ def test_batch_accepts_many_and_reports_each(s3client):
 
 
 def test_batch_applies_shared_params(s3client):
-    r = s3client.post("/api/jobs/batch",
+    r = s3client.post("/api/jobs",
                       json={"s3_keys": [KEY], "params": {"conf": 0.4}})
     jid = r.json()["accepted"][0]["id"]
     assert server._JOBS[jid].params["conf"] == 0.4
@@ -273,16 +273,15 @@ def test_batch_applies_shared_params(s3client):
 
 
 def test_batch_rejects_empty_and_oversized(s3client, monkeypatch):
-    assert s3client.post("/api/jobs/batch", json={"s3_keys": []}).json()["code"] \
-        == "batch_empty"
+    assert s3client.post("/api/jobs", json={"s3_keys": []}).json()["code"] \
+        == "missing_input"
     monkeypatch.setattr(server, "BATCH_MAX", 2)
-    b = s3client.post("/api/jobs/batch",
-                      json={"s3_keys": [KEY, KEY, KEY]}).json()
+    b = s3client.post("/api/jobs", json={"s3_keys": [KEY, KEY, KEY]}).json()
     assert b["code"] == "batch_too_large" and b["limit"] == 2
 
 
 def test_result_gives_presigned_url_for_s3_job(s3client):
-    jid = s3client.post("/api/jobs", data={"s3_key": KEY}).json()["id"]
+    jid = s3client.post("/api/jobs", data={"s3_key": KEY}).json()["accepted"][0]["id"]
     wait(s3client, jid, timeout=60)
 
     r = s3client.get(f"/api/jobs/{jid}/result")
@@ -296,7 +295,7 @@ def test_result_gives_presigned_url_for_s3_job(s3client):
 
 def test_download_redirects_to_s3_when_local_copy_is_gone(s3client):
     """보관 기간에 로컬 사본이 정리돼도 S3 원본은 남아 있다."""
-    jid = s3client.post("/api/jobs", data={"s3_key": KEY}).json()["id"]
+    jid = s3client.post("/api/jobs", data={"s3_key": KEY}).json()["accepted"][0]["id"]
     wait(s3client, jid, timeout=60)
 
     os.remove(server._JOBS[jid].output)
@@ -306,7 +305,7 @@ def test_download_redirects_to_s3_when_local_copy_is_gone(s3client):
 
 
 def test_result_before_done_is_409(s3client):
-    jid = s3client.post("/api/jobs", data={"s3_key": KEY}).json()["id"]
+    jid = s3client.post("/api/jobs", data={"s3_key": KEY}).json()["accepted"][0]["id"]
     server._JOBS[jid].status = "running"
     b = s3client.get(f"/api/jobs/{jid}/result")
     assert b.status_code == 409 and b.json()["code"] == "job_not_finished"
@@ -325,3 +324,78 @@ def test_s3_access_denied_is_distinguished(s3client):
     assert r.status_code == 502
     assert r.json()["code"] == "s3_access_denied"
     assert "권한" in r.json()["hint"]
+
+
+# ── 단일 진입점 ─────────────────────────────────────────────────────────────
+#
+# 한 건이든 여러 건이든 폴더든 POST /api/jobs 하나로 들어간다. 진입점을 나누면
+# 클라이언트가 경우마다 분기해야 하고 화면에도 버튼이 그만큼 늘어난다.
+
+def test_folder_submission_expands_prefix(s3client):
+    r = s3client.post("/api/jobs", json={"s3_prefix": "videos/2026-08/"})
+
+    assert r.status_code == 202
+    d = r.json()
+    # 영상만 골라 넣는다 (notes.txt 는 제외)
+    assert len(d["accepted"]) == 1
+    assert d["accepted"][0]["s3_key"] == KEY
+    wait(s3client, d["accepted"][0]["id"], timeout=60)
+
+
+def test_folder_submission_can_skip_processed(s3client):
+    """폴더를 다시 돌릴 때 이미 끝난 건 건너뛴다."""
+    s3client.store.client.objects[
+        "v1/results/face/f_00001_00_0000000_0042000_deid.mp4"] = (b"x", NOW)
+    s3client.store._out_cache = (0.0, set())
+
+    r = s3client.post("/api/jobs", json={"s3_prefix": "videos/2026-08/",
+                                         "skip_processed": True})
+    assert r.status_code == 400
+    assert r.json()["code"] == "batch_empty"
+
+
+def test_folder_recursive_includes_subfolders(s3client):
+    s3client.store.client.objects["videos/2026-08/sub/f_00002_00_0000000_0010000_raw.mp4"] = \
+        (s3client.store.client.objects[KEY][0], NOW)
+
+    flat = s3client.post("/api/jobs", json={"s3_prefix": "videos/2026-08/"}).json()
+    deep = s3client.post("/api/jobs", json={"s3_prefix": "videos/2026-08/",
+                                            "recursive": True}).json()
+
+    assert len(flat["accepted"]) == 1
+    assert len(deep["accepted"]) == 2
+    for d in (flat, deep):
+        for a in d["accepted"]:
+            wait(s3client, a["id"], timeout=60)
+
+
+def test_single_key_and_many_keys_use_the_same_endpoint(s3client):
+    one = s3client.post("/api/jobs", json={"s3_keys": [KEY]})
+    many = s3client.post("/api/jobs", json={"s3_keys": [KEY, KEY]})
+
+    assert one.status_code == many.status_code == 202
+    assert set(one.json()) == set(many.json())          # 응답 형태가 같다
+    assert len(one.json()["accepted"]) == 1
+    assert len(many.json()["accepted"]) == 2
+    for r in (one, many):
+        for a in r.json()["accepted"]:
+            wait(s3client, a["id"], timeout=60)
+
+
+def test_all_rejected_is_an_error_not_202(s3client):
+    """하나도 못 받았으면 202 를 줄 수 없다. 단건이면 그 사유가 응답 코드다."""
+    r = s3client.post("/api/jobs", json={"s3_keys": ["videos/2026-08/notes.txt"]})
+    assert r.status_code == 415
+    assert r.json()["code"] == "unsupported_media"
+
+    mixed = s3client.post("/api/jobs", json={
+        "s3_keys": ["a.txt", "../b.mp4"]})
+    assert mixed.status_code == 400
+    assert len(mixed.json()["rejected"]) == 2
+
+
+def test_cannot_mix_input_kinds(s3client):
+    r = s3client.post("/api/jobs", json={"s3_keys": [KEY],
+                                         "s3_prefix": "videos/"})
+    assert r.status_code == 400
+    assert r.json()["code"] == "conflicting_input"

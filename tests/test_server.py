@@ -58,6 +58,12 @@ def submit(c, path, **form):
                       files={"file": ("clip.mp4", f, "video/mp4")}, data=form)
 
 
+def job_id(response):
+    """제출 응답에서 작업 id. 한 건이든 여러 건이든 폴더든 응답 형태는 같다."""
+    assert response.status_code == 202, response.text
+    return response.json()["accepted"][0]["id"]
+
+
 def test_index_serves_html(client):
     r = client.get("/")
     assert r.status_code == 200
@@ -97,7 +103,7 @@ def test_bad_upload_leaves_no_workdir(client, tmp_path):
 def test_download_before_done_is_409(client, make_video):
     path, n, size = make_video(frames=6)
     client.attach(size)
-    jid = submit(client, path).json()["id"]
+    jid = job_id(submit(client, path))
     # 완료 전 상태를 강제로 만들어 둔다 (실제 진행 중 상태를 잡으려면 경쟁이 생긴다)
     server._JOBS[jid].status = "running"
     assert client.get(f"/api/jobs/{jid}/download").status_code == 409
@@ -108,7 +114,7 @@ def test_imgsz_is_range_clamped(client, make_video):
     """서버는 범위만 본다. stride 배수 맞추기는 검출기 몫이다(규칙을 두 벌 두지 않는다)."""
     path, n, size = make_video(frames=6)
     client.attach(size)
-    jid = submit(client, path, imgsz="99999").json()["id"]
+    jid = job_id(submit(client, path, imgsz="99999"))
     assert server._JOBS[jid].params["imgsz"] == 2048
     wait(client, jid)
 
@@ -120,8 +126,7 @@ def test_full_lifecycle_and_no_leak(client, tmp_path, make_video):
 
     r = submit(client, path, method="mosaic", batch_size="8", keep_audio="false")
     assert r.status_code == 202
-    jid = r.json()["id"]
-    assert r.json()["status"] == "queued"
+    jid = job_id(r)
 
     s = wait(client, jid)
     assert s["status"] == "done", s.get("error")
@@ -160,7 +165,7 @@ def test_full_lifecycle_and_no_leak(client, tmp_path, make_video):
 def test_job_state_is_written_to_disk(client, tmp_path, make_video):
     path, n, size = make_video(frames=10)
     client.attach(size)
-    jid = submit(client, path).json()["id"]
+    jid = job_id(submit(client, path))
     wait(client, jid)
 
     state = tmp_path / "jobs" / jid / "job.json"
@@ -173,7 +178,7 @@ def test_survives_restart(client, tmp_path, make_video):
     """프로세스 메모리가 비어도 조회와 다운로드가 된다 (재시작 / 다른 워커)."""
     path, n, size = make_video(frames=10)
     client.attach(size)
-    jid = submit(client, path).json()["id"]
+    jid = job_id(submit(client, path))
     wait(client, jid)
 
     server._JOBS.clear()                       # 재시작 또는 다른 워커의 시야
@@ -190,7 +195,7 @@ def test_orphaned_running_job_is_marked_failed(client, tmp_path, make_video):
     """죽은 프로세스가 남긴 running 상태를 영원히 폴링하게 두면 안 된다."""
     path, n, size = make_video(frames=10)
     client.attach(size)
-    jid = submit(client, path).json()["id"]
+    jid = job_id(submit(client, path))
     wait(client, jid)
 
     j = server._JOBS[jid]
@@ -208,7 +213,7 @@ def test_sweep_removes_expired_jobs(client, tmp_path, make_video, monkeypatch):
     """정리가 새 업로드에만 의존하면 디스크가 안 비워진다."""
     path, n, size = make_video(frames=10)
     client.attach(size)
-    jid = submit(client, path).json()["id"]
+    jid = job_id(submit(client, path))
     wait(client, jid)
 
     monkeypatch.setattr(server, "JOB_TTL", 1)
@@ -224,7 +229,7 @@ def test_missing_output_reports_410_not_500(client, tmp_path, make_video):
     """보관 기간이 지나 파일만 사라진 경우를 구분해서 알린다."""
     path, n, size = make_video(frames=10)
     client.attach(size)
-    jid = submit(client, path).json()["id"]
+    jid = job_id(submit(client, path))
     wait(client, jid)
 
     os.remove(server._JOBS[jid].output)
@@ -258,7 +263,7 @@ def test_queue_is_unlimited_by_default(client, make_video, monkeypatch):
     path, n, size = make_video(frames=6)
     client.attach(size)
 
-    ids = [submit(client, path).json()["id"] for _ in range(5)]
+    ids = [job_id(submit(client, path)) for _ in range(5)]
     assert len(ids) == 5
     for jid in ids:
         assert wait(client, jid, timeout=60)["status"] == "done"
@@ -280,7 +285,7 @@ def test_list_is_bounded_and_filterable(client, make_video):
     path, n, size = make_video(frames=4)
     client.attach(size)
     for _ in range(3):
-        wait(client, submit(client, path).json()["id"], timeout=60)
+        wait(client, job_id(submit(client, path)), timeout=60)
 
     assert len(client.get("/api/jobs?limit=2").json()) == 2
     done = client.get("/api/jobs?status=done").json()
@@ -301,7 +306,7 @@ def test_queue_max_still_works_when_set(client, make_video, monkeypatch):
         r = submit(client, path, batch_size="1")
         codes.append(r.status_code)
         if r.status_code == 202:
-            ids.append(r.json()["id"])
+            ids.append(r.json()["accepted"][0]["id"])
 
     assert 202 in codes and 429 in codes, codes
     rejected = [c for c in codes if c == 429]
@@ -327,7 +332,7 @@ def test_transient_failure_is_retried(client, make_video, monkeypatch):
     monkeypatch.setattr(server, "get_anonymizer", lambda: anon)
     monkeypatch.setattr(server, "_anonymizer", anon)
 
-    jid = submit(client, path).json()["id"]
+    jid = job_id(submit(client, path))
     s = wait(client, jid, timeout=60)
 
     assert s["status"] == "done", s.get("error")
@@ -346,7 +351,7 @@ def test_retries_are_exhausted_then_failed(client, make_video, monkeypatch):
     monkeypatch.setattr(server, "get_anonymizer", lambda: anon)
     monkeypatch.setattr(server, "_anonymizer", anon)
 
-    jid = submit(client, path).json()["id"]
+    jid = job_id(submit(client, path))
     s = wait(client, jid, timeout=60)
 
     assert s["status"] == "failed"
@@ -361,7 +366,7 @@ def test_permanent_error_is_not_retried(client, tmp_path, monkeypatch):
     broken = tmp_path / "broken.mp4"
     broken.write_bytes(b"not a video at all" * 100)
 
-    jid = submit(client, broken).json()["id"]
+    jid = job_id(submit(client, broken))
     s = wait(client, jid, timeout=30)
 
     assert s["status"] == "failed"
@@ -372,13 +377,8 @@ def test_accepts_again_after_finishing(client, make_video):
     path, n, size = make_video(frames=8)
     client.attach(size)
 
-    a = submit(client, path)
-    assert a.status_code == 202
-    wait(client, a.json()["id"])
-
-    b = submit(client, path)
-    assert b.status_code == 202
-    wait(client, b.json()["id"])
+    wait(client, job_id(submit(client, path)))
+    wait(client, job_id(submit(client, path)))
 
 
 def test_status_endpoint_reports_ready_and_queue(client, make_video):
@@ -389,7 +389,7 @@ def test_status_endpoint_reports_ready_and_queue(client, make_video):
     assert s["ready"] is True and s["busy"] is False
     assert s["queued"] == 0 and s["free_mb"] > 0
 
-    jid = submit(client, path).json()["id"]
+    jid = job_id(submit(client, path))
     wait(client, jid)
     assert client.get("/api/status").json()["busy"] is False
 
@@ -422,8 +422,7 @@ def test_submit_without_any_parameter(client, make_video):
 
     with open(path, "rb") as f:
         r = client.post("/api/jobs", files={"file": ("clip.mp4", f, "video/mp4")})
-    assert r.status_code == 202, r.text
-    jid = r.json()["id"]
+    jid = job_id(r)
 
     assert server._JOBS[jid].params == server.JOB_DEFAULTS
     assert wait(client, jid)["status"] == "done"
@@ -439,7 +438,7 @@ def test_defaults_endpoint_matches_what_is_used(client):
 def test_given_parameter_overrides_only_that_one(client, make_video):
     path, n, size = make_video(frames=6)
     client.attach(size)
-    jid = submit(client, path, conf="0.4").json()["id"]
+    jid = job_id(submit(client, path, conf="0.4"))
 
     p = server._JOBS[jid].params
     assert p["conf"] == 0.4
@@ -452,7 +451,7 @@ def test_defaults_are_a_copy_not_the_live_dict(client, make_video):
     """작업이 기본값 dict 를 공유하면 한 건의 변경이 이후 전부에 번진다."""
     path, n, size = make_video(frames=6)
     client.attach(size)
-    jid = submit(client, path).json()["id"]
+    jid = job_id(submit(client, path))
 
     server._JOBS[jid].params["conf"] = 0.99
     assert server.JOB_DEFAULTS["conf"] != 0.99
@@ -540,7 +539,7 @@ def test_job_failure_carries_a_code(client, make_video, monkeypatch):
     monkeypatch.setattr(server, "_anonymizer", anon)
     monkeypatch.setattr(server, "MAX_ATTEMPTS", 1)
 
-    jid = submit(client, path).json()["id"]
+    jid = job_id(submit(client, path))
     s = wait(client, jid, timeout=60)
 
     assert s["status"] == "failed"
@@ -556,8 +555,8 @@ def test_cancel_queued_job(client, make_video, monkeypatch):
     monkeypatch.setattr(server, "get_anonymizer", lambda: anon)
     monkeypatch.setattr(server, "_anonymizer", anon)
 
-    first = submit(client, path, batch_size="1").json()["id"]
-    second = submit(client, path, batch_size="1").json()["id"]
+    first = job_id(submit(client, path, batch_size="1"))
+    second = job_id(submit(client, path, batch_size="1"))
 
     r = client.post(f"/api/jobs/{second}/cancel")
     assert r.status_code == 200
@@ -574,7 +573,7 @@ def test_cancel_running_job_stops_it(client, make_video, monkeypatch):
     monkeypatch.setattr(server, "get_anonymizer", lambda: anon)
     monkeypatch.setattr(server, "_anonymizer", anon)
 
-    jid = submit(client, path, batch_size="1").json()["id"]
+    jid = job_id(submit(client, path, batch_size="1"))
     for _ in range(200):                       # 실제로 돌기 시작할 때까지
         if client.get(f"/api/jobs/{jid}").json()["status"] == "running":
             break
@@ -589,7 +588,7 @@ def test_cancel_running_job_stops_it(client, make_video, monkeypatch):
 def test_cannot_cancel_finished_job(client, make_video):
     path, n, size = make_video(frames=6)
     client.attach(size)
-    jid = submit(client, path).json()["id"]
+    jid = job_id(submit(client, path))
     wait(client, jid)
 
     r = client.post(f"/api/jobs/{jid}/cancel")
@@ -614,7 +613,7 @@ def test_failed_jobs_survive_sweep(client, make_video, monkeypatch):
     monkeypatch.setattr(server, "JOB_TTL", 1)
     monkeypatch.setattr(server, "FAILED_TTL", 0)       # 기본값 = 안 지움
 
-    jid = submit(client, path).json()["id"]
+    jid = job_id(submit(client, path))
     wait(client, jid, timeout=60)
     server._JOBS[jid].finished = time.time() - 9999
     server.save_job(server._JOBS[jid])
