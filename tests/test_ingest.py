@@ -1,0 +1,122 @@
+"""입력 코덱 정규화 테스트.
+
+OpenCV 의 FFmpeg 빌드는 ffmpeg 본체보다 코덱 지원이 좁다. AV1 은 파일을 **열기는
+열면서 한 프레임도 못 뽑는다**(실측: OpenCV 4.13, isOpened=True / 디코딩 0프레임).
+코덱 이름 목록으로 판단하면 빌드마다 어긋나므로, 실제로 한 프레임을 뽑아 보고
+안 되면 H.264 로 옮겨 담는다.
+"""
+
+import os
+import shutil
+import subprocess
+
+import pytest
+
+from conftest import FakeDetector, face_rect, read_frames, region_is_obscured
+
+from face_anonymizer import VideoAnonymizer, ingest
+
+pytestmark = pytest.mark.skipif(not shutil.which("ffmpeg"), reason="ffmpeg 없음")
+
+
+def has_encoder(name):
+    r = subprocess.run(["ffmpeg", "-hide_banner", "-encoders"],
+                       capture_output=True, text=True)
+    return name in r.stdout
+
+
+def to_av1(src, dst):
+    for enc, extra in (("libsvtav1", ["-preset", "10"]),
+                       ("libaom-av1", ["-cpu-used", "8"])):
+        if not has_encoder(enc):
+            continue
+        r = subprocess.run(["ffmpeg", "-v", "error", "-y", "-i", str(src),
+                            "-c:v", enc, "-crf", "40", *extra, str(dst)],
+                           capture_output=True, text=True)
+        if r.returncode == 0:
+            return str(dst)
+    pytest.skip("AV1 인코더가 없다")
+
+
+def codec_of(path):
+    return subprocess.run(
+        ["ffprobe", "-v", "error", "-select_streams", "v:0",
+         "-show_entries", "stream=codec_name", "-of", "csv=p=0", str(path)],
+        capture_output=True, text=True).stdout.strip()
+
+
+def test_h264_input_is_not_transcoded(tmp_path, make_video):
+    """대부분의 입력은 여기서 아무 비용도 내지 않아야 한다."""
+    src, n, size = make_video(frames=8)
+    h264 = tmp_path / "h264.mp4"
+    subprocess.run(["ffmpeg", "-v", "error", "-y", "-i", str(src),
+                    "-c:v", "libx264", "-crf", "23", str(h264)], check=True)
+
+    path, info = ingest.ensure_decodable(str(h264), str(tmp_path / "w"))
+
+    assert path == str(h264)
+    assert info["transcoded"] is False
+    assert info["source_codec"] == "h264"
+
+
+def test_av1_input_is_transcoded(tmp_path, make_video):
+    src, n, size = make_video(frames=12)
+    av1 = to_av1(src, tmp_path / "in.av1.mp4")
+    assert codec_of(av1) == "av1"
+
+    path, info = ingest.ensure_decodable(av1, str(tmp_path / "w"))
+
+    assert info["source_codec"] == "av1"
+    if not info["transcoded"]:
+        pytest.skip("이 OpenCV 빌드는 AV1 을 직접 읽는다")
+    assert path != av1
+    assert codec_of(path) == "h264"
+    assert ingest.opencv_can_decode(path)
+
+
+def test_av1_runs_end_to_end(tmp_path, make_video):
+    """AV1 이 들어와도 결과물이 나오고 얼굴이 가려진다."""
+    src, n, size = make_video(frames=20)
+    av1 = to_av1(src, tmp_path / "in.av1.mp4")
+    out = tmp_path / "out.mp4"
+
+    res = VideoAnonymizer(detector=FakeDetector(size)).process(
+        av1, str(out), batch_size=8, keep_audio=False)
+
+    assert res.frames == n
+    assert res.source_codec == "av1"
+    assert codec_of(out) == "h264", "출력은 H.264 고정이다"
+    frames = read_frames(str(out))
+    leaked = [i for i, f in enumerate(frames)
+              if not region_is_obscured(f, face_rect(i, *size))]
+    assert not leaked, f"원본 얼굴이 남은 프레임: {leaked}"
+
+
+def test_unreadable_input_fails_permanently(tmp_path):
+    """깨진 입력은 재시도해도 같다 — VideoOpenError 계열로 던진다."""
+    from face_anonymizer.pipeline import VideoOpenError
+    broken = tmp_path / "broken.mp4"
+    broken.write_bytes(b"not a video" * 100)
+
+    with pytest.raises(VideoOpenError):
+        ingest.ensure_decodable(str(broken), str(tmp_path / "w"))
+
+
+def test_missing_input_is_reported_as_video_open_error(tmp_path):
+    from face_anonymizer.pipeline import VideoOpenError
+    with pytest.raises(VideoOpenError):
+        ingest.ensure_decodable(str(tmp_path / "nope.mp4"), str(tmp_path / "w"))
+
+
+def test_isopened_alone_is_not_trusted(tmp_path, make_video):
+    """isOpened() 는 AV1 에서 True 를 주고도 read() 가 실패한다."""
+    src, n, size = make_video(frames=8)
+    av1 = to_av1(src, tmp_path / "in.av1.mp4")
+    import cv2
+    cap = cv2.VideoCapture(av1)
+    opened = cap.isOpened()
+    cap.release()
+    if opened and not ingest.opencv_can_decode(av1):
+        assert True                       # 정확히 이 상황을 막는 게 이 모듈이다
+    else:
+        pytest.skip("이 빌드에서는 재현되지 않는다")

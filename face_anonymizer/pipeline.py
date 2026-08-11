@@ -105,6 +105,7 @@ class VideoInfo:
 @dataclass
 class Timing:
     """단계별 소요 시간(초). 벽시계 기준."""
+    ingest: float = 0.0
     detect: float = 0.0
     track: float = 0.0
     render: float = 0.0
@@ -124,6 +125,8 @@ class Result:
     timing: Timing = None
     detected_frames: int = 0          # 검출이 하나라도 있었던 프레임 수
     warnings: tuple = ()              # 결과를 그대로 믿으면 안 되는 사유들
+    source_codec: str = ""            # 입력 코덱
+    transcoded: bool = False          # OpenCV 가 못 읽어 H.264 로 옮겨 담았는가
 
     @property
     def detection_rate(self):
@@ -569,26 +572,60 @@ class VideoAnonymizer:
             raise ValueError(f"mosaic_scale 은 0~1 사이여야 한다: {mosaic_scale}")
         batch_size = max(1, int(batch_size))
 
-        info = probe(input_path)
         outdir = os.path.dirname(os.path.abspath(output_path))
         os.makedirs(outdir, exist_ok=True)
         t_start = time.perf_counter()
+
+        # 중간 산출물은 출력 파일 옆 임시 디렉터리에. 같은 폴더를 노리는
+        # 동시 작업끼리 서로를 덮어쓰지 않게 한다.
+        tmpdir = tempfile.mkdtemp(prefix=".anon-", dir=outdir)
+        try:
+            return self._process(input_path, output_path, tmpdir, info_kw=dict(
+                method=method, imgsz=imgsz, conf=conf, iou=iou, pad=pad,
+                mosaic_scale=mosaic_scale, linger=linger, interp=interp,
+                batch_size=batch_size, keep_audio=keep_audio, progress=progress,
+                allow_partial=allow_partial, min_detection_rate=min_detection_rate,
+                crf=crf, bitrate_ratio=bitrate_ratio, rotate=rotate,
+                t_start=t_start))
+        finally:
+            shutil.rmtree(tmpdir, ignore_errors=True)
+
+    def _process(self, input_path, output_path, tmpdir, info_kw):
+        (method, imgsz, conf, iou, pad, mosaic_scale, linger, interp, batch_size,
+         keep_audio, progress, allow_partial, min_detection_rate, crf,
+         bitrate_ratio, rotate, t_start) = (
+            info_kw["method"], info_kw["imgsz"], info_kw["conf"], info_kw["iou"],
+            info_kw["pad"], info_kw["mosaic_scale"], info_kw["linger"],
+            info_kw["interp"], info_kw["batch_size"], info_kw["keep_audio"],
+            info_kw["progress"], info_kw["allow_partial"],
+            info_kw["min_detection_rate"], info_kw["crf"],
+            info_kw["bitrate_ratio"], info_kw["rotate"], info_kw["t_start"])
+
+        # OpenCV 는 ffmpeg 본체보다 코덱 지원이 좁다. AV1 은 파일을 열기는 열면서
+        # 한 프레임도 못 뽑는다. 읽을 수 있는 형태로 만들어 놓고 시작한다.
+        from . import ingest             # 지연 임포트 (ingest 가 이 모듈을 쓴다)
+        t0 = time.perf_counter()
+        decode_path, ing = ingest.ensure_decodable(input_path, tmpdir)
+        t_ingest = time.perf_counter() - t0
+
+        info = probe(decode_path)
 
         def report(stage, done):
             if progress is not None:
                 progress(stage, done, max(info.frame_count, done))
 
         # ---- 1차: 검출 ----
-        log.info("[1/3] detecting: %s (%dx%d @%.2ffps, batch=%d)",
+        log.info("[1/3] detecting: %s (%dx%d @%.2ffps, batch=%d, codec=%s%s)",
                  os.path.basename(input_path), info.width, info.height,
-                 info.fps, batch_size)
+                 info.fps, batch_size, ing["source_codec"] or "?",
+                 " -> h264 전사" if ing["transcoded"] else "")
         rotate = int(rotate) % 360
         if rotate in (90, 270):
             info = replace(info, width=info.height, height=info.width)
 
         t0 = time.perf_counter()
         per_frame, raw_boxes, detected_frames, total = self._detect(
-            input_path, imgsz, conf, iou, batch_size, report, rotation=rotate)
+            decode_path, imgsz, conf, iou, batch_size, report, rotation=rotate)
         t_detect = time.perf_counter() - t0
         if total == 0:
             raise VideoOpenError(f"no frames decoded from {input_path}")
@@ -620,36 +657,34 @@ class VideoAnonymizer:
 
         # ---- 3차: 렌더 + 오디오 ----
         log.info("[3/3] rendering (%s) + 인코딩", method)
-        # 중간 산출물은 출력 파일 옆 임시 디렉터리에. 같은 폴더를 노리는
-        # 동시 작업끼리 서로를 덮어쓰지 않게 한다.
-        tmpdir = tempfile.mkdtemp(prefix=".anon-", dir=outdir)
-        try:
-            ext = os.path.splitext(output_path)[1] or ".mp4"
-            noaudio = os.path.join(tmpdir, "noaudio" + ext)
-            t0 = time.perf_counter()
-            rendered = self._render(input_path, noaudio, info, frame_dets,
-                                    method, pad, mosaic_scale, total, report,
-                                    rotation=rotate)
-            t_render = time.perf_counter() - t0
-            log.info("      %d frames — %.1fs (%.1f fps)", rendered, t_render,
-                     rendered / t_render if t_render else 0)
-            t0 = time.perf_counter()
-            status = finalize_output(noaudio, input_path, output_path, keep_audio,
-                                     expected_frames=rendered, crf=crf,
-                                     bitrate_ratio=bitrate_ratio)
-            t_audio = time.perf_counter() - t0
-        finally:
-            shutil.rmtree(tmpdir, ignore_errors=True)
+        ext = os.path.splitext(output_path)[1] or ".mp4"
+        noaudio = os.path.join(tmpdir, "noaudio" + ext)
+        t0 = time.perf_counter()
+        rendered = self._render(decode_path, noaudio, info, frame_dets,
+                                method, pad, mosaic_scale, total, report,
+                                rotation=rotate)
+        t_render = time.perf_counter() - t0
+        log.info("      %d frames — %.1fs (%.1f fps)", rendered, t_render,
+                 rendered / t_render if t_render else 0)
+        # 오디오는 **원본** 에서 가져온다. 전사본에는 담지 않았다.
+        t0 = time.perf_counter()
+        status = finalize_output(noaudio, input_path, output_path, keep_audio,
+                                 expected_frames=rendered, crf=crf,
+                                 bitrate_ratio=bitrate_ratio)
+        t_audio = time.perf_counter() - t0
 
-        timing = Timing(detect=t_detect, track=t_track, render=t_render,
-                        audio=t_audio, total=time.perf_counter() - t_start)
+        timing = Timing(ingest=t_ingest, detect=t_detect, track=t_track,
+                        render=t_render, audio=t_audio,
+                        total=time.perf_counter() - t_start)
         if status not in ("ok", "no-audio", "disabled"):
             warnings.append(f"audio: {status}")
         result = Result(output=output_path, frames=rendered, raw_boxes=raw_boxes,
                         filled_boxes=filled, method=method, audio=status,
                         video=info, timing=timing,
                         detected_frames=detected_frames,
-                        warnings=tuple(warnings))
+                        warnings=tuple(warnings),
+                        source_codec=ing["source_codec"],
+                        transcoded=ing["transcoded"])
         log.info("done: %s | frames=%d boxes=%d(+%d) audio=%s",
                  output_path, rendered, raw_boxes, filled, status)
         log.info("      %.1fs 소요 · %.1f fps · 실시간 대비 %.2fx "
