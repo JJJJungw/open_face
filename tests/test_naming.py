@@ -70,3 +70,12 @@ def test_reprocessing_a_deid_file_is_idempotent():
 def test_zero_padding_survives_large_values():
     c = naming.parse("f_99999_99_9999999_9999999_raw.mp4")
     assert c.with_state("deid").format() == "f_99999_99_9999999_9999999_deid.mp4"
+
+
+def test_is_output_recognises_deid_names():
+    assert naming.is_output("f_00001_00_0000000_0042000_deid.mp4")
+    assert not naming.is_output("f_00001_00_0000000_0042000_raw.mp4")
+    # 규칙 밖 이름도 접미사로 판별한다 (직접 업로드분의 결과물)
+    assert naming.is_output("some/path/clip_deid.mp4")
+    assert not naming.is_output("clip.mp4")
+    assert not naming.is_output("undeid.mp4")     # 접미사가 아니라 단어 일부

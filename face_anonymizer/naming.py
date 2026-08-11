@@ -98,3 +98,18 @@ def output_name(filename, state=STATE_DEID, ext=DEFAULT_EXT):
         return parsed.with_state(state, ext).format()
     stem = os.path.splitext(os.path.basename(filename or "output"))[0]
     return f"{stem}_{state}{ext}"
+
+
+def is_output(filename):
+    """이미 비식별화된 결과물 이름인가.
+
+    폴더를 통째로 제출할 때 결과물이 입력 목록에 섞이면 모자이크가 두 번
+    올라간다. ``skip_processed`` 로는 못 막는다 — deid 파일의
+    ``output_name()`` 은 자기 자신이라, "결과물이 이미 있다" 판정에 걸리지
+    않는다. 이름으로 먼저 걸러 낸다.
+    """
+    parsed = parse(filename)
+    if parsed is not None:
+        return parsed.state == STATE_DEID
+    stem = os.path.splitext(os.path.basename(filename or ""))[0]
+    return stem.endswith("_" + STATE_DEID)

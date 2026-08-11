@@ -756,6 +756,7 @@ async def create_jobs(request: Request):
 
     폴더 제출은 ``recursive``(하위 폴더까지, 기본 false)와
     ``skip_processed``(이미 결과물이 있는 건 건너뛰기, 기본 false)를 받는다.
+    이름이 ``_deid`` 로 끝나는 결과물은 어느 쪽이든 입력에서 뺀다.
 
     응답은 항상 같다::
 
@@ -825,6 +826,7 @@ async def create_jobs(request: Request):
         done = store.processed_keys() if skip_processed else set()
         keys = [o["key"] for o in objs
                 if os.path.splitext(o["key"])[1].lower() in VIDEO_EXT
+                and not naming.is_output(o["key"])
                 and (not skip_processed or store.output_key(o["key"]) not in done)]
         if not keys:
             raise errors.BATCH_EMPTY(f"{prefix} 에 처리할 영상이 없다")

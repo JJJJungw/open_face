@@ -369,6 +369,26 @@ def test_folder_recursive_includes_subfolders(s3client):
             wait(s3client, a["id"], timeout=60)
 
 
+def test_folder_submission_excludes_deid_outputs(s3client):
+    """결과물이 입력 폴더에 같이 있어도 다시 집어넣지 않는다.
+
+    skip_processed 로는 못 막는다 — deid 파일의 output_key() 는 자기 자신이라
+    "아직 결과물이 없다" 로 판정된다. 그대로 두면 모자이크 위에 모자이크가
+    한 번 더 올라간다.
+    """
+    s3client.store.client.objects[
+        "videos/2026-08/f_00009_00_0000000_0010000_deid.mp4"] = \
+        (s3client.store.client.objects[KEY][0], NOW)
+
+    r = s3client.post("/api/jobs", json={"s3_prefix": "videos/2026-08/",
+                                         "skip_processed": True})
+
+    assert r.status_code == 202, r.text
+    assert [a["s3_key"] for a in r.json()["accepted"]] == [KEY]
+    for a in r.json()["accepted"]:
+        wait(s3client, a["id"], timeout=60)
+
+
 def test_single_key_and_many_keys_use_the_same_endpoint(s3client):
     one = s3client.post("/api/jobs", json={"s3_keys": [KEY]})
     many = s3client.post("/api/jobs", json={"s3_keys": [KEY, KEY]})

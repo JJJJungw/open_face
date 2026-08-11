@@ -94,6 +94,11 @@ INDEX_HTML = r"""<!doctype html>
   .crumb a:hover{text-decoration:underline}
   .crumb .sep{color:var(--faint);flex:none}
   .crumb .cur{color:var(--fg);font-weight:600;white-space:nowrap}
+  .divider{width:1px;height:18px;background:var(--line);flex:none}
+  .toggle{display:inline-flex;align-items:center;gap:6px;font-size:12px;
+          color:var(--dim);cursor:pointer;white-space:nowrap;margin:0}
+  .toggle:hover{color:var(--fg)}
+  .toggle input{margin:0}
   .search{position:relative;flex:none}
   .search input{background:var(--bg);border:1px solid var(--line);color:var(--fg);
     border-radius:7px;padding:6px 10px 6px 26px;font-size:12.5px;width:170px}
@@ -267,8 +272,9 @@ INDEX_HTML = r"""<!doctype html>
             <div class="crumb" id="crumb"></div>
             <div class="search"><input id="q" placeholder="이름으로 검색" autocomplete="off"></div>
             <button class="ghost" onclick="loadObjects()">새로고침</button>
-      <button class="ghost" onclick="submitFolder(false)">폴더 전체</button>
-      <button class="ghost" onclick="submitFolder(true)">하위까지</button>
+      <span class="divider"></span>
+      <label class="toggle"><input type="checkbox" id="skipdone" checked><span>처리된 건 건너뛰기</span></label>
+      <button class="ghost" onclick="submitFolder()">폴더 전체 제출</button>
           </div>
           <div id="browser"></div>
           <details class="pad" style="border-top:1px solid var(--line)">
@@ -291,7 +297,6 @@ INDEX_HTML = r"""<!doctype html>
               <div><label>배치 크기</label>
                 <input type="number" id="batch" value="16" min="1" max="64"></div>
               <div class="chk"><input type="checkbox" id="audio" checked><span>오디오 유지</span></div>
-              <div class="chk"><input type="checkbox" id="skipdone"><span>처리된 건 건너뛰기</span></div>
             </div>
           </details>
           <div class="actionbar">
@@ -494,12 +499,25 @@ go.onclick = () => {
   if (keys.length) return submitJobs({ s3_keys: keys }, `제출 중… ${keys.length}건`);
 };
 
-function submitFolder(recursive) {
+// 지금 보고 있는 폴더만 넣는다. 하위 폴더까지 훑는 recursive 옵션은 API 에는
+// 남아 있지만 버튼으로는 안 뺀다 — 화면에 보이는 것과 들어가는 것이 달라지면
+// 몇 건이 들어갔는지 눌러 보기 전에는 알 수 없다.
+function submitFolder() {
   if (!S3.bucket) return;
-  const what = recursive ? '하위 폴더까지' : '이 폴더';
-  if (!confirm(`${what} 전체를 비식별화합니다.\n\n${S3.prefix || '(최상위)'}`)) return;
-  return submitJobs({ s3_prefix: S3.prefix, recursive,
-                      skip_processed: $('#skipdone').checked }, '폴더 제출 중…');
+  const skip = $('#skipdone').checked;
+  const n = S3.objects.filter(o => VIDEO_RE.test(o.key)).length;
+  const done = S3.objects.filter(o => VIDEO_RE.test(o.key) && o.processed).length;
+  if (!n) return alert('이 폴더에 영상이 없습니다');
+  const lines = [
+    `${S3.prefix || '(최상위)'} 의 영상을 비식별화합니다.`,
+    '',
+    `이 폴더의 영상  ${n}개${
+      skip && done ? ` (처리됨 ${done}개 제외 → ${n - done}개)` : ''}`,
+    `이미 처리된 건  ${skip ? '건너뜀' : '다시 처리'}`,
+  ];
+  if (!confirm(lines.join('\n'))) return;
+  return submitJobs({ s3_prefix: S3.prefix, skip_processed: skip },
+                    '폴더 제출 중…');
 }
 
 function paramObject() {
