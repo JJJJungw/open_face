@@ -153,7 +153,7 @@ class S3Store:
         raw -> deid 로 바꾼다. 결과는 **입력 폴더별로 나눠 쌓는다.**
 
             videos/2026-08/f_00001_00_0000000_0042000_raw.mp4
-            -> v1/results/face/2026-08-deid/f_00001_00_0000000_0042000_deid.mp4
+            -> v1/results/face/2026-08_deid/f_00001_00_0000000_0042000_deid.mp4
 
         한곳에 몰아 두면 폴더 하나가 몇만 건이 되고, 어느 원본 묶음에서 나온
         결과인지 목록만 보고는 알 수 없다. 폴더 이름을 그대로 따라가면 입력과
@@ -167,9 +167,9 @@ class S3Store:
 
     @staticmethod
     def output_folder(key):
-        """입력 키가 들어갈 결과 하위 폴더 ('2026-08-deid/' 또는 '')."""
+        """입력 키가 들어갈 결과 하위 폴더 ('2026-08_deid/' 또는 '')."""
         parent = os.path.basename(os.path.dirname(key or ""))
-        return f"{parent}-deid/" if parent else ""
+        return f"{parent}_deid/" if parent else ""
 
     def processed_keys(self):
         """결과물 프리픽스에 이미 있는 키 집합. 짧게 캐시한다.

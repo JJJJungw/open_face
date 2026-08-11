@@ -108,9 +108,9 @@ def test_output_key_follows_dataset_convention():
     """정체성 필드는 그대로 두고 STATE 만 raw -> deid."""
     store = make_store()
     assert store.output_key("videos/2026-08/f_00001_00_0000000_0042000_raw.mp4") \
-        == "v1/results/face/2026-08-deid/f_00001_00_0000000_0042000_deid.mp4"
+        == "v1/results/face/2026-08_deid/f_00001_00_0000000_0042000_deid.mp4"
     # 규칙 밖 파일도 같은 규칙을 탄다 — 폴더를 따라간다
-    assert store.output_key("a/b/c/clip.mov") == "v1/results/face/c-deid/clip_deid.mp4"
+    assert store.output_key("a/b/c/clip.mov") == "v1/results/face/c_deid/clip_deid.mp4"
 
 
 def test_output_lands_under_the_input_folder():
@@ -120,10 +120,13 @@ def test_output_lands_under_the_input_folder():
     보고는 알 수 없다.
     """
     store = make_store()
-    assert store.output_key("videos/2026-08/a_00001_00_0000000_0001000_raw.mp4") \
-        .startswith("v1/results/face/2026-08-deid/")
-    assert store.output_key("videos/2026-09/a_00001_00_0000000_0001000_raw.mp4") \
-        .startswith("v1/results/face/2026-09-deid/")
+    # 입력 폴더 이름을 그대로 쓰고 _deid 만 붙인다: kbs/ -> kbs_deid/
+    assert store.output_key("kbs/a_00001_00_0000000_0001000_raw.mp4") \
+        == "v1/results/face/kbs_deid/a_00001_00_0000000_0001000_deid.mp4"
+    assert store.output_key("mbc/a_00001_00_0000000_0001000_raw.mp4") \
+        .startswith("v1/results/face/mbc_deid/")
+    assert store.output_key("sbs/a_00001_00_0000000_0001000_raw.mp4") \
+        .startswith("v1/results/face/sbs_deid/")
     # 폴더가 없는 입력(직접 업로드)은 예전처럼 결과 프리픽스 바로 밑
     assert store.output_key("clip.mp4") == "v1/results/face/clip_deid.mp4"
 
@@ -132,20 +135,20 @@ def test_processed_keys_sees_subfolders():
     """폴더별로 나눠 쌓아도 '이미 처리됨' 판정이 살아 있어야 한다."""
     key = "videos/2026-08/f_00001_00_0000000_0042000_raw.mp4"
     store = make_store({
-        "v1/results/face/2026-08-deid/f_00001_00_0000000_0042000_deid.mp4":
+        "v1/results/face/2026-08_deid/f_00001_00_0000000_0042000_deid.mp4":
             (b"x", NOW)})
     assert store.output_key(key) in store.processed_keys()
 
 
 def test_processed_keys_are_listed_once_not_per_object():
     """객체마다 HEAD 를 날리면 목록 한 번에 수백 번 왕복한다."""
-    store = make_store({"v1/results/face/2026-08-deid/f_00001_00_0000000_0042000_deid.mp4":
+    store = make_store({"v1/results/face/2026-08_deid/f_00001_00_0000000_0042000_deid.mp4":
                         (b"x", NOW)})
     calls = []
     orig = store.client.list_objects_v2
     store.client.list_objects_v2 = lambda **kw: (calls.append(kw), orig(**kw))[1]
 
-    assert "v1/results/face/2026-08-deid/f_00001_00_0000000_0042000_deid.mp4" \
+    assert "v1/results/face/2026-08_deid/f_00001_00_0000000_0042000_deid.mp4" \
         in store.processed_keys()
     store.processed_keys()                      # 캐시가 먹어야 한다
     assert len(calls) == 1
@@ -228,16 +231,16 @@ def test_s3_job_downloads_processes_and_uploads(s3client):
     assert s["status"] == "done", s.get("error")
     assert s["result"]["frames"] == s3client.frames
     assert s["result"]["s3_output"] \
-        == "v1/results/face/2026-08-deid/f_00001_00_0000000_0042000_deid.mp4"
+        == "v1/results/face/2026-08_deid/f_00001_00_0000000_0042000_deid.mp4"
     assert s3client.store.client.downloads == [
         "videos/2026-08/f_00001_00_0000000_0042000_raw.mp4"]
     assert s3client.store.client.uploaded[
-        "v1/results/face/2026-08-deid/f_00001_00_0000000_0042000_deid.mp4"]
+        "v1/results/face/2026-08_deid/f_00001_00_0000000_0042000_deid.mp4"]
 
 
 def test_processed_flag_appears_after_run(s3client):
     s3client.store.client.objects[
-        "v1/results/face/2026-08-deid/f_00001_00_0000000_0042000_deid.mp4"] = (b"x", NOW)
+        "v1/results/face/2026-08_deid/f_00001_00_0000000_0042000_deid.mp4"] = (b"x", NOW)
     s3client.store._out_cache = (0.0, set())
     d = s3client.get("/api/s3/objects?prefix=videos/2026-08/").json()
     assert d["objects"][0]["processed"] is True
@@ -312,7 +315,7 @@ def test_result_gives_presigned_url_for_s3_job(s3client):
     assert r.status_code == 200
     d = r.json()
     assert d["via"] == "s3"
-    assert d["s3_key"] == "v1/results/face/2026-08-deid/f_00001_00_0000000_0042000_deid.mp4"
+    assert d["s3_key"] == "v1/results/face/2026-08_deid/f_00001_00_0000000_0042000_deid.mp4"
     assert d["download_url"].startswith("https://signed/")
     assert d["expires_in"] > 0
 
@@ -369,7 +372,7 @@ def test_folder_submission_expands_prefix(s3client):
 def test_folder_submission_can_skip_processed(s3client):
     """폴더를 다시 돌릴 때 이미 끝난 건 건너뛴다."""
     s3client.store.client.objects[
-        "v1/results/face/2026-08-deid/f_00001_00_0000000_0042000_deid.mp4"] = (b"x", NOW)
+        "v1/results/face/2026-08_deid/f_00001_00_0000000_0042000_deid.mp4"] = (b"x", NOW)
     s3client.store._out_cache = (0.0, set())
 
     r = s3client.post("/api/jobs", json={"s3_prefix": "videos/2026-08/",
