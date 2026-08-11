@@ -90,6 +90,22 @@ ENCODER_CANDIDATES = (
 # 0 이면 상한 없음.
 DEFAULT_BITRATE_RATIO = float(os.environ.get("FA_BITRATE_RATIO", "1.0"))
 
+# 원본 코덱이 H.264 보다 효율이 좋으면, 그 비트레이트를 H.264 상한으로 그대로
+# 쓰면 안 된다. 같은 화질을 내는 데 더 많은 비트가 필요하기 때문이다.
+#
+# 실측(1920x1080 AV1 632 kbps 입력): 상한 그대로 걸어 639 kbps 로 뽑으니 벽처럼
+# 평평한 면이 전부 블록으로 깨졌다. 같은 원본을 상한 없이 뽑으면 2.16 Mbps 다.
+# 3.4배를 깎아 놓고 화질을 기대할 수 없다.
+#
+# 계수는 각 코덱이 H.264 대비 같은 화질을 몇 분의 일 비트로 내는지다(BD-rate
+# 기준 통설: AV1·HEVC 는 H.264 의 절반 안팎). 정확한 값일 필요는 없다 —
+# 상한이 화질을 깎지 않을 만큼만 넉넉하면 된다.
+CODEC_EFFICIENCY = {
+    "av1": 2.0, "libaom-av1": 2.0, "libsvtav1": 2.0,
+    "hevc": 1.8, "h265": 1.8, "vp9": 1.8,
+    "h264": 1.0, "avc1": 1.0, "mpeg4": 0.7, "mpeg2video": 0.5,
+}
+
 
 @dataclass
 class VideoInfo:
@@ -316,6 +332,29 @@ def pick_encoder(timeout=60):
     return None
 
 
+def video_codec(path, timeout=FFMPEG_TIMEOUT):
+    """비디오 코덱 이름(소문자). 알 수 없으면 빈 문자열."""
+    p = _run(["ffprobe", "-v", "error", "-select_streams", "v:0",
+              "-show_entries", "stream=codec_name", "-of", "default=nk=1:nw=1",
+              path], timeout)
+    return p.stdout.strip().lower() if p is not None and p.returncode == 0 else ""
+
+
+def bitrate_cap(path, ratio, timeout=FFMPEG_TIMEOUT):
+    """원본에 맞춘 출력 비트레이트 상한(bps). 걸 수 없으면 None.
+
+    원본 코덱의 효율을 반영한다. AV1 632 kbps 를 H.264 632 kbps 로 받는 것은
+    상한이 아니라 화질 파괴다(CODEC_EFFICIENCY 주석 참고).
+    """
+    if not ratio:
+        return None
+    src = video_bitrate(path, timeout)
+    if not src:
+        return None
+    factor = CODEC_EFFICIENCY.get(video_codec(path, timeout), 1.0)
+    return int(src * ratio * factor)
+
+
 def video_bitrate(path, timeout=FFMPEG_TIMEOUT):
     """원본 비디오 비트레이트(bps).
 
@@ -426,13 +465,12 @@ def finalize_output(noaudio, original, output, keep_audio=True,
     # -shortest 없음(위 1번). +faststart 는 moov 를 앞으로 옮겨 부분 다운로드
     # 상태에서도 재생이 시작되게 한다.
     cmd += ["-c:v", encoder, qflag, str(crf), *extra, "-pix_fmt", "yuv420p"]
-    if bitrate_ratio:
-        src_bps = video_bitrate(original, timeout)
-        if src_bps:
-            cap = int(src_bps * bitrate_ratio)
-            cmd += ["-maxrate", str(cap), "-bufsize", str(cap * 2)]
-            log.info("비트레이트 상한 %.2f Mbps (원본 %.2f Mbps)",
-                     cap / 1e6, src_bps / 1e6)
+    cap = bitrate_cap(original, bitrate_ratio, timeout)
+    if cap:
+        cmd += ["-maxrate", str(cap), "-bufsize", str(cap * 2)]
+        log.info("비트레이트 상한 %.2f Mbps (원본 %.2f Mbps · %s)",
+                 cap / 1e6, (video_bitrate(original, timeout) or 0) / 1e6,
+                 video_codec(original, timeout) or "?")
     cmd += ["-movflags", "+faststart", out_tmp]
 
     p = _run(cmd, timeout)

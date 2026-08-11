@@ -216,3 +216,35 @@ def test_output_is_h264(tmp_path, make_video):
                      "-show_entries", "stream=codec_name", "-of", "csv=p=0",
                      str(out)], capture_output=True, text=True).stdout.strip()
     assert codec == "h264", f"코덱이 {codec}"
+
+
+# ── 비트레이트 상한 ─────────────────────────────────────────────────────────
+#
+# 실측(1080p AV1 632 kbps): 상한을 원본 그대로 걸어 639 kbps 로 뽑으니 평평한
+# 면이 전부 블록으로 깨졌다. 같은 원본을 상한 없이 뽑으면 2.16 Mbps 다.
+
+def test_bitrate_cap_accounts_for_source_codec(monkeypatch):
+    """AV1 632 kbps 를 H.264 632 kbps 상한으로 받으면 안 된다."""
+    monkeypatch.setattr(P, "video_bitrate", lambda p, t=None: 632_561)
+
+    monkeypatch.setattr(P, "video_codec", lambda p, t=None: "av1")
+    av1 = P.bitrate_cap("x.mp4", 1.0)
+
+    monkeypatch.setattr(P, "video_codec", lambda p, t=None: "h264")
+    h264 = P.bitrate_cap("x.mp4", 1.0)
+
+    assert h264 == 632_561              # 같은 코덱이면 원본 그대로
+    assert av1 > 1_200_000              # AV1 이면 넉넉하게
+    assert av1 == pytest.approx(h264 * 2.0)
+
+
+def test_bitrate_cap_is_off_when_ratio_is_zero(monkeypatch):
+    monkeypatch.setattr(P, "video_bitrate", lambda p, t=None: 632_561)
+    monkeypatch.setattr(P, "video_codec", lambda p, t=None: "av1")
+    assert P.bitrate_cap("x.mp4", 0) is None
+
+
+def test_unknown_codec_falls_back_to_plain_ratio(monkeypatch):
+    monkeypatch.setattr(P, "video_bitrate", lambda p, t=None: 1_000_000)
+    monkeypatch.setattr(P, "video_codec", lambda p, t=None: "weirdcodec")
+    assert P.bitrate_cap("x.mp4", 1.0) == 1_000_000
