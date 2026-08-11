@@ -167,6 +167,11 @@ INDEX_HTML = r"""<!doctype html>
   .job{padding:13px 16px;border-bottom:1px solid #f1f5f9}
   .job:last-child{border-bottom:0}
   .jhead{display:flex;align-items:baseline;gap:9px}
+  /* 목록에서만 지우는 것이라 '삭제' 라고 쓰면 S3 원본을 지우는 것으로 읽힌다.
+     라벨 없는 x 로 두고 설명은 툴팁에 둔다. */
+  .jx{flex:none;border:0;background:none;cursor:pointer;padding:0 2px;
+      font-size:15px;line-height:1;color:var(--faint)}
+  .jx:hover{color:var(--critical)}
   .jname{font-weight:600;font-size:12.5px;overflow:hidden;
          text-overflow:ellipsis;white-space:nowrap;flex:1}
   .bar2{height:6px;background:var(--accent-dim);border-radius:99px;
@@ -662,7 +667,7 @@ function card(j) {
            ${e.code ? `<span class="tag err" style="float:right">${e.code}</span>` : ''}</b>
         ${e.detail || ''}${e.hint ? `<br><span style="opacity:.8">${e.hint}</span>` : ''}
       </div>
-      <div class="row"><button class="ghost" onclick="del('${j.id}')">삭제</button></div>`;
+      `;
   } else {
     const r = j.result, t = r.timing;
     const warns = (r.warnings || []).length
@@ -682,11 +687,15 @@ function card(j) {
       <div class="row">
         <a class="dl" href="/api/jobs/${j.id}/download">내려받기</a>
         <button class="ghost" onclick="preview('${j.id}')">미리보기</button>
-        <button class="ghost" onclick="del('${j.id}')">삭제</button>
       </div><div id="pv-${j.id}"></div>`;
   }
+  // 끝난 작업만 지울 수 있다. 대기·수행중은 '취소' 가 따로 있고, 둘을 같은
+  // 자리에 두면 무엇이 멈추고 무엇이 사라지는지 구분이 안 된다.
+  const over = ['done', 'failed', 'cancelled'].includes(j.status);
+  const x = over ? `<button class="jx" onclick="del('${j.id}')"
+      title="목록에서 지웁니다. S3 의 원본과 결과물은 그대로 남습니다">&times;</button>` : '';
   return `<div class="job ${cls}" id="job-${j.id}">
-    <div class="jhead"><div class="jname" title="${j.name}">${j.name}</div>
+    <div class="jhead">${x}<div class="jname" title="${j.name}">${j.name}</div>
       <span class="tag ${tagcls}">${label}</span></div>${body}</div>`;
 }
 
