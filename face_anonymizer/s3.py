@@ -150,12 +150,26 @@ class S3Store:
         """입력 키에 대응하는 결과물 키.
 
         데이터셋 규칙(naming.py)을 따른다 — 정체성 필드는 그대로 두고 STATE 만
-        raw -> deid 로 바꾼다. 결과는 한곳에 모은다.
+        raw -> deid 로 바꾼다. 결과는 **입력 폴더별로 나눠 쌓는다.**
 
             videos/2026-08/f_00001_00_0000000_0042000_raw.mp4
-            -> v1/results/face/f_00001_00_0000000_0042000_deid.mp4
+            -> v1/results/face/2026-08-deid/f_00001_00_0000000_0042000_deid.mp4
+
+        한곳에 몰아 두면 폴더 하나가 몇만 건이 되고, 어느 원본 묶음에서 나온
+        결과인지 목록만 보고는 알 수 없다. 폴더 이름을 그대로 따라가면 입력과
+        출력이 일대일로 붙는다.
+
+        폴더가 없는 입력(직접 업로드 등)은 예전처럼 결과 프리픽스 바로 밑에
+        떨어진다. 출력 키는 **입력 키만으로 결정된다** — 폴더로 넣든 한 건씩
+        넣든 같은 자리에 떨어져야 중복 판정이 성립한다.
         """
-        return self.output_prefix + naming.output_name(key)
+        return self.output_prefix + self.output_folder(key) + naming.output_name(key)
+
+    @staticmethod
+    def output_folder(key):
+        """입력 키가 들어갈 결과 하위 폴더 ('2026-08-deid/' 또는 '')."""
+        parent = os.path.basename(os.path.dirname(key or ""))
+        return f"{parent}-deid/" if parent else ""
 
     def processed_keys(self):
         """결과물 프리픽스에 이미 있는 키 집합. 짧게 캐시한다.

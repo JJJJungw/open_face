@@ -38,7 +38,7 @@
     FA_CRF 23 · FA_BITRATE_RATIO 1.0
     (imgsz 는 FA_IMGSZ 를 검출기와 공유한다)
     FA_QUEUE_MAX       대기열 개수 상한    (기본: 0 = 무제한)
-    FA_BATCH_MAX       한 번에 넣을 개수   (기본: 500)
+    FA_BATCH_MAX       한 번에 넣을 개수   (기본: 0 = 무제한)
     FA_FAILED_TTL_MIN  실패 보관           (기본: 0 = 안 지움)
     FA_MIN_FREE_MB     최소 여유 디스크    (기본: 2048, 미달이면 507)
     FA_LIST_LIMIT      목록 기본 개수      (기본: 100)
@@ -96,7 +96,11 @@ RETRY_AFTER = int(os.environ.get("FA_RETRY_AFTER", 30))
 # 넣는 사용이 정상이고, 개수는 애초에 잘못된 기준이다 — 10건이 50MB 짜리면
 # 아무것도 아니고 2GB 짜리면 이미 위험하다. 진짜 제약은 디스크다(MIN_FREE_MB).
 QUEUE_MAX = int(os.environ.get("FA_QUEUE_MAX", 0))          # 0 = 무제한
-BATCH_MAX = int(os.environ.get("FA_BATCH_MAX", 500))        # 한 번에 넣을 개수
+# 한 번에 넣을 개수도 막지 않는다. 폴더 하나에 수천 건이 들어 있는 게 정상이고,
+# 상한에 걸리면 사용자가 폴더를 손으로 쪼개야 한다 — 그게 훨씬 나쁘다.
+# S3 입력은 대기 중에 디스크를 쓰지 않는다(내려받기는 _run 에서 한다). 그래서
+# 대기열이 길어도 드는 건 작업 디렉터리와 job.json 뿐이다.
+BATCH_MAX = int(os.environ.get("FA_BATCH_MAX", 0))          # 0 = 무제한
 # 실패/취소 작업은 기본적으로 지우지 않는다. 배치로 수백 건 돌린 뒤 몇 건이
 # 실패했을 때, 입력과 사유가 남아 있어야 원인을 볼 수 있다.
 FAILED_TTL = int(os.environ.get("FA_FAILED_TTL_MIN", 0)) * 60
@@ -764,7 +768,7 @@ async def create_jobs(request: Request):
          "rejected": [{"s3_key", "error": {...}}],
          "queued": 3}
 
-    **한 건이 거절돼도 나머지는 받는다.** 500건에서 키 하나가 오타라고 전체를
+    **한 건이 거절돼도 나머지는 받는다.** 수백 건에서 키 하나가 오타라고 전체를
     되돌리면 호출하는 쪽이 무엇이 들어갔는지 알 수 없다.
     """
     ctype = (request.headers.get("content-type") or "").split(";")[0].strip()
@@ -831,7 +835,7 @@ async def create_jobs(request: Request):
         if not keys:
             raise errors.BATCH_EMPTY(f"{prefix} 에 처리할 영상이 없다")
 
-    if keys and len(keys) > BATCH_MAX:
+    if BATCH_MAX and len(keys) > BATCH_MAX:
         raise errors.BATCH_TOO_LARGE(f"{len(keys)}건 (상한 {BATCH_MAX})",
                                      limit=BATCH_MAX)
     check_admission()
