@@ -46,7 +46,7 @@ def wait(c, jid, timeout=30.0):
     deadline = time.time() + timeout
     while time.time() < deadline:
         s = c.get(f"/api/jobs/{jid}").json()
-        if s["status"] in ("done", "failed"):
+        if s["status"] in ("done", "failed", "cancelled"):
             return s
         time.sleep(0.02)
     raise AssertionError(f"작업이 {timeout}s 안에 끝나지 않았다")
@@ -74,13 +74,17 @@ def test_health_survives_injected_detector(client):
 
 @pytest.mark.parametrize("files,data", [
     ({"file": ("a.mp4", b"x")}, {"method": "nope"}),      # 없는 방식
-    ({"file": ("a.txt", b"x")}, {}),                      # 영상 아닌 확장자
+    pytest.param({"file": ("a.txt", b"x")}, {}, id="bad-ext", marks=[]),
     ({"file": ("a.mp4", b"")}, {}),                       # 빈 파일
     ({"file": ("a.mp4", b"x")}, {"conf": "1.5"}),         # 범위 밖 임계값
 ])
 def test_rejects_bad_input(client, files, data):
     client.attach((320, 240))            # 준비된 서버 기준 (아니면 503 이 먼저)
-    assert client.post("/api/jobs", files=files, data=data).status_code == 400
+    r = client.post("/api/jobs", files=files, data=data)
+    # 형식이 안 맞는 건 415, 나머지는 400 — 둘 다 problem+json 이어야 한다
+    assert r.status_code in (400, 415), r.text
+    assert r.headers["content-type"].startswith("application/problem+json")
+    assert r.json()["code"]
 
 
 def test_bad_upload_leaves_no_workdir(client, tmp_path):
@@ -196,7 +200,8 @@ def test_orphaned_running_job_is_marked_failed(client, tmp_path, make_video):
 
     assert server.recover_orphans() == 1
     s = client.get(f"/api/jobs/{jid}").json()
-    assert s["status"] == "failed" and "재시작" in s["error"]
+    assert s["status"] == "failed"
+    assert s["error"]["code"] == "interrupted"
 
 
 def test_sweep_removes_expired_jobs(client, tmp_path, make_video, monkeypatch):
@@ -346,7 +351,7 @@ def test_retries_are_exhausted_then_failed(client, make_video, monkeypatch):
 
     assert s["status"] == "failed"
     assert s["attempts"] == 2
-    assert "일시적인 척하는" in s["error"]
+    assert "일시적인 척하는" in s["error"]["detail"]
 
 
 def test_permanent_error_is_not_retried(client, tmp_path, monkeypatch):
@@ -452,3 +457,167 @@ def test_defaults_are_a_copy_not_the_live_dict(client, make_video):
     server._JOBS[jid].params["conf"] = 0.99
     assert server.JOB_DEFAULTS["conf"] != 0.99
     wait(client, jid)
+
+
+# ── 오류 형식 (RFC 9457) ─────────────────────────────────────────────────────
+#
+# 호출하는 쪽은 재시도할지, 다른 인스턴스로 보낼지, 사람을 불러야 할지를 정해야
+# 한다. 한국어 문장을 파싱해서 정할 수는 없다.
+
+from face_anonymizer import errors                    # noqa: E402
+
+
+def test_errors_are_problem_json(client):
+    client.attach((320, 240))
+    r = client.post("/api/jobs", data={"s3_key": "x.mp4", "conf": "1.5"})
+
+    assert r.headers["content-type"].startswith("application/problem+json")
+    b = r.json()
+    for k in ("type", "title", "status", "code", "retryable"):
+        assert k in b, b
+    assert b["status"] == r.status_code
+    assert b["type"].startswith("/problems/")
+
+
+def test_error_carries_actionable_fields(client):
+    client.attach((320, 240))
+    b = client.post("/api/jobs", data={"s3_key": "x.mp4",
+                                       "method": "nope"}).json()
+    assert b["code"] == "invalid_input"
+    assert b["field"] == "method"
+    assert "mosaic" in b["allowed"]
+    assert b["hint"]
+
+
+def test_retryable_errors_carry_retry_after(client, make_video, monkeypatch):
+    monkeypatch.setattr(server, "free_mb", lambda: 1)
+    monkeypatch.setattr(server, "MIN_FREE_MB", 2048)
+    path, n, size = make_video(frames=4)
+    client.attach(size)
+
+    r = submit(client, path)
+    assert r.status_code == 507
+    assert r.json()["retryable"] is True
+    assert r.headers.get("Retry-After")
+
+
+def test_missing_and_conflicting_input_are_distinct(client, make_video):
+    client.attach((320, 240))
+    assert client.post("/api/jobs", data={}).json()["code"] == "missing_input"
+
+    src, n, size = make_video(name="x.mp4", frames=4)
+    with open(src, "rb") as f:
+        b = client.post("/api/jobs", files={"file": ("x.mp4", f, "video/mp4")},
+                        data={"s3_key": "a.mp4"}).json()
+    assert b["code"] == "conflicting_input"
+
+
+def test_problem_catalog_is_published(client):
+    items = client.get("/api/problems").json()["problems"]
+    codes = {p["code"] for p in items}
+    for expected in ("queue_full", "not_ready", "job_not_found",
+                     "s3_access_denied", "video_unreadable", "cancelled"):
+        assert expected in codes
+    assert all(p["type"] and p["title"] for p in items)
+
+
+def test_unknown_route_is_also_problem_json(client):
+    r = client.get("/api/nope")
+    assert r.status_code == 404
+    assert r.headers["content-type"].startswith("application/problem+json")
+
+
+def test_job_failure_carries_a_code(client, make_video, monkeypatch):
+    """실패 사유를 코드로 남긴다 — 문자열만 있으면 분기할 수 없다."""
+    path, n, size = make_video(frames=6)
+
+    class Broken:
+        def detect_batch(self, frames, imgsz=None, conf=None, iou=None):
+            raise RuntimeError("CUDA out of memory")
+
+    anon = VideoAnonymizer(detector=Broken())
+    monkeypatch.setattr(server, "get_anonymizer", lambda: anon)
+    monkeypatch.setattr(server, "_anonymizer", anon)
+    monkeypatch.setattr(server, "MAX_ATTEMPTS", 1)
+
+    jid = submit(client, path).json()["id"]
+    s = wait(client, jid, timeout=60)
+
+    assert s["status"] == "failed"
+    assert s["error"]["code"] == "gpu_out_of_memory"
+    assert s["error"]["hint"]
+
+
+# ── 취소 ─────────────────────────────────────────────────────────────────────
+
+def test_cancel_queued_job(client, make_video, monkeypatch):
+    path, n, size = make_video(frames=40)
+    anon = VideoAnonymizer(detector=SlowDetector(0.05))
+    monkeypatch.setattr(server, "get_anonymizer", lambda: anon)
+    monkeypatch.setattr(server, "_anonymizer", anon)
+
+    first = submit(client, path, batch_size="1").json()["id"]
+    second = submit(client, path, batch_size="1").json()["id"]
+
+    r = client.post(f"/api/jobs/{second}/cancel")
+    assert r.status_code == 200
+    assert client.get(f"/api/jobs/{second}").json()["status"] == "cancelled"
+
+    wait(client, first, timeout=90)
+    assert client.get(f"/api/jobs/{second}").json()["status"] == "cancelled"
+
+
+def test_cancel_running_job_stops_it(client, make_video, monkeypatch):
+    """수행 중인 작업도 다음 진행 보고에서 끊긴다."""
+    path, n, size = make_video(frames=60)
+    anon = VideoAnonymizer(detector=SlowDetector(0.03))
+    monkeypatch.setattr(server, "get_anonymizer", lambda: anon)
+    monkeypatch.setattr(server, "_anonymizer", anon)
+
+    jid = submit(client, path, batch_size="1").json()["id"]
+    for _ in range(200):                       # 실제로 돌기 시작할 때까지
+        if client.get(f"/api/jobs/{jid}").json()["status"] == "running":
+            break
+        time.sleep(0.02)
+
+    client.post(f"/api/jobs/{jid}/cancel")
+    s = wait(client, jid, timeout=60)
+    assert s["status"] == "cancelled"
+    assert s["error"]["code"] == "cancelled"
+
+
+def test_cannot_cancel_finished_job(client, make_video):
+    path, n, size = make_video(frames=6)
+    client.attach(size)
+    jid = submit(client, path).json()["id"]
+    wait(client, jid)
+
+    r = client.post(f"/api/jobs/{jid}/cancel")
+    assert r.status_code == 409
+    assert r.json()["code"] == "job_not_cancellable"
+
+
+# ── 보관 정책 ────────────────────────────────────────────────────────────────
+
+def test_failed_jobs_survive_sweep(client, make_video, monkeypatch):
+    """배치에서 몇 건 실패했을 때 원인을 볼 수 있어야 한다."""
+    path, n, size = make_video(frames=6)
+
+    class Broken:
+        def detect_batch(self, frames, imgsz=None, conf=None, iou=None):
+            raise RuntimeError("망가짐")
+
+    anon = VideoAnonymizer(detector=Broken())
+    monkeypatch.setattr(server, "get_anonymizer", lambda: anon)
+    monkeypatch.setattr(server, "_anonymizer", anon)
+    monkeypatch.setattr(server, "MAX_ATTEMPTS", 1)
+    monkeypatch.setattr(server, "JOB_TTL", 1)
+    monkeypatch.setattr(server, "FAILED_TTL", 0)       # 기본값 = 안 지움
+
+    jid = submit(client, path).json()["id"]
+    wait(client, jid, timeout=60)
+    server._JOBS[jid].finished = time.time() - 9999
+    server.save_job(server._JOBS[jid])
+
+    server.sweep()
+    assert client.get(f"/api/jobs/{jid}").status_code == 200

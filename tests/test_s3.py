@@ -56,11 +56,30 @@ class FakeS3Client:
         with open(dest, "wb") as f:
             f.write(self.objects[key][0])
 
+    def generate_presigned_url(self, op, Params=None, ExpiresIn=None):
+        return f"https://signed/{Params['Key']}?e={ExpiresIn}"
+
+    def head_object(self, Bucket, Key):
+        if Key not in self.objects:
+            raise KeyError(Key)
+        return {}
+
     def upload_file(self, path, bucket, key, ExtraArgs=None):
         with open(path, "rb") as f:
             data = f.read()
         self.uploaded[key] = data
         self.objects[key] = (data, NOW)      # 올린 뒤에는 목록에도 보여야 한다
+
+
+def wait(c, jid, timeout=30.0):
+    import time
+    end = time.time() + timeout
+    while time.time() < end:
+        s = c.get(f"/api/jobs/{jid}").json()
+        if s["status"] in ("done", "failed", "cancelled"):
+            return s
+        time.sleep(0.02)
+    raise AssertionError("작업이 끝나지 않았다")
 
 
 def make_store(objects=None):
@@ -219,4 +238,90 @@ def test_rejects_traversal_key(s3client):
 
 def test_rejects_non_video_key(s3client):
     r = s3client.post("/api/jobs", data={"s3_key": "videos/2026-08/notes.txt"})
-    assert r.status_code == 400
+    assert r.status_code == 415
+    assert r.json()["code"] == "unsupported_media"
+
+
+# ── 배치 · 결과 URL ─────────────────────────────────────────────────────────
+
+KEY = "videos/2026-08/f_00001_00_0000000_0042000_raw.mp4"
+
+
+def test_batch_accepts_many_and_reports_each(s3client):
+    """한 건이 거절돼도 나머지는 받는다 — 전체를 되돌리면 무엇이 들어갔는지
+    호출하는 쪽이 알 수 없다."""
+    r = s3client.post("/api/jobs/batch", json={
+        "s3_keys": [KEY, "videos/2026-08/notes.txt", "../escape.mp4", KEY]})
+
+    assert r.status_code == 202
+    d = r.json()
+    assert len(d["accepted"]) == 2
+    assert len(d["rejected"]) == 2
+    codes = {x["error"]["code"] for x in d["rejected"]}
+    assert codes == {"unsupported_media", "invalid_key"}
+    for a in d["accepted"]:
+        wait(s3client, a["id"], timeout=60)
+
+
+def test_batch_applies_shared_params(s3client):
+    r = s3client.post("/api/jobs/batch",
+                      json={"s3_keys": [KEY], "params": {"conf": 0.4}})
+    jid = r.json()["accepted"][0]["id"]
+    assert server._JOBS[jid].params["conf"] == 0.4
+    assert server._JOBS[jid].params["method"] == server.JOB_DEFAULTS["method"]
+    wait(s3client, jid, timeout=60)
+
+
+def test_batch_rejects_empty_and_oversized(s3client, monkeypatch):
+    assert s3client.post("/api/jobs/batch", json={"s3_keys": []}).json()["code"] \
+        == "batch_empty"
+    monkeypatch.setattr(server, "BATCH_MAX", 2)
+    b = s3client.post("/api/jobs/batch",
+                      json={"s3_keys": [KEY, KEY, KEY]}).json()
+    assert b["code"] == "batch_too_large" and b["limit"] == 2
+
+
+def test_result_gives_presigned_url_for_s3_job(s3client):
+    jid = s3client.post("/api/jobs", data={"s3_key": KEY}).json()["id"]
+    wait(s3client, jid, timeout=60)
+
+    r = s3client.get(f"/api/jobs/{jid}/result")
+    assert r.status_code == 200
+    d = r.json()
+    assert d["via"] == "s3"
+    assert d["s3_key"] == "v1/results/face/f_00001_00_0000000_0042000_deid.mp4"
+    assert d["download_url"].startswith("https://signed/")
+    assert d["expires_in"] > 0
+
+
+def test_download_redirects_to_s3_when_local_copy_is_gone(s3client):
+    """보관 기간에 로컬 사본이 정리돼도 S3 원본은 남아 있다."""
+    jid = s3client.post("/api/jobs", data={"s3_key": KEY}).json()["id"]
+    wait(s3client, jid, timeout=60)
+
+    os.remove(server._JOBS[jid].output)
+    r = s3client.get(f"/api/jobs/{jid}/download", follow_redirects=False)
+    assert r.status_code == 302
+    assert r.headers["location"].startswith("https://signed/")
+
+
+def test_result_before_done_is_409(s3client):
+    jid = s3client.post("/api/jobs", data={"s3_key": KEY}).json()["id"]
+    server._JOBS[jid].status = "running"
+    b = s3client.get(f"/api/jobs/{jid}/result")
+    assert b.status_code == 409 and b.json()["code"] == "job_not_finished"
+
+
+def test_s3_access_denied_is_distinguished(s3client):
+    """권한 문제와 키 오타는 사용자가 해야 할 일이 다르다."""
+    class Denied(Exception):
+        response = {"Error": {"Code": "AccessDenied"}}
+
+    def boom(**kw):
+        raise Denied()
+    s3client.store.client.list_objects_v2 = boom
+
+    r = s3client.get("/api/s3/objects?prefix=videos/")
+    assert r.status_code == 502
+    assert r.json()["code"] == "s3_access_denied"
+    assert "권한" in r.json()["hint"]

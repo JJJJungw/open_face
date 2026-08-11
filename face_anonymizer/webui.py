@@ -453,29 +453,43 @@ function opts(fd) {
   fd.append('keep_audio', $('#audio').checked);
   return fd;
 }
+// 서버가 RFC 9457 problem+json 을 준다. title/detail/hint 를 그대로 보여 주면
+// "왜 안 되는지" 와 "무엇을 하면 되는지" 가 같이 전달된다.
+function problemText(p) {
+  if (!p || !p.title) return '알 수 없는 오류';
+  return [p.title, p.detail, p.hint].filter(Boolean).join('\n');
+}
 function explain(status, text) {
-  let m = text; try { m = JSON.parse(text).detail; } catch (_) {}
-  if (status === 429) return '대기열이 가득 찼습니다. 잠시 후 다시 시도하세요.';
-  if (status === 503) return '서버가 아직 준비되지 않았습니다. ' + m;
-  if (status === 507) return '디스크 여유가 부족합니다. ' + m;
-  return m;
+  let p = null; try { p = JSON.parse(text); } catch (_) {}
+  return p && p.title ? problemText(p) : (text || `HTTP ${status}`);
 }
 go.onclick = async () => {
   if (picked) return uploadFile();
   const keys = [...S3.selected];
   if (!keys.length) return;
-  go.disabled = true;
-  const failed = [];
-  for (let i = 0; i < keys.length; i++) {
-    go.textContent = `제출 중… ${i+1}/${keys.length}`;
-    const fd = opts(new FormData()); fd.append('s3_key', keys[i]);
-    const r = await fetch('/api/jobs', { method:'POST', body:fd });
-    if (r.status !== 202) failed.push(`${keys[i]}: ${explain(r.status, await r.text())}`);
-  }
+
+  go.disabled = true; go.textContent = `제출 중… ${keys.length}건`;
+  // 한 번에 보낸다. 건마다 요청하면 수백 건 배치에서 왕복만 수백 번이다.
+  const r = await fetch('/api/jobs/batch', {
+    method: 'POST', headers: { 'Content-Type': 'application/json' },
+    body: JSON.stringify({ s3_keys: keys, params: paramObject() }),
+  });
   go.textContent = '비식별화 시작';
+
+  if (r.status !== 202) { alert(explain(r.status, await r.text())); poll(); return; }
+  const d = await r.json();
   S3.selected.clear(); renderBrowser(); poll();
-  if (failed.length) alert('일부 실패\n\n' + failed.join('\n'));
+  if (d.rejected && d.rejected.length) {
+    alert(`${d.accepted.length}건 접수 · ${d.rejected.length}건 거절\n\n`
+      + d.rejected.map(x => `${x.s3_key}\n  ${problemText(x.error)}`).join('\n\n'));
+  }
 };
+
+function paramObject() {
+  return { method: $('#method').value, conf: +$('#conf').value,
+           imgsz: +$('#imgsz').value, batch_size: +$('#batch').value,
+           keep_audio: $('#audio').checked };
+}
 function uploadFile() {
   const fd = opts(new FormData()); fd.append('file', picked);
   go.disabled = true; go.textContent = '업로드 중… 0%';
@@ -608,21 +622,31 @@ const WARN_TEXT = { 'no-detections':
 
 function card(j) {
   const cls = j.status === 'done' ? 'ok' : '';
-  const label = { queued:'대기', running:'수행중', done:'완료', failed:'실패' }[j.status];
-  const tagcls = j.status === 'done' ? 'done' : j.status === 'failed' ? 'err'
+  const label = { queued:'대기', running:'수행중', done:'완료',
+                  failed:'실패', cancelled:'취소됨' }[j.status] || j.status;
+  const tagcls = j.status === 'done' ? 'done'
+               : (j.status === 'failed' || j.status === 'cancelled') ? 'err'
                : j.status === 'running' ? 'run' : '';
   let body = '';
   if (j.status === 'running') {
     const stage = j.stage === 'detect' ? '검출' : j.stage === 'render' ? '렌더' : '준비';
     body = `<div class="bar2"><i style="width:${j.overall}%"></i></div>
       <div class="meta">${stage} ${j.percent}% · ${j.fps.toFixed(0)} f/s ·
-        남은 시간 ${fmt(j.eta)}</div>`;
+        남은 시간 ${fmt(j.eta)}</div>
+      <div class="row"><button class="ghost" onclick="cancel('${j.id}')">취소</button></div>`;
   } else if (j.status === 'queued') {
     const retry = j.attempts ? ` · 재시도 ${j.attempts}/${j.max_attempts}` : '';
     body = `<div class="bar2"><i style="width:0"></i></div>
-      <div class="meta">앞에 ${j.queued_ahead}건${retry}</div>`;
-  } else if (j.status === 'failed') {
-    body = `<div class="warn"><b>실패 (${j.attempts}회 시도)</b>${j.error}</div>`;
+      <div class="meta">앞에 ${j.queued_ahead}건${retry}</div>
+      <div class="row"><button class="ghost" onclick="cancel('${j.id}')">취소</button></div>`;
+  } else if (j.status === 'failed' || j.status === 'cancelled') {
+    const e = j.error || {};
+    body = `<div class="warn">
+        <b>${e.title || '실패'}${j.attempts ? ` · ${j.attempts}회 시도` : ''}
+           ${e.code ? `<span class="tag err" style="float:right">${e.code}</span>` : ''}</b>
+        ${e.detail || ''}${e.hint ? `<br><span style="opacity:.8">${e.hint}</span>` : ''}
+      </div>
+      <div class="row"><button class="ghost" onclick="del('${j.id}')">삭제</button></div>`;
   } else {
     const r = j.result, t = r.timing;
     const warns = (r.warnings || []).length
@@ -655,6 +679,11 @@ function preview(id) {
   el.innerHTML = el.innerHTML ? '' : `<video controls src="/api/jobs/${id}/download"></video>`;
 }
 async function del(id) { await fetch('/api/jobs/' + id, { method:'DELETE' }); poll(); }
+async function cancel(id) {
+  const r = await fetch(`/api/jobs/${id}/cancel`, { method:'POST' });
+  if (!r.ok) alert(explain(r.status, await r.text()));
+  poll();
+}
 
 async function poll() {
   const [jobs, st] = await Promise.all([

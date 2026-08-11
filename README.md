@@ -63,7 +63,11 @@ uvicorn face_anonymizer.server:app --host 0.0.0.0 --port 8000
 | `GET /` | 웹 UI |
 | `GET /api/status` | `{ready, busy, queued, free_mb}` — 오케스트레이터용 최소 응답 |
 | `GET /api/health` | 준비 전 **503**. 디바이스·모델 상태·작업 수 |
-| `POST /api/jobs` | 영상 업로드 → `202` + 작업 id. 준비 전 **503**, 디스크 부족 **507** |
+| `POST /api/jobs` | 영상 하나 → `202` + 작업 id (`file` 또는 `s3_key`) |
+| `POST /api/jobs/batch` | 여러 건을 한 번에 → `accepted` / `rejected` |
+| `POST /api/jobs/{id}/cancel` | 취소 (대기 중이면 즉시, 수행 중이면 다음 진행 보고에서) |
+| `GET /api/jobs/{id}/result` | 결과 받는 방법 (S3 면 presigned URL) |
+| `GET /api/problems` | 이 서비스가 낼 수 있는 오류 목록 |
 | `GET /api/jobs/{id}` | 진행률 · 단계 · fps · ETA · 완료 시 통계와 경고 |
 | `GET /api/jobs/{id}/download` | 결과 영상 (완료 전 409, 파일 만료 410) |
 | `DELETE /api/jobs/{id}` | 작업과 파일 삭제 (진행 중이면 409) |
@@ -137,14 +141,75 @@ boto3 는 지연 임포트라 S3 를 안 쓰면 설치할 필요가 없다.
 
 수백 건이 쌓여도 폴링이 느려지지 않게, `GET /api/jobs/{id}` 는 디스크를 훑지 않고 메모리만 본다. 목록은 대기 순번을 한 번에 계산하고(작업마다 전체를 다시 훑으면 O(N²)) 기본 100건까지만 준다. 작업 500건 기준 폴링 0.1ms, 목록 13ms.
 
-작업 상태는 넷이다.
+작업 상태는 다섯이다.
 
 | 상태 | 뜻 |
 |---|---|
 | `queued` | 대기 |
 | `running` | 수행중 (`stage` 가 `detect`/`render`, `overall` 이 진행률) |
 | `done` | 완료 (`result` 에 통계) |
-| `failed` | 실패 (`error` 에 사유, `attempts` 에 시도 횟수) |
+| `failed` | 실패 (`error.code` 에 사유, `attempts` 에 시도 횟수) |
+| `cancelled` | 취소됨 |
+
+## 오류
+
+응답은 **RFC 9457 Problem Details**(`application/problem+json`)를 따른다.
+
+```json
+{
+  "type": "/problems/queue-full",
+  "title": "대기열이 가득 찼다",
+  "status": 429,
+  "detail": "대기 10건",
+  "code": "queue_full",
+  "hint": "Retry-After 뒤에 다시 보내거나 다른 인스턴스로 보내라.",
+  "retryable": true,
+  "instance": "/api/jobs"
+}
+```
+
+호출하는 쪽은 재시도할지, 다른 인스턴스로 보낼지, 사람을 불러야 할지를 정해야 한다. 한국어 문장을 파싱해서 정할 수는 없으므로 **`code`(안정된 식별자)와 `retryable`(서버가 내린 판단)** 로 분기한다. `detail` 과 `hint` 는 사람이 읽는 용도라 문구가 바뀔 수 있다.
+
+오류 정의는 `face_anonymizer/errors.py` 의 `CATALOG` 한곳에 있고 `GET /api/problems` 로 그대로 나온다 — 호출하는 쪽이 code 별 대응을 미리 짜 둘 수 있다. 종류는 30가지이고, 크게 이렇게 나뉜다.
+
+| 갈래 | 예 |
+|---|---|
+| 요청이 잘못됨 | `missing_input` `conflicting_input` `invalid_key` `unsupported_media` `payload_too_large` |
+| 서비스 상태 | `not_ready` `model_load_failed` `queue_full` `insufficient_storage` |
+| 작업 | `job_not_found` `job_not_finished` `result_expired` `job_not_cancellable` |
+| S3 | `s3_not_configured` `s3_object_not_found` `s3_access_denied` `s3_upstream` |
+| 처리 실패 | `video_unreadable` `decode_incomplete` `encode_failed` `no_detections` `gpu_out_of_memory` `ffmpeg_missing` |
+
+작업이 실패하면 같은 코드 체계가 `error` 에 담긴다. 권한 문제와 키 오타와 GPU 메모리 부족은 사용자가 해야 할 일이 전혀 다르므로 구분해서 남긴다.
+
+```json
+"error": { "code": "gpu_out_of_memory", "title": "GPU 메모리가 부족하다",
+           "detail": "CUDA out of memory", "hint": "batch_size 나 imgsz 를 낮춰라.",
+           "retryable": true }
+```
+
+## 배치
+
+```bash
+curl -X POST localhost:8000/api/jobs/batch -H 'Content-Type: application/json' -d '{
+  "s3_keys": ["videos/2026-08/f_00001_00_0000000_0042000_raw.mp4", "..."],
+  "params": {"conf": 0.4}
+}'
+```
+
+**한 건이 거절돼도 나머지는 받는다.** 500건 배치에서 키 하나가 오타라고 전체를 되돌리면 호출하는 쪽이 무엇이 들어갔는지 알 수 없다. 거절된 항목은 사유(`code`)와 함께 그대로 돌아온다. 상한은 `FA_BATCH_MAX`(기본 500).
+
+## 결과 받기
+
+```bash
+curl -s localhost:8000/api/jobs/<id>/result
+# {"via":"s3","s3_key":"v1/results/face/..._deid.mp4",
+#  "download_url":"https://...","expires_in":3600}
+```
+
+S3 작업이면 **presigned URL** 을 준다 — GPU 서버가 파일 전송까지 떠안을 이유가 없고, 로컬 사본이 보관 기간에 정리돼도 S3 원본은 남아 있다. `/download` 도 로컬 사본이 없으면 S3 로 302 리다이렉트한다.
+
+**실패·취소된 작업은 기본적으로 지우지 않는다**(`FA_FAILED_TTL_MIN=0`). 배치로 수백 건 돌린 뒤 몇 건이 실패했을 때 입력과 사유가 남아 있어야 원인을 볼 수 있다.
 
 **실패하면 재시도한다.** 일시적 오류(CUDA OOM, ffmpeg 실패, 디스크 문제)는 `FA_MAX_ATTEMPTS`(기본 3)회까지 다시 큐에 넣고, 소진되면 `failed` 로 남긴다. 다만 **같은 입력으로 같은 결과가 나올 오류는 재시도하지 않는다** — 깨진 파일이나 잘못된 인자(`VideoOpenError`, `VideoWriteError`, `ValueError`, `FileNotFoundError`)를 세 번 돌려도 결과가 같고, 그동안 뒤에 쌓인 정상 작업만 밀린다. 이 경우 `attempts` 가 1 로 남는다.
 

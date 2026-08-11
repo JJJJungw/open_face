@@ -38,6 +38,8 @@
     FA_CRF 23 · FA_BITRATE_RATIO 1.0
     (imgsz 는 FA_IMGSZ 를 검출기와 공유한다)
     FA_QUEUE_MAX       대기열 개수 상한    (기본: 0 = 무제한)
+    FA_BATCH_MAX       한 번에 넣을 개수   (기본: 500)
+    FA_FAILED_TTL_MIN  실패 보관           (기본: 0 = 안 지움)
     FA_MIN_FREE_MB     최소 여유 디스크    (기본: 2048, 미달이면 507)
     FA_LIST_LIMIT      목록 기본 개수      (기본: 100)
 
@@ -66,10 +68,10 @@ try:
 except ImportError:                   # pragma: no cover
     fcntl = None
 
-from fastapi import FastAPI, File, Form, HTTPException, Response, UploadFile
-from fastapi.responses import FileResponse, HTMLResponse
+from fastapi import FastAPI, File, Form, Response, UploadFile
+from fastapi.responses import FileResponse, HTMLResponse, RedirectResponse
 
-from . import naming
+from . import errors, naming
 from . import s3 as s3mod
 from .anonymize import METHODS
 from .pipeline import (
@@ -94,6 +96,10 @@ RETRY_AFTER = int(os.environ.get("FA_RETRY_AFTER", 30))
 # 넣는 사용이 정상이고, 개수는 애초에 잘못된 기준이다 — 10건이 50MB 짜리면
 # 아무것도 아니고 2GB 짜리면 이미 위험하다. 진짜 제약은 디스크다(MIN_FREE_MB).
 QUEUE_MAX = int(os.environ.get("FA_QUEUE_MAX", 0))          # 0 = 무제한
+BATCH_MAX = int(os.environ.get("FA_BATCH_MAX", 500))        # 한 번에 넣을 개수
+# 실패/취소 작업은 기본적으로 지우지 않는다. 배치로 수백 건 돌린 뒤 몇 건이
+# 실패했을 때, 입력과 사유가 남아 있어야 원인을 볼 수 있다.
+FAILED_TTL = int(os.environ.get("FA_FAILED_TTL_MIN", 0)) * 60
 MIN_FREE_MB = int(os.environ.get("FA_MIN_FREE_MB", 2048))   # 0 = 검사 안 함
 LIST_LIMIT = int(os.environ.get("FA_LIST_LIMIT", 100))
 MAX_ATTEMPTS = int(os.environ.get("FA_MAX_ATTEMPTS", 3))
@@ -206,14 +212,16 @@ class Job:
     name: str
     params: dict
     workdir: str
-    status: str = "queued"        # queued(대기) | running(수행중) | done(완료) | failed(실패)
+    # queued(대기) | running(수행중) | done(완료) | failed(실패) | cancelled(취소)
+    status: str = "queued"
     attempts: int = 0             # 시도 횟수 (재시도 포함)
+    cancel: bool = False          # 취소 요청 표시. 진행 콜백이 보고 중단한다
     s3_key: str = ""              # S3 입력 키 (업로드면 빈 문자열)
     s3_output: str = ""           # S3 결과물 키
     stage: str = ""               # detect | render
     done: int = 0
     total: int = 0
-    error: str = ""
+    error: dict = field(default_factory=dict)
     output: str = ""
     result: dict = field(default_factory=dict)
     created: float = field(default_factory=time.time)
@@ -321,7 +329,11 @@ def sweep():
         return 0
     now, removed = time.time(), 0
     for j in all_jobs():
-        if j.finished and now - j.finished > JOB_TTL:
+        # 실패·취소는 원인을 보려면 남아 있어야 한다.
+        ttl = FAILED_TTL if j.status in ("failed", "cancelled") else JOB_TTL
+        if not ttl:
+            continue
+        if j.finished and now - j.finished > ttl:
             shutil.rmtree(j.workdir or os.path.join(JOBS_DIR, j.id),
                           ignore_errors=True)
             with _LOCK:
@@ -355,7 +367,9 @@ def recover_orphans():
         if live or j.status not in ("queued", "running"):
             continue
         j.status = "failed"
-        j.error = "서버가 재시작되어 작업이 중단됐다. 다시 올려 주세요."
+        j.error = {"code": "interrupted", "title": "서버 재시작으로 중단됨",
+                   "detail": "처리 중 프로세스가 종료됐다", "hint": "다시 제출하라",
+                   "retryable": True}
         j.finished = time.time()
         save_job(j)
         n += 1
@@ -400,28 +414,33 @@ class gpu_lock:
         return False
 
 
+class JobCancelled(Exception):
+    """진행 콜백이 취소 요청을 보고 던진다."""
+
+
 def _fail_or_retry(j, exc, permanent):
     """실패 처리. 일시적 오류면 다시 큐에 넣는다.
 
     같은 입력으로 같은 결과가 나올 오류(깨진 파일, 잘못된 인자)는 재시도하지
     않는다 — 세 번 돌려도 결과가 같고 그동안 뒤에 쌓인 정상 작업이 밀린다.
     """
-    msg = f"{type(exc).__name__}: {exc}"
-    retryable = not permanent and j.attempts < MAX_ATTEMPTS
+    info = errors.job_error(exc)
+    retryable = not permanent and info["retryable"] and j.attempts < MAX_ATTEMPTS
+    msg = info["detail"]
     with _LOCK:
-        j.error = msg
+        j.error = info
         if retryable:
             j.status, j.done, j.total, j.stage = "queued", 0, 0, ""
         else:
             j.status, j.finished = "failed", time.time()
     save_job(j)
     if retryable:
-        log.warning("작업 %s 실패 (%d/%d회) — 다시 시도한다: %s",
-                    j.id, j.attempts, MAX_ATTEMPTS, msg)
+        log.warning("작업 %s 실패 [%s] (%d/%d회) — 다시 시도한다: %s",
+                    j.id, info["code"], j.attempts, MAX_ATTEMPTS, msg)
         _EXEC.submit(_run, j.id)
     else:
-        log.error("작업 %s 실패 (%d회 시도, %s): %s", j.id, j.attempts,
-                  "재시도 불가" if permanent else "재시도 소진", msg)
+        log.error("작업 %s 실패 [%s] (%d회 시도, %s): %s", j.id, info["code"],
+                  j.attempts, "재시도 불가" if permanent else "재시도 소진", msg)
 
 
 def _run(job_id):
@@ -429,12 +448,21 @@ def _run(job_id):
         j = _JOBS.get(job_id)
         if j is None:
             return
+        if j.cancel or j.status == "cancelled":
+            # 대기 중에 취소된 건 아예 시작하지 않는다.
+            j.status, j.finished = "cancelled", j.finished or time.time()
+            save_job(j)
+            return
         j.status, j.stage_t0 = "running", time.time()
         j.attempts += 1
         params, workdir, name = dict(j.params), j.workdir, j.name
     save_job(j)
 
     def progress(stage, done, total):
+        # 취소는 여기서만 끊을 수 있다. 파이프라인이 프레임마다 부르는 유일한
+        # 지점이라, 예외를 던지면 다음 프레임으로 넘어가지 않고 빠져나온다.
+        if j.cancel:
+            raise JobCancelled()
         with _LOCK:
             if j.stage != stage:
                 j.stage, j.stage_t0 = stage, time.time()
@@ -484,8 +512,16 @@ def _run(job_id):
                           "fps": round(res.video.fps, 2)},
                 "s3_key": j.s3_key, "s3_output": j.s3_output,
             }
-            j.error = ""
+            j.error = {}
         save_job(j)
+    except JobCancelled:
+        with _LOCK:
+            j.status, j.finished = "cancelled", time.time()
+            j.error = {"code": errors.CANCELLED.code,
+                       "title": errors.CANCELLED.title, "detail": "",
+                       "hint": "", "retryable": False}
+        save_job(j)
+        log.info("작업 %s 취소됨", job_id)
     except PERMANENT_ERRORS as e:
         _fail_or_retry(j, e, permanent=True)
     except Exception as e:                      # noqa: BLE001 — 워커가 조용히 죽으면 안 된다
@@ -513,7 +549,18 @@ async def lifespan(_app):
     yield
 
 
-app = FastAPI(title="face-anonymizer", version="0.2.0", lifespan=lifespan)
+app = FastAPI(title="face-anonymizer", version="0.3.0", lifespan=lifespan)
+errors.install(app)
+
+
+@app.get("/api/problems")
+def problems():
+    """이 서비스가 낼 수 있는 오류 목록.
+
+    호출하는 쪽이 code 별 대응(재시도/전환/사람 호출)을 미리 짜 둘 수 있게
+    한곳에서 노출한다.
+    """
+    return {"problems": [p.as_dict() for p in errors.CATALOG.values()]}
 
 
 @app.get("/", response_class=HTMLResponse)
@@ -576,19 +623,134 @@ def s3_objects(prefix: str = ""):
     """
     store = s3mod.get_store()
     if store is None:
-        raise HTTPException(404, "S3 가 설정되지 않았다 (FA_S3_BUCKET)")
+        raise errors.S3_NOT_CONFIGURED()
     if ".." in prefix:
-        raise HTTPException(400, "잘못된 prefix")
+        raise errors.INVALID_KEY(prefix)
     try:
         folders, objects = store.list(prefix)
     except s3mod.S3Error as e:
-        raise HTTPException(502, str(e)) from e
+        raise (e.problem or errors.S3_UPSTREAM)(str(e)) from e
     done = store.processed_keys()
     for o in objects:
         o["processed"] = store.output_key(o["key"]) in done
     return {"bucket": store.bucket, "prefix": prefix or store.root_prefix,
             "folders": folders, "objects": objects,
             "output_prefix": store.output_prefix}
+
+
+def _queued_ahead(job):
+    """앞에 몇 건 대기 중인가. **메모리만** 본다.
+
+    폴링 경로라 여기서 디스크를 훑으면 안 된다. 대기 중인 작업은 이 프로세스의
+    워커가 들고 있으므로 메모리에 있고, 없으면(재시작 후 남은 기록) 어차피
+    대기 중이 아니다.
+    """
+    with _LOCK:
+        return sum(1 for o in _JOBS.values()
+                   if o.status == "queued" and o.created < job.created)
+
+
+def check_admission():
+    """받을 수 있는 상태인지. 못 받으면 ProblemError."""
+    if not is_ready():
+        raise (errors.MODEL_LOAD_FAILED(_model_error) if _model_error
+               else errors.NOT_READY("기동 중이다"))
+    free = free_mb()
+    if MIN_FREE_MB and free is not None and free < MIN_FREE_MB:
+        raise errors.INSUFFICIENT_STORAGE(f"{free}MB < {MIN_FREE_MB}MB",
+                                          free_mb=free, retry_after=RETRY_AFTER)
+
+
+def resolve_params(given):
+    """보낸 것만 덮고 나머지는 서비스 기본값. 검증도 여기서."""
+    params = {**JOB_DEFAULTS,
+              **{k: v for k, v in given.items() if v is not None}}
+    if params["method"] not in METHODS:
+        raise errors.INVALID_INPUT(f"모르는 방식: {params['method']}",
+                                   field="method", allowed=list(METHODS))
+    if not 0 < params["conf"] < 1:
+        raise errors.INVALID_INPUT(
+            f"conf 는 0~1 사이여야 한다 (받은 값 {params['conf']})", field="conf")
+    params["imgsz"] = max(320, min(int(params["imgsz"]), 2048))
+    return params
+
+
+def check_video_name(name):
+    ext = os.path.splitext(name)[1].lower()
+    if ext not in VIDEO_EXT:
+        raise errors.UNSUPPORTED_MEDIA(f"확장자 {ext or '(없음)'}",
+                                       supported=sorted(VIDEO_EXT))
+    return ext
+
+
+def check_s3_key(key):
+    if s3mod.get_store() is None:
+        raise errors.S3_NOT_CONFIGURED()
+    if ".." in key or key.startswith("/"):
+        raise errors.INVALID_KEY(key)
+    return check_video_name(os.path.basename(key))
+
+
+def new_job_id():
+    return uuid.uuid4().hex[:12]
+
+
+def enqueue(name, params, s3_key="", jid=None, workdir=None):
+    """작업을 등록하고 워커에 넘긴다. 대기열 상한도 여기서 본다.
+
+    ``jid`` 와 ``workdir`` 은 함께 온다 — 업로드 경로는 파일을 받아야 해서
+    디렉터리를 먼저 만든다. 둘이 어긋나면 상태 파일이 엉뚱한 곳에 쓰인다.
+    """
+    global _current
+    jid = jid or new_job_id()
+    workdir = workdir or os.path.join(JOBS_DIR, jid)
+    os.makedirs(workdir, exist_ok=True)
+    job = Job(id=jid, name=name, workdir=workdir, s3_key=s3_key, params=params)
+    with _LOCK:
+        # 대기열 확인과 등록이 같은 락 안에 있어야 동시 요청이 상한을 넘지 않는다.
+        if QUEUE_MAX and sum(1 for o in _JOBS.values()
+                             if o.status == "queued") >= QUEUE_MAX:
+            shutil.rmtree(workdir, ignore_errors=True)
+            raise errors.QUEUE_FULL(f"대기 {QUEUE_MAX}건", retry_after=RETRY_AFTER)
+        _JOBS[jid] = job
+        _current = jid
+    save_job(job)
+    snap = snapshot(job, queued_ahead=_queued_ahead(job))
+    _EXEC.submit(_run, jid)
+    return job, snap
+
+
+@app.post("/api/jobs/batch", status_code=202)
+def create_batch(body: dict):
+    """여러 건을 한 번에 넣는다.
+
+    {"s3_keys": [...], "params": {...}}  ->  {"accepted": [...], "rejected": [...]}
+
+    한 건이 거절돼도 나머지는 받는다 — 500건 배치에서 키 하나가 오타라고 전체를
+    되돌리면 호출하는 쪽이 어느 것이 들어갔는지 알 수 없다. 거절된 항목은
+    사유(code)와 함께 그대로 돌려준다.
+    """
+    keys = body.get("s3_keys") or []
+    if not isinstance(keys, list) or not keys:
+        raise errors.BATCH_EMPTY()
+    if len(keys) > BATCH_MAX:
+        raise errors.BATCH_TOO_LARGE(f"{len(keys)}건 (상한 {BATCH_MAX})",
+                                     limit=BATCH_MAX)
+    check_admission()
+    params = resolve_params(body.get("params") or {})
+
+    accepted, rejected = [], []
+    for key in keys:
+        try:
+            if not isinstance(key, str):
+                raise errors.INVALID_KEY(str(key))
+            check_s3_key(key)
+            _job, snap = enqueue(os.path.basename(key), dict(params), s3_key=key)
+            accepted.append({"s3_key": key, "id": snap["id"]})
+        except errors.ProblemError as e:
+            rejected.append({"s3_key": key, "error": e.body()})
+    return {"accepted": accepted, "rejected": rejected,
+            "queued": queue_depth()}
 
 
 @app.post("/api/jobs", status_code=202)
@@ -609,52 +771,33 @@ async def create_job(
     crf: int = Form(None),
     bitrate_ratio: float = Form(None),
 ):
-    given = {"method": method, "conf": conf, "imgsz": imgsz,
-             "batch_size": batch_size, "pad": pad, "mosaic_scale": mosaic_scale,
-             "linger": linger, "interp": interp, "keep_audio": keep_audio,
-             "crf": crf, "bitrate_ratio": bitrate_ratio}
-    params = {**JOB_DEFAULTS, **{k: v for k, v in given.items() if v is not None}}
-    method, conf, imgsz = params["method"], params["conf"], params["imgsz"]
-    # 입력은 둘 중 하나다 — 업로드한 파일이거나 S3 키.
-    if bool(s3_key) == bool(file is not None and file.filename):
-        raise HTTPException(400, "file 또는 s3_key 중 하나만 보내라")
-    if method not in METHODS:
-        raise HTTPException(400, f"unknown method: {method}")
-    if not 0 < conf < 1:
-        raise HTTPException(400, "conf 는 0~1 사이여야 한다")
+    uploaded = file is not None and bool(file.filename)
+    if bool(s3_key) == uploaded:
+        raise (errors.CONFLICTING_INPUT() if s3_key else errors.MISSING_INPUT())
+
+    params = resolve_params({
+        "method": method, "conf": conf, "imgsz": imgsz,
+        "batch_size": batch_size, "pad": pad, "mosaic_scale": mosaic_scale,
+        "linger": linger, "interp": interp, "keep_audio": keep_audio,
+        "crf": crf, "bitrate_ratio": bitrate_ratio})
 
     if s3_key:
-        if s3mod.get_store() is None:
-            raise HTTPException(404, "S3 가 설정되지 않았다 (FA_S3_BUCKET)")
-        if ".." in s3_key or s3_key.startswith("/"):
-            raise HTTPException(400, "잘못된 s3_key")
+        ext = check_s3_key(s3_key)
         name = os.path.basename(s3_key)
     else:
         name = os.path.basename(file.filename)
-    ext = os.path.splitext(name)[1].lower()
-    if ext not in VIDEO_EXT:
-        raise HTTPException(400, f"지원하지 않는 확장자: {ext or '(없음)'}")
-    # stride 배수 맞추기는 검출기가 한다(geometry.snap_to_stride). 여기서
-    # 또 계산하면 규칙이 두 벌이 되고 실제로 서로 달랐다(round vs ceil).
-    imgsz = max(320, min(int(imgsz), 2048))
-    params["imgsz"] = imgsz
+        ext = check_video_name(name)
 
-    if not is_ready():
-        raise HTTPException(503, f"모델이 준비되지 않았다: {_model_error or '로딩 중'}")
-    # 대기 중인 작업은 입력 파일을 들고 있다. 디스크가 차면 업로드가 중간에
-    # 깨지거나 처리 중인 작업의 출력까지 같이 망가진다.
-    free = free_mb()
-    if MIN_FREE_MB and free is not None and free < MIN_FREE_MB:
-        raise HTTPException(507, f"디스크 여유 부족 ({free}MB < {MIN_FREE_MB}MB)",
-                            headers={"Retry-After": str(RETRY_AFTER)})
-    jid = uuid.uuid4().hex[:12]
+    check_admission()
+
+    jid = new_job_id()
     workdir = os.path.join(JOBS_DIR, jid)
     os.makedirs(workdir, exist_ok=True)
-    src = os.path.join(workdir, "input" + ext)
 
     # S3 입력은 워커가 내려받는다. 접수 요청을 붙들고 수백 MB 를 받으면
     # 클라이언트가 그동안 응답을 기다리게 된다.
     if not s3_key:
+        src = os.path.join(workdir, "input" + ext)
         size = 0
         try:
             with open(src, "wb") as f:
@@ -664,46 +807,18 @@ async def create_job(
                         break
                     size += len(chunk)
                     if size > MAX_BYTES:
-                        raise HTTPException(413,
-                                            f"업로드 상한 초과 ({MAX_BYTES // 1048576} MB)")
+                        raise errors.PAYLOAD_TOO_LARGE(
+                            f"상한 {MAX_BYTES // 1048576} MB")
                     f.write(chunk)
         except Exception:
             shutil.rmtree(workdir, ignore_errors=True)
             raise
         if size == 0:
             shutil.rmtree(workdir, ignore_errors=True)
-            raise HTTPException(400, "빈 파일")
+            raise errors.EMPTY_FILE()
 
-    job = Job(id=jid, name=name, workdir=workdir, s3_key=s3_key,
-              params=params)
-    global _current
-    with _LOCK:
-        # 대기열 길이 확인과 등록이 같은 락 안에 있어야 동시 요청이 상한을 넘지 않는다.
-        if QUEUE_MAX and sum(1 for o in _JOBS.values()
-                             if o.status == "queued") >= QUEUE_MAX:
-            shutil.rmtree(workdir, ignore_errors=True)
-            raise HTTPException(429, f"대기열이 가득 찼다 ({QUEUE_MAX}건)",
-                                headers={"Retry-After": str(RETRY_AFTER)})
-        _JOBS[jid] = job
-        _current = jid
-    save_job(job)
-    # 응답 스냅샷은 제출 **전에** 뜬다. 제출 후에 뜨면 워커가 이미 시작해
-    # status 가 running 으로 보일 수 있다 (경합).
-    snap = snapshot(job, queued_ahead=_queued_ahead(job))
-    _EXEC.submit(_run, jid)
+    _job, snap = enqueue(name, params, s3_key=s3_key, jid=jid, workdir=workdir)
     return snap
-
-
-def _queued_ahead(job):
-    """앞에 몇 건 대기 중인가. **메모리만** 본다.
-
-    폴링 경로라 여기서 디스크를 훑으면 안 된다. 대기 중인 작업은 이 프로세스의
-    워커가 들고 있으므로 메모리에 있고, 없으면(재시작 후 남은 기록) 어차피
-    대기 중이 아니다.
-    """
-    with _LOCK:
-        return sum(1 for o in _JOBS.values()
-                   if o.status == "queued" and o.created < job.created)
 
 
 @app.get("/api/jobs")
@@ -726,7 +841,7 @@ def list_jobs(limit: int = LIST_LIMIT, status: str = None):
 def get_job(jid: str):
     j = find_job(jid)
     if j is None:
-        raise HTTPException(404, "no such job")
+        raise errors.JOB_NOT_FOUND(jid)
     return snapshot(j, _queued_ahead(j))
 
 
@@ -734,22 +849,76 @@ def get_job(jid: str):
 def download(jid: str):
     j = find_job(jid)
     if j is None:
-        raise HTTPException(404, "no such job")
+        raise errors.JOB_NOT_FOUND(jid)
     if j.status != "done":
-        raise HTTPException(409, f"아직 준비되지 않았다 (status={j.status})")
+        raise (errors.JOB_FAILED(j.error.get("detail", "") if isinstance(j.error, dict) else j.error)
+           if j.status == "failed" else errors.JOB_NOT_FINISHED(f"status={j.status}"))
     if not j.output or not os.path.exists(j.output):
-        raise HTTPException(410, "결과물이 더 이상 없다 (보관 기간 만료)")
+        # 로컬 사본은 정리됐어도 S3 원본은 남아 있다.
+        store = s3mod.get_store()
+        if j.s3_output and store is not None:
+            return RedirectResponse(store.presigned_url(j.s3_output),
+                                    status_code=302)
+        raise errors.RESULT_EXPIRED(jid)
     name = naming.output_name(j.name)
     return FileResponse(j.output, media_type="video/mp4", filename=name)
+
+
+@app.post("/api/jobs/{jid}/cancel")
+def cancel_job(jid: str):
+    """대기 중이면 즉시, 수행 중이면 다음 진행 보고에서 끊는다.
+
+    잘못 넣은 배치를 끝날 때까지 기다릴 이유가 없다. 수행 중인 작업은 진행
+    콜백에서만 안전하게 끊을 수 있어(프레임 경계) 표시만 남기고 워커가 처리한다.
+    """
+    j = find_job(jid)
+    if j is None:
+        raise errors.JOB_NOT_FOUND(jid)
+    if j.status in ("done", "failed", "cancelled"):
+        raise errors.JOB_NOT_CANCELLABLE(f"status={j.status}", status=j.status)
+    with _LOCK:
+        j.cancel = True
+        if j.status == "queued":
+            j.status, j.finished = "cancelled", time.time()
+    save_job(j)
+    return snapshot(j, _queued_ahead(j))
+
+
+@app.get("/api/jobs/{jid}/result")
+def job_result(jid: str):
+    """결과물 받는 방법을 알려준다.
+
+    S3 작업이면 **presigned URL** 을 준다 — GPU 서버가 파일 전송까지 떠안을
+    이유가 없고, 로컬 사본이 보관 기간에 정리돼도 S3 원본은 남아 있다.
+    """
+    j = find_job(jid)
+    if j is None:
+        raise errors.JOB_NOT_FOUND(jid)
+    if j.status != "done":
+        raise (errors.JOB_FAILED(j.error.get("detail", ""))
+               if j.status == "failed"
+               else errors.JOB_NOT_FINISHED(f"status={j.status}"))
+    out = {"id": j.id, "name": naming.output_name(j.name),
+           "s3_key": j.s3_output or None}
+    store = s3mod.get_store()
+    if j.s3_output and store is not None:
+        out["download_url"] = store.presigned_url(j.s3_output)
+        out["expires_in"] = s3mod.URL_TTL
+        out["via"] = "s3"
+    else:
+        out["download_url"] = f"/api/jobs/{j.id}/download"
+        out["via"] = "server"
+    return out
 
 
 @app.delete("/api/jobs/{jid}", status_code=204)
 def delete_job(jid: str):
     j = find_job(jid)
     if j is None:
-        raise HTTPException(404, "no such job")
+        raise errors.JOB_NOT_FOUND(jid)
     if j.status in ("queued", "running"):
-        raise HTTPException(409, "진행 중인 작업은 삭제할 수 없다")
+        raise errors.JOB_NOT_CANCELLABLE(
+            "진행 중이다. /cancel 로 먼저 취소하라", status=j.status)
     with _LOCK:
         _JOBS.pop(jid, None)
     shutil.rmtree(j.workdir or os.path.join(JOBS_DIR, jid), ignore_errors=True)

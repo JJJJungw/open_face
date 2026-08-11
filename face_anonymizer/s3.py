@@ -29,12 +29,38 @@ REGION = os.environ.get("FA_S3_REGION") or None
 ROOT_PREFIX = os.environ.get("FA_S3_ROOT_PREFIX", "")
 OUTPUT_PREFIX = os.environ.get("FA_S3_OUTPUT_PREFIX", "v1/results/face/")
 LIST_TTL = int(os.environ.get("FA_S3_LIST_TTL", 30))
+URL_TTL = int(os.environ.get("FA_S3_URL_TTL", 3600))
 
 PAGE_MAX = 1000
 
 
 class S3Error(RuntimeError):
-    """S3 호출 실패. 작업은 실패로 남기되 서버는 계속 산다."""
+    """S3 호출 실패. 작업은 실패로 남기되 서버는 계속 산다.
+
+    ``problem`` 에 구체 원인이 붙는다 — 권한 문제와 키 오타와 네트워크 장애는
+    사용자가 해야 할 일이 전혀 다르다.
+    """
+
+    problem = None
+
+
+def wrap(e, what):
+    """botocore 예외를 원인이 드러나는 S3Error 로."""
+    from . import errors                             # 지연 임포트 (순환 방지)
+    code = ""
+    resp = getattr(e, "response", None)
+    if isinstance(resp, dict):
+        code = str(resp.get("Error", {}).get("Code", ""))
+    if code in ("AccessDenied", "403", "SignatureDoesNotMatch",
+                "InvalidAccessKeyId", "ExpiredToken", "AllAccessDisabled"):
+        p = errors.S3_ACCESS_DENIED
+    elif code in ("NoSuchKey", "NoSuchBucket", "404"):
+        p = errors.S3_OBJECT_NOT_FOUND
+    else:
+        p = errors.S3_UPSTREAM
+    err = S3Error(f"{what}: {e}")
+    err.problem = p
+    return err
 
 
 def make_client():
@@ -92,7 +118,7 @@ class S3Store:
                 if not token:
                     break
         except Exception as e:                      # noqa: BLE001
-            raise S3Error(f"목록 조회 실패: {e}") from e
+            raise wrap(e, "목록 조회 실패") from e
         return folders, objects
 
     def output_key(self, key):
@@ -141,17 +167,38 @@ class S3Store:
         try:
             self.client.download_file(self.bucket, key, dest)
         except Exception as e:                      # noqa: BLE001
-            raise S3Error(f"내려받기 실패 ({key}): {e}") from e
+            raise wrap(e, f"내려받기 실패 ({key})") from e
         if not os.path.exists(dest) or os.path.getsize(dest) == 0:
             raise S3Error(f"내려받은 파일이 비어 있다: {key}")
         return dest
+
+    def presigned_url(self, key, expires=None):
+        """결과물을 바로 받을 수 있는 임시 URL.
+
+        GPU 서버가 파일 전송까지 떠안을 이유가 없고, 로컬 사본이 보관 기간에
+        정리돼도 S3 원본은 남아 있다.
+        """
+        try:
+            return self.client.generate_presigned_url(
+                "get_object",
+                Params={"Bucket": self.bucket, "Key": key},
+                ExpiresIn=int(expires or URL_TTL))
+        except Exception as e:                      # noqa: BLE001
+            raise wrap(e, f"URL 생성 실패 ({key})") from e
+
+    def exists(self, key):
+        try:
+            self.client.head_object(Bucket=self.bucket, Key=key)
+            return True
+        except Exception:                           # noqa: BLE001
+            return False
 
     def upload(self, path, key, content_type="video/mp4"):
         try:
             self.client.upload_file(path, self.bucket, key,
                                     ExtraArgs={"ContentType": content_type})
         except Exception as e:                      # noqa: BLE001
-            raise S3Error(f"올리기 실패 ({key}): {e}") from e
+            raise wrap(e, f"올리기 실패 ({key})") from e
         self._out_cache = (0.0, set())              # 방금 올린 것이 반영되게
         return key
 
