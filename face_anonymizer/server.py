@@ -447,6 +447,12 @@ def _fail_or_retry(j, exc, permanent):
     info = errors.job_error(exc)
     retryable = not permanent and info["retryable"] and j.attempts < MAX_ATTEMPTS
     msg = info["detail"]
+    # 어디서 넘어졌는지, 그리고 왜 다시 시도했는지/안 했는지를 오류에 같이
+    # 남긴다. 사유만 있고 이 둘이 없으면 "3회 시도" 라는 숫자를 어떻게 읽어야
+    # 할지 알 수 없다.
+    info["stage"] = j.stage or ("download" if j.s3_key and not j.done else "")
+    info["policy"] = ("permanent" if permanent
+                      else "exhausted" if not retryable else "retrying")
     with _LOCK:
         j.error = info
         if retryable:

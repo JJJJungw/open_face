@@ -88,6 +88,13 @@ INDEX_HTML = r"""<!doctype html>
              padding:14px 16px;border-bottom:1px solid var(--line);
              display:flex;align-items:center;gap:9px}
   .card > h2 .cnt{margin-left:auto;font-weight:500;color:var(--faint);font-size:11.5px}
+  /* 사이드바에서 무엇을 걸렀는지 목록 쪽에도 적는다. 왼쪽만 강조돼 있으면
+     오른쪽 목록이 왜 짧아졌는지 연결이 안 된다. */
+  .chip{display:inline-flex;align-items:center;gap:6px;margin-left:8px;
+        background:var(--accent-dim);color:var(--accent-ink);border-radius:99px;
+        padding:2px 6px 2px 9px;font-size:11px;font-weight:600}
+  .chip b{cursor:pointer;font-size:13px;line-height:1;opacity:.7}
+  .chip b:hover{opacity:1}
   .card .pad{padding:14px 16px}
 
   /* ── S3 브라우저 ────────────────────────────────────────────────────── */
@@ -187,6 +194,11 @@ INDEX_HTML = r"""<!doctype html>
   .meta{font-size:11.5px;color:var(--dim);font-variant-numeric:tabular-nums}
   .stats{display:grid;grid-template-columns:repeat(3,1fr);gap:7px;margin-top:10px}
   .stats div{background:var(--bg);border-radius:7px;padding:6px 8px}
+  .kv{display:flex;flex-wrap:wrap;gap:7px;margin-top:9px}
+  .kv div{background:var(--bg);border-radius:7px;padding:6px 9px;min-width:0}
+  .kv span{color:var(--faint);font-size:10.5px;margin-right:6px}
+  .kv b{font-size:11.5px;font-weight:600;overflow:hidden;text-overflow:ellipsis;
+        white-space:nowrap;display:inline-block;max-width:340px;vertical-align:bottom}
   .stats span{display:block;color:var(--faint);font-size:10.5px}
   .stats b{font-size:12.5px;font-weight:600}
   .warn{background:var(--critical-bg);border:1px solid #f2c9c9;border-radius:8px;
@@ -307,7 +319,9 @@ INDEX_HTML = r"""<!doctype html>
         </section>
 
         <section class="card">
-          <h2>작업 <span class="cnt" id="jobcnt"></span></h2>
+          <h2>작업
+            <span class="chip" id="jobfilter" hidden></span>
+            <span class="cnt" id="jobcnt"></span></h2>
           <div id="jobs"></div>
         </section>
       </div>
@@ -522,6 +536,8 @@ function paramObject() {
 }
 $('#q').addEventListener('input', renderBrowser);
 
+const FILTER_TEXT = { running:'수행중', queued:'대기', done:'완료', failed:'실패' };
+
 function navCounts(jobs) {
   const n = { '': jobs.length };
   for (const k of ['running', 'queued', 'done', 'failed'])
@@ -651,6 +667,9 @@ function hud(jobs, st) {
 const WARN_TEXT = { 'no-detections':
   '얼굴이 하나도 검출되지 않았습니다 — 원본이 그대로 출력됐습니다. 임계값을 낮추거나 영상 회전을 확인하세요.' };
 
+const STAGE_TEXT = { download:'S3 내려받기', transcode:'변환 → H.264',
+                     detect:'검출', render:'렌더', upload:'S3 올리기' };
+
 function card(j) {
   const cls = j.status === 'done' ? 'ok' : '';
   const label = { queued:'대기', running:'수행중', done:'완료',
@@ -660,8 +679,7 @@ function card(j) {
                : j.status === 'running' ? 'run' : '';
   let body = '';
   if (j.status === 'running') {
-    const stage = { transcode:'변환 → H.264', detect:'검출', render:'렌더' }[j.stage]
-                || '준비';
+    const stage = STAGE_TEXT[j.stage] || '준비';
     body = `<div class="bar2"><i style="width:${j.overall}%"></i></div>
       <div class="meta">${stage} ${j.percent}% · ${j.fps.toFixed(0)} f/s ·
         남은 시간 ${fmt(j.eta)}</div>
@@ -673,12 +691,25 @@ function card(j) {
       <div class="row"><button class="ghost" onclick="cancel('${j.id}')">취소</button></div>`;
   } else if (j.status === 'failed' || j.status === 'cancelled') {
     const e = j.error || {};
+    // '3회 시도' 라는 숫자만 있으면 그게 많은 건지 적은 건지 알 수 없다.
+    // 어디서 넘어졌고 왜 그렇게 끝났는지를 같이 적는다.
+    const why = {
+      permanent: `같은 입력이면 결과가 같은 오류라 다시 시도하지 않았습니다`,
+      exhausted: `일시적 오류로 보고 ${j.max_attempts}회까지 다시 시도했지만 계속 실패했습니다`,
+    }[e.policy] || '';
+    const rows = [
+      ['단계', STAGE_TEXT[e.stage] || (e.stage || '—')],
+      ['시도', j.attempts ? `${j.attempts}회` : '—'],
+      j.s3_key ? ['입력', j.s3_key] : null,
+    ].filter(Boolean);
     body = `<div class="warn">
-        <b>${e.title || '실패'}${j.attempts ? ` · ${j.attempts}회 시도` : ''}
+        <b>${e.title || '실패'}
            ${e.code ? `<span class="tag err" style="float:right">${e.code}</span>` : ''}</b>
         ${e.detail || ''}${e.hint ? `<br><span style="opacity:.8">${e.hint}</span>` : ''}
+        ${why ? `<br><span style="opacity:.8">${why}</span>` : ''}
       </div>
-      `;
+      <div class="kv">${rows.map(([k, v]) =>
+        `<div><span>${k}</span><b title="${v}">${v}</b></div>`).join('')}</div>`;
   } else {
     const r = j.result, t = r.timing;
     const warns = (r.warnings || []).length
@@ -732,9 +763,14 @@ async function poll() {
   navCounts(jobs);
   const shown = filter ? jobs.filter(j => j.status === filter) : jobs;
   $('#jobcnt').textContent = `${shown.length}건`;
+  const chip = $('#jobfilter');
+  chip.hidden = !filter;
+  if (filter) chip.innerHTML =
+    `${FILTER_TEXT[filter]}만 <b onclick="setFilter('')" title="필터 해제">&times;</b>`;
   const open = [...document.querySelectorAll('video')].map(v => v.parentElement.id);
   $('#jobs').innerHTML = shown.length ? shown.map(card).join('')
-    : '<div class="empty">작업이 없습니다</div>';
+    : `<div class="empty">${filter ? `${FILTER_TEXT[filter]} 상태인 작업이 없습니다`
+                                   : '작업이 없습니다'}</div>`;
   open.forEach(pid => {
     const el = document.getElementById(pid);
     if (el && !el.innerHTML)
