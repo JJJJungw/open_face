@@ -68,6 +68,25 @@ uvicorn face_anonymizer.server:app --host 0.0.0.0 --port 8000
 | `GET /api/jobs/{id}/download` | 결과 영상 (완료 전 409, 파일 만료 410) |
 | `DELETE /api/jobs/{id}` | 작업과 파일 삭제 (진행 중이면 409) |
 | `GET /api/jobs?limit=&status=` | 작업 목록 (최신순, 기본 100건, 상태 필터) |
+| `GET /api/s3/objects?prefix=` | 버킷 한 단계 나열 (미설정 시 404) |
+
+## S3
+
+`FA_S3_BUCKET` 을 주면 입력을 S3 에서 내려받고 결과물을 다시 올린다. 자격 증명은 boto3 기본 체인이라 EC2 인스턴스 역할이 있으면 그대로 잡힌다.
+
+```bash
+export FA_S3_BUCKET=ax-mbc-label-data-storage
+export FA_S3_REGION=us-east-1
+export FA_S3_OUTPUT_PREFIX=v1/results/face/     # 기본값
+```
+
+`POST /api/jobs` 에 `file` 대신 `s3_key` 를 주면 된다. 둘 다 주거나 둘 다 안 주면 400 이다. 내려받기는 **워커가** 한다 — 접수 요청을 붙들고 수백 MB 를 받으면 클라이언트가 그동안 응답을 기다리게 된다.
+
+결과물은 입력 위치와 무관하게 한곳에 모인다: `videos/2026-08/face4.mp4` → `v1/results/face/face4_anon.mp4`. 같은 파일명이 다른 폴더에 있으면 결과물이 겹치므로, 그런 버킷이면 `FA_S3_OUTPUT_PREFIX` 를 나누거나 키 규칙을 바꿔야 한다.
+
+목록의 `processed` 표시는 결과물 프리픽스를 **한 번 나열해서** 대조한다(`FA_S3_LIST_TTL` 초 캐시). 객체마다 HEAD 를 날리면 목록 한 번에 수백 번 왕복한다.
+
+boto3 는 지연 임포트라 S3 를 안 쓰면 설치할 필요가 없다.
 
 **한 번에 한 편.** 추론은 워커 스레드 하나가 순차로 돌린다(GPU 한 장에 검출기 하나).
 

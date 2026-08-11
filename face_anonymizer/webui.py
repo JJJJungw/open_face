@@ -2,6 +2,9 @@
 
 빌드 도구도 CDN 의존도 없이 파일 하나로 끝낸다. 서버가 파일을 못 찾는 사고를
 없애려고 패키지 데이터가 아니라 파이썬 모듈 상수로 들고 있다.
+
+화면은 대시보드 구성이다 — 좌측 사이드바(브랜드 · 내비 · 상태 박스), 상단
+KPI 타일, 본문에 S3 브라우저와 작업 목록.
 """
 
 INDEX_HTML = r"""<!doctype html>
@@ -12,139 +15,295 @@ INDEX_HTML = r"""<!doctype html>
 <title>face-anonymizer</title>
 <style>
   :root{
-    --bg:#0f1115; --panel:#171a21; --line:#252a34; --fg:#e6e8ec;
-    --muted:#8b93a1; --accent:#5b9dff; --ok:#3ecf8e; --err:#ff6b6b;
+    /* 흰색 표면 + 파란색 강조. 상태색은 고정 팔레트를 쓰되, 밝은 표면에서는
+       대비가 낮은 값이 있어 **글자는 항상 잉크 색**으로 두고 색은 점/테두리로만
+       뜻을 거든다. */
+    --bg:#f4f7fb; --surface:#ffffff; --raise:#eef4fc; --line:#e2e8f0;
+    --fg:#0f172a; --dim:#526075; --faint:#94a3b8;
+    --accent:#2a78d6;                     /* 흰 바탕 대비 4.3:1 */
+    --accent-ink:#1c5aa8;                 /* 파란 글자용 (더 진한 단계) */
+    --accent-dim:#e4eefb;                 /* 같은 램프의 밝은 단계 = 미터 트랙 */
+    --accent-sel:#eff5fd;
+    --good:#0ca30c; --warning:#fab219; --critical:#d03b3b;
+    --critical-ink:#a82a2a; --critical-bg:#fdf1f1;
+    --shadow:0 1px 2px rgba(15,23,42,.05), 0 1px 3px rgba(15,23,42,.04);
   }
   *{box-sizing:border-box}
+  html,body{height:100%}
   body{margin:0;background:var(--bg);color:var(--fg);
-       font:14px/1.6 -apple-system,BlinkMacSystemFont,"Segoe UI",Roboto,
+       font:13.5px/1.55 -apple-system,BlinkMacSystemFont,"Segoe UI",Roboto,
             "Helvetica Neue","Apple SD Gothic Neo","Noto Sans KR",sans-serif}
-  .wrap{max-width:860px;margin:0 auto;padding:32px 20px 64px}
-  h1{font-size:20px;margin:0 0 4px;letter-spacing:-.01em}
-  .sub{color:var(--muted);font-size:13px;margin-bottom:24px}
-  .sub b{color:var(--fg);font-weight:600}
-  .panel{background:var(--panel);border:1px solid var(--line);
-         border-radius:12px;padding:18px}
-  #drop{border:1.5px dashed var(--line);border-radius:10px;padding:34px 16px;
-        text-align:center;cursor:pointer;transition:.15s;color:var(--muted)}
-  #drop:hover,#drop.over{border-color:var(--accent);color:var(--fg);
-                         background:rgba(91,157,255,.06)}
-  #drop b{color:var(--fg)}
-  .opts{display:grid;grid-template-columns:repeat(auto-fit,minmax(150px,1fr));
-        gap:14px;margin-top:18px}
-  label{display:block;font-size:12px;color:var(--muted);margin-bottom:5px}
-  select,input[type=number]{width:100%;background:#0e1116;color:var(--fg);
-    border:1px solid var(--line);border-radius:7px;padding:7px 9px;font-size:13px}
-  .chk{display:flex;align-items:center;gap:7px;font-size:13px;padding-top:20px}
-  button{background:var(--accent);color:#04070d;border:0;border-radius:8px;
-    padding:10px 18px;font-size:14px;font-weight:600;cursor:pointer}
+
+  /* ── 뼈대 ───────────────────────────────────────────────────────────── */
+  .app{display:grid;grid-template-columns:216px 1fr;height:100%}
+  .side{background:var(--surface);border-right:1px solid var(--line);
+        display:flex;flex-direction:column;min-height:0}
+  .brand{padding:18px 18px 14px;font-size:14px;font-weight:600;
+         letter-spacing:-.01em;display:flex;align-items:center;gap:9px}
+  .brand .mk{width:20px;height:20px;border-radius:6px;flex:none;
+             background:linear-gradient(135deg,#2a78d6,#5b9dff)}
+  nav{padding:4px 10px;flex:1;min-height:0;overflow:auto}
+  nav a{display:flex;align-items:center;gap:9px;padding:8px 10px;border-radius:8px;
+        color:var(--dim);text-decoration:none;font-size:13px;cursor:pointer}
+  nav a:hover{background:var(--raise);color:var(--fg)}
+  nav a.on{background:var(--accent-dim);color:var(--accent-ink);font-weight:600}
+  nav .grp{font-size:10.5px;color:var(--faint);padding:14px 10px 5px;
+           letter-spacing:.04em;text-transform:uppercase}
+
+  main{min-width:0;overflow:auto;display:flex;flex-direction:column}
+  .top{display:flex;align-items:center;gap:14px;padding:15px 24px;
+       border-bottom:1px solid var(--line);position:sticky;top:0;
+       background:rgba(255,255,255,.9);backdrop-filter:blur(8px);z-index:10}
+  .top h1{font-size:16px;margin:0;font-weight:600;letter-spacing:-.01em;flex:1}
+  .badge{display:inline-flex;align-items:center;gap:6px;font-size:11.5px;
+         color:var(--dim);background:var(--surface);border:1px solid var(--line);
+         border-radius:20px;padding:3px 11px;white-space:nowrap}
+  .content{padding:20px 24px 32px;display:flex;flex-direction:column;gap:18px}
+
+  /* ── KPI 타일 ───────────────────────────────────────────────────────── */
+  .kpis{display:grid;grid-template-columns:1.35fr 1fr 1fr 1fr;gap:12px}
+  .tile{background:var(--surface);border:1px solid var(--line);border-radius:12px;
+        padding:15px 16px;min-width:0;box-shadow:var(--shadow)}
+  .tile .lb{font-size:11.5px;color:var(--dim);margin-bottom:6px}
+  .tile .v{font-size:23px;font-weight:600;letter-spacing:-.02em;line-height:1.15}
+  .tile.hero{background:linear-gradient(180deg,#f7fbff,#ffffff);
+             border-color:#cfe0f6}
+  .tile.hero .lb{color:var(--accent-ink)}
+  .tile.hero .v{font-size:44px;letter-spacing:-.03em;line-height:1.05;
+                color:var(--accent-ink)}
+  .tile .sub{font-size:11.5px;color:var(--faint);margin-top:5px}
+  .tile .v small{font-size:14px;font-weight:500;color:var(--dim);margin-left:3px}
+
+  /* ── 카드 ───────────────────────────────────────────────────────────── */
+  .grid2{display:grid;grid-template-columns:minmax(0,1.7fr) minmax(320px,1fr);
+         gap:18px;align-items:start}
+  .card{background:var(--surface);border:1px solid var(--line);border-radius:12px;
+        min-width:0;display:flex;flex-direction:column;box-shadow:var(--shadow)}
+  .card > h2{font-size:12.5px;margin:0;font-weight:600;color:var(--dim);
+             padding:14px 16px;border-bottom:1px solid var(--line);
+             display:flex;align-items:center;gap:9px}
+  .card > h2 .cnt{margin-left:auto;font-weight:500;color:var(--faint);font-size:11.5px}
+  .card .pad{padding:14px 16px}
+
+  /* ── S3 브라우저 ────────────────────────────────────────────────────── */
+  .bar{display:flex;align-items:center;gap:9px;flex-wrap:wrap;
+       padding:12px 16px;border-bottom:1px solid var(--line)}
+  .crumb{display:flex;align-items:center;gap:5px;font-size:12.5px;min-width:0;flex:1}
+  .crumb a{color:var(--accent-ink);text-decoration:none;cursor:pointer;
+           white-space:nowrap;overflow:hidden;text-overflow:ellipsis}
+  .crumb a:hover{text-decoration:underline}
+  .crumb .sep{color:var(--faint);flex:none}
+  .crumb .cur{color:var(--fg);font-weight:600;white-space:nowrap}
+  .search{position:relative;flex:none}
+  .search input{background:var(--bg);border:1px solid var(--line);color:var(--fg);
+    border-radius:7px;padding:6px 10px 6px 26px;font-size:12.5px;width:170px}
+  .search input:focus{outline:none;border-color:var(--accent);
+    box-shadow:0 0 0 3px var(--accent-dim)}
+  .search::before{content:'\2315';position:absolute;left:8px;top:5px;
+                  color:var(--faint);font-size:13px}
+  table{width:100%;border-collapse:collapse;font-size:12.5px}
+  thead th{text-align:left;font-weight:600;font-size:11px;color:var(--faint);
+           padding:8px 16px;border-bottom:1px solid var(--line);white-space:nowrap;
+           letter-spacing:.02em;background:#fafcfe}
+  tbody td{padding:8px 16px;border-bottom:1px solid #f1f5f9}
+  tbody tr:last-child td{border-bottom:0}
+  tbody tr:hover{background:#f8fbff}
+  tbody tr.sel{background:var(--accent-sel)}
+  td.num{text-align:right;font-variant-numeric:tabular-nums;color:var(--dim);
+         white-space:nowrap}
+  td.when{color:var(--dim);white-space:nowrap;font-variant-numeric:tabular-nums}
+  .key{display:flex;align-items:center;gap:8px;min-width:0}
+  .key .ico{flex:none;width:14px;text-align:center;color:var(--accent);font-size:11px}
+  .key .nm{overflow:hidden;text-overflow:ellipsis;white-space:nowrap}
+  .key a{color:var(--accent-ink);text-decoration:none;cursor:pointer;font-weight:500}
+  .key a:hover{text-decoration:underline}
+  /* 상태 배지: 색은 점이 나르고 글자는 잉크 색으로 둔다 (밝은 표면 대비) */
+  .tag{display:inline-flex;align-items:center;gap:5px;font-size:10.5px;
+       padding:2px 8px;border-radius:20px;border:1px solid var(--line);
+       color:var(--dim);white-space:nowrap;background:var(--surface)}
+  .tag::before{content:'';width:5px;height:5px;border-radius:50%;
+               background:var(--faint);flex:none}
+  .tag.done{border-color:#bfe3bf}   .tag.done::before{background:var(--good)}
+  .tag.run{border-color:#cfe0f6;color:var(--accent-ink)}
+  .tag.run::before{background:var(--accent)}
+  .tag.err{border-color:#f2c9c9;color:var(--critical-ink)}
+  .tag.err::before{background:var(--critical)}
+  .tag.plain::before{display:none}
+  .empty{text-align:center;color:var(--faint);padding:38px 16px;font-size:12.5px}
+  .actionbar{display:flex;align-items:center;gap:12px;padding:12px 16px;
+             border-top:1px solid var(--line);background:#fafcfe;
+             border-radius:0 0 12px 12px}
+  .actionbar .n{font-size:12.5px;color:var(--dim);flex:1}
+  .actionbar .n b{color:var(--fg)}
+
+  /* ── 폼 ─────────────────────────────────────────────────────────────── */
+  .opts{display:grid;grid-template-columns:repeat(auto-fit,minmax(120px,1fr));gap:11px}
+  label{display:block;font-size:11px;color:var(--faint);margin-bottom:4px}
+  select,input[type=number]{width:100%;background:var(--surface);color:var(--fg);
+    border:1px solid var(--line);border-radius:7px;padding:6px 8px;font-size:12.5px}
+  select:focus,input[type=number]:focus{outline:none;border-color:var(--accent);
+    box-shadow:0 0 0 3px var(--accent-dim)}
+  .chk{display:flex;align-items:center;gap:7px;font-size:12.5px;padding-top:18px;
+       color:var(--dim)}
+  button{background:var(--accent);color:#fff;border:0;border-radius:8px;
+    padding:8px 15px;font-size:13px;font-weight:600;cursor:pointer;white-space:nowrap}
+  button:hover:not(:disabled){background:var(--accent-ink)}
   button:disabled{opacity:.45;cursor:not-allowed}
-  button.ghost{background:transparent;color:var(--muted);
-    border:1px solid var(--line);font-weight:500}
-  .row{display:flex;gap:10px;align-items:center;margin-top:16px}
-  .job{background:var(--panel);border:1px solid var(--line);border-radius:12px;
-       padding:16px 18px;margin-top:14px}
-  .jhead{display:flex;justify-content:space-between;align-items:baseline;gap:12px}
-  .jname{font-weight:600;overflow:hidden;text-overflow:ellipsis;white-space:nowrap}
-  .badge{font-size:11px;padding:2px 8px;border-radius:20px;border:1px solid var(--line);
-         color:var(--muted);white-space:nowrap}
-  .badge.run{color:var(--accent);border-color:var(--accent)}
-  .badge.done{color:var(--ok);border-color:var(--ok)}
-  .badge.err{color:var(--err);border-color:var(--err)}
-  .bar{height:6px;background:#0b0e13;border-radius:99px;overflow:hidden;margin:12px 0 8px}
-  .bar>i{display:block;height:100%;background:var(--accent);width:0;
-         transition:width .3s ease}
-  .job.done .bar>i{background:var(--ok)}
-  .meta{font-size:12px;color:var(--muted);font-variant-numeric:tabular-nums}
-  .stats{display:grid;grid-template-columns:repeat(auto-fit,minmax(110px,1fr));
-         gap:10px;margin-top:12px;font-size:12px}
-  .stats div{background:#0e1116;border-radius:8px;padding:8px 10px}
-  .stats span{display:block;color:var(--muted);font-size:11px}
-  .stats b{font-size:15px;font-weight:600;font-variant-numeric:tabular-nums}
-  video{width:100%;border-radius:8px;margin-top:12px;background:#000}
-  .err{color:var(--err);font-size:13px;margin-top:8px;word-break:break-all}
-  .warn{background:rgba(255,107,107,.1);border:1px solid var(--err);
-        border-radius:8px;padding:10px 12px;margin-top:12px;
-        color:var(--err);font-size:12.5px;line-height:1.5}
-  .warn b{display:block;margin-bottom:3px}
-  a.dl{display:inline-block;background:var(--ok);color:#04140d;text-decoration:none;
-       border-radius:8px;padding:8px 15px;font-weight:600;font-size:13px}
+  button.ghost{background:var(--surface);color:var(--dim);
+               border:1px solid var(--line);font-weight:500}
+  button.ghost:hover:not(:disabled){background:var(--raise);color:var(--accent-ink);
+    border-color:#cfe0f6}
+  input[type=checkbox]{accent-color:var(--accent);width:14px;height:14px;cursor:pointer}
+
+  /* ── 작업 목록 ──────────────────────────────────────────────────────── */
+  .job{padding:13px 16px;border-bottom:1px solid #f1f5f9}
+  .job:last-child{border-bottom:0}
+  .jhead{display:flex;align-items:baseline;gap:9px}
+  .jname{font-weight:600;font-size:12.5px;overflow:hidden;
+         text-overflow:ellipsis;white-space:nowrap;flex:1}
+  .bar2{height:6px;background:var(--accent-dim);border-radius:99px;
+        overflow:hidden;margin:9px 0 7px}
+  .bar2>i{display:block;height:100%;background:var(--accent);width:0;
+          border-radius:99px;transition:width .35s ease}
+  .job.ok .bar2>i{background:var(--good)}
+  .meta{font-size:11.5px;color:var(--dim);font-variant-numeric:tabular-nums}
+  .stats{display:grid;grid-template-columns:repeat(3,1fr);gap:7px;margin-top:10px}
+  .stats div{background:var(--bg);border-radius:7px;padding:6px 8px}
+  .stats span{display:block;color:var(--faint);font-size:10.5px}
+  .stats b{font-size:12.5px;font-weight:600}
+  .warn{background:var(--critical-bg);border:1px solid #f2c9c9;border-radius:8px;
+        padding:9px 11px;margin-top:10px;color:var(--critical-ink);
+        font-size:11.5px;line-height:1.5}
+  .warn b{display:block;margin-bottom:2px}
+  a.dl{display:inline-block;background:var(--accent);color:#fff;text-decoration:none;
+       border-radius:7px;padding:6px 13px;font-weight:600;font-size:12px}
+  a.dl:hover{background:var(--accent-ink)}
+  video{width:100%;border-radius:8px;margin-top:10px;background:#000}
+  .row{display:flex;gap:8px;align-items:center;margin-top:10px;flex-wrap:wrap}
+
+  /* ── 좌측 하단 상태 박스 ────────────────────────────────────────────── */
+  .hud{border-top:1px solid var(--line);padding:13px 14px;flex:none;background:#fafcfe}
+  .hud .hd{display:flex;align-items:center;gap:8px;margin-bottom:11px}
+  .hud .hd h3{font-size:11.5px;margin:0;font-weight:600;flex:1;letter-spacing:-.01em}
+  .dot{width:7px;height:7px;border-radius:50%;background:var(--faint);flex:none}
+  .dot.ok{background:var(--good);box-shadow:0 0 0 3px rgba(12,163,12,.14)}
+  .dot.run{background:var(--accent);box-shadow:0 0 0 3px var(--accent-dim);
+           animation:pulse 1.5s ease-in-out infinite}
+  .dot.err{background:var(--critical);box-shadow:0 0 0 3px rgba(208,59,59,.14)}
+  @keyframes pulse{0%,100%{opacity:1}50%{opacity:.35}}
+  .ringwrap{position:relative;display:flex;align-items:center;justify-content:center;
+            flex:none}
+  .ringwrap .pct{position:absolute;font-size:12.5px;font-weight:600;
+                 color:var(--accent-ink)}
+  .ring{display:flex;align-items:center;gap:12px}
+  .ring svg{transform:rotate(-90deg)}
+  .ring circle{fill:none;stroke-width:5;stroke-linecap:round}
+  .ring .trk{stroke:var(--accent-dim)}
+  .ring .fil{stroke:var(--accent);transition:stroke-dasharray .4s ease}
+  .who{min-width:0;flex:1}
+  .who .nm{font-size:12px;font-weight:600;overflow:hidden;text-overflow:ellipsis;
+           white-space:nowrap;margin-bottom:2px}
+  .who .st{font-size:11px;color:var(--dim);font-variant-numeric:tabular-nums}
+  .chip{display:inline-block;font-size:10px;padding:1px 6px;border-radius:20px;
+        border:1px solid var(--line);color:var(--faint);margin-right:4px;
+        background:var(--surface)}
+  .chip.on{color:var(--accent-ink);border-color:#cfe0f6;background:var(--accent-dim)}
+  .hgrid{display:grid;grid-template-columns:1fr 1fr;gap:6px;margin-top:11px}
+  .hgrid div{background:var(--surface);border:1px solid var(--line);
+             border-radius:7px;padding:6px 8px}
+  .hgrid span{display:block;color:var(--faint);font-size:10px}
+  .hgrid b{font-size:12px;font-weight:600;font-variant-numeric:tabular-nums}
+  .idle{color:var(--faint);font-size:11.5px;text-align:center;padding:4px 0 2px}
+
+  @media (max-width:1080px){
+    .kpis{grid-template-columns:1fr 1fr}
+    .grid2{grid-template-columns:minmax(0,1fr)}
+  }
+  @media (max-width:760px){ .app{grid-template-columns:1fr} .side{display:none} }
 </style>
 </head>
 <body>
-<div class="wrap">
-  <h1>face-anonymizer</h1>
-  <div class="sub" id="health">서버 확인 중…</div>
-
-  <div class="panel">
-    <div id="drop">
-      <b>영상을 끌어다 놓거나 클릭</b>해서 선택<br>
-      <span style="font-size:12px">mp4 · mov · mkv · avi · webm</span>
+<div class="app">
+  <aside class="side">
+    <div class="brand"><span class="mk"></span>face-anonymizer</div>
+    <nav>
+      <div class="grp">작업</div>
+      <a class="on">파일 브라우저</a>
+      <a onclick="document.getElementById('file').click()">직접 업로드</a>
+      <div class="grp">보기</div>
+      <a onclick="setFilter('')" id="nav-all">전체</a>
+      <a onclick="setFilter('running')" id="nav-running">수행중</a>
+      <a onclick="setFilter('queued')" id="nav-queued">대기</a>
+      <a onclick="setFilter('done')" id="nav-done">완료</a>
+      <a onclick="setFilter('failed')" id="nav-failed">실패</a>
+    </nav>
+    <div class="hud">
+      <div class="hd">
+        <span class="dot" id="hdot"></span>
+        <h3 id="htitle">연결 중…</h3>
+      </div>
+      <div id="hbody"></div>
     </div>
-    <input type="file" id="file" accept="video/*" hidden>
+  </aside>
 
-    <div class="opts">
-      <div>
-        <label>익명화 방식</label>
-        <select id="method">
-          <option value="mosaic">모자이크</option>
-          <option value="blur">블러</option>
-          <option value="box">단색 박스</option>
-        </select>
-      </div>
-      <div>
-        <label>검출 임계값 (conf)</label>
-        <input type="number" id="conf" value="0.25" min="0.05" max="0.95" step="0.05">
-      </div>
-      <div>
-        <label>추론 해상도</label>
-        <select id="imgsz">
-          <option value="960">960</option>
-          <option value="1280" selected>1280</option>
-          <option value="1600">1600</option>
-        </select>
-      </div>
-      <div>
-        <label>배치 크기</label>
-        <input type="number" id="batch" value="16" min="1" max="64" step="1">
-      </div>
-      <div class="chk"><input type="checkbox" id="audio" checked><span>오디오 유지</span></div>
+  <main>
+    <div class="top">
+      <h1 id="page">파일 브라우저</h1>
+      <span class="badge" id="dev">—</span>
     </div>
 
-    <div class="row">
-      <button id="go" disabled>처리 시작</button>
-      <span class="meta" id="picked">선택된 파일 없음</span>
-    </div>
-  </div>
+    <div class="content">
+      <div class="kpis" id="kpis"></div>
 
-  <div id="jobs"></div>
+      <div class="grid2">
+        <section class="card">
+          <div class="bar">
+            <div class="crumb" id="crumb"></div>
+            <div class="search"><input id="q" placeholder="이름으로 검색" autocomplete="off"></div>
+            <button class="ghost" onclick="loadObjects()">새로고침</button>
+          </div>
+          <div id="browser"></div>
+          <div class="pad" style="border-top:1px solid var(--line)">
+            <div class="opts">
+              <div><label>익명화 방식</label>
+                <select id="method">
+                  <option value="mosaic">모자이크</option>
+                  <option value="blur">블러</option>
+                  <option value="box">단색 박스</option>
+                </select></div>
+              <div><label>검출 임계값</label>
+                <input type="number" id="conf" value="0.25" min="0.05" max="0.95" step="0.05"></div>
+              <div><label>추론 해상도</label>
+                <select id="imgsz">
+                  <option value="960">960</option>
+                  <option value="1280" selected>1280</option>
+                  <option value="1600">1600</option>
+                </select></div>
+              <div><label>배치 크기</label>
+                <input type="number" id="batch" value="16" min="1" max="64"></div>
+              <div class="chk"><input type="checkbox" id="audio" checked><span>오디오 유지</span></div>
+            </div>
+          </div>
+          <div class="actionbar">
+            <span class="n" id="picked">선택된 항목 없음</span>
+            <button id="go" disabled>비식별화 시작</button>
+          </div>
+        </section>
+
+        <section class="card">
+          <h2>작업 <span class="cnt" id="jobcnt"></span></h2>
+          <div id="jobs"></div>
+        </section>
+      </div>
+    </div>
+  </main>
 </div>
+<input type="file" id="file" accept="video/*" hidden>
 
 <script>
 const $ = s => document.querySelector(s);
-const drop = $('#drop'), fileInput = $('#file'), go = $('#go');
-let picked = null, timer = null;
-
-fetch('/api/health').then(r => r.json()).then(h => {
-  $('#health').innerHTML = h.model_loaded
-    ? `모델 로드됨 · <b>${h.device}</b> · half=${h.half} · imgsz ${h.imgsz}`
-    : `대기 중 · device <b>${h.device}</b> · 첫 요청 때 모델을 올립니다`;
-}).catch(() => $('#health').textContent = '서버에 연결할 수 없습니다');
-
-drop.onclick = () => fileInput.click();
-drop.ondragover = e => { e.preventDefault(); drop.classList.add('over'); };
-drop.ondragleave = () => drop.classList.remove('over');
-drop.ondrop = e => {
-  e.preventDefault(); drop.classList.remove('over');
-  if (e.dataTransfer.files.length) setFile(e.dataTransfer.files[0]);
-};
-fileInput.onchange = () => fileInput.files.length && setFile(fileInput.files[0]);
-
-function setFile(f) {
-  picked = f;
-  $('#picked').textContent = `${f.name} · ${(f.size / 1048576).toFixed(1)} MB`;
-  go.disabled = false;
-}
+const fileInput = $('#file'), go = $('#go');
+let picked = null, timer = null, filter = '';
 
 function fmt(s) {
   s = Math.max(0, Math.round(s));
@@ -152,117 +311,374 @@ function fmt(s) {
   return h ? `${h}:${String(m).padStart(2,'0')}:${String(x).padStart(2,'0')}`
            : `${m}:${String(x).padStart(2,'0')}`;
 }
+function humanSize(b) {
+  if (b == null) return '—';
+  const u = ['B','KB','MB','GB','TB']; let i = 0;
+  while (b >= 1024 && i < u.length - 1) { b /= 1024; i++; }
+  return `${b.toFixed(i ? 1 : 0)} ${u[i]}`;
+}
+function humanTime(iso) {
+  if (!iso) return '—';
+  const d = new Date(iso); if (isNaN(d)) return '—';
+  const p = n => String(n).padStart(2,'0');
+  return `${d.getFullYear()}-${p(d.getMonth()+1)}-${p(d.getDate())} `
+       + `${p(d.getHours())}:${p(d.getMinutes())}`;
+}
 
-go.onclick = () => {
-  if (!picked) return;
-  const fd = new FormData();
-  fd.append('file', picked);
+// ── S3 브라우저 ────────────────────────────────────────────────────────────
+//
+// 서버 계약:
+//   GET /api/s3/objects?prefix=videos/2026-08/
+//     -> { bucket, prefix, folders:["videos/2026-08/raw/"],
+//          objects:[{key, size, modified, processed?}] }
+//   POST /api/jobs (form) s3_key=<key> + 기존 옵션
+//
+// 연결 전이면 404 가 온다. 안내만 띄우고 직접 업로드로 쓸 수 있게 둔다.
+const S3 = { bucket:'', prefix:'', folders:[], objects:[], selected:new Set(), error:null };
+const VIDEO_RE = /\.(mp4|mov|mkv|avi|webm|m4v)$/i;
+
+async function loadObjects(prefix) {
+  if (prefix !== undefined) { S3.prefix = prefix; S3.selected.clear(); }
+  try {
+    const r = await fetch('/api/s3/objects?prefix=' + encodeURIComponent(S3.prefix));
+    if (!r.ok) throw new Error(r.status === 404 ? 'not-configured' : 'HTTP ' + r.status);
+    const d = await r.json();
+    S3.bucket = d.bucket || ''; S3.folders = d.folders || [];
+    S3.objects = d.objects || []; S3.error = null;
+  } catch (e) {
+    S3.error = e.message; S3.folders = []; S3.objects = [];
+  }
+  renderBrowser();
+}
+
+function crumbs() {
+  const el = $('#crumb');
+  if (!S3.bucket) { el.innerHTML = '<span class="cur">S3</span>'; return; }
+  const parts = S3.prefix.split('/').filter(Boolean);
+  let acc = '';
+  const items = [`<a onclick="loadObjects('')">${S3.bucket}</a>`];
+  parts.forEach((p, i) => {
+    acc += p + '/'; const path = acc;
+    items.push(i === parts.length - 1 ? `<span class="cur">${p}</span>`
+                                      : `<a onclick="loadObjects('${path}')">${p}</a>`);
+  });
+  el.innerHTML = items.join('<span class="sep">/</span>');
+}
+
+function renderBrowser() {
+  crumbs();
+  const el = $('#browser');
+  if (S3.error === 'not-configured') {
+    el.innerHTML = `<div class="empty">S3 가 연결되지 않았습니다<br>
+      <span style="font-size:11.5px">직접 업로드로 처리할 수 있습니다</span></div>`;
+    return updatePicked();
+  }
+  if (S3.error) {
+    el.innerHTML = `<div class="empty">목록을 불러오지 못했습니다 (${S3.error})</div>`;
+    return updatePicked();
+  }
+  const q = ($('#q').value || '').toLowerCase();
+  const folders = S3.folders.filter(f => f.toLowerCase().includes(q));
+  const objects = S3.objects.filter(o => o.key.toLowerCase().includes(q));
+  if (!folders.length && !objects.length) {
+    el.innerHTML = '<div class="empty">항목이 없습니다</div>';
+    return updatePicked();
+  }
+  const selectable = objects.filter(o => VIDEO_RE.test(o.key));
+  const allSel = selectable.length && selectable.every(o => S3.selected.has(o.key));
+
+  const rows = folders.map(f => {
+    const name = f.replace(S3.prefix, '').replace(/\/$/, '');
+    return `<tr><td></td>
+      <td><div class="key"><span class="ico">▸</span>
+        <span class="nm"><a onclick="loadObjects('${f}')">${name}/</a></span></div></td>
+      <td class="num">—</td><td class="when">—</td><td></td></tr>`;
+  }).concat(objects.map(o => {
+    const name = o.key.replace(S3.prefix, '');
+    const isVideo = VIDEO_RE.test(o.key), sel = S3.selected.has(o.key);
+    const tag = o.processed ? '<span class="tag done">처리됨</span>'
+              : (isVideo ? '' : '<span class="tag plain">영상 아님</span>');
+    return `<tr class="${sel ? 'sel' : ''}">
+      <td>${isVideo ? `<input type="checkbox" ${sel ? 'checked' : ''}
+            onchange="toggle('${o.key}', this.checked)">` : ''}</td>
+      <td><div class="key"><span class="ico">▤</span>
+        <span class="nm" title="${o.key}">${name}</span></div></td>
+      <td class="num">${humanSize(o.size)}</td>
+      <td class="when">${humanTime(o.modified)}</td>
+      <td>${tag}</td></tr>`;
+  }));
+
+  el.innerHTML = `<table><thead><tr>
+      <th style="width:38px">${selectable.length
+        ? `<input type="checkbox" ${allSel ? 'checked' : ''}
+             onchange="toggleAll(this.checked)">` : ''}</th>
+      <th>이름</th><th style="width:88px;text-align:right">크기</th>
+      <th style="width:132px">마지막 수정</th><th style="width:86px"></th>
+    </tr></thead><tbody>${rows.join('')}</tbody></table>`;
+  updatePicked();
+}
+
+function toggle(key, on) { on ? S3.selected.add(key) : S3.selected.delete(key); renderBrowser(); }
+function toggleAll(on) {
+  const q = ($('#q').value || '').toLowerCase();
+  S3.objects.filter(o => VIDEO_RE.test(o.key) && o.key.toLowerCase().includes(q))
+    .forEach(o => on ? S3.selected.add(o.key) : S3.selected.delete(o.key));
+  renderBrowser();
+}
+function updatePicked() {
+  const n = S3.selected.size;
+  if (picked) {
+    $('#picked').innerHTML = `업로드 <b>${picked.name}</b> · ${(picked.size/1048576).toFixed(1)} MB`;
+    go.disabled = false;
+  } else {
+    $('#picked').innerHTML = n ? `<b>${n}개</b> 선택됨` : '선택된 항목 없음';
+    go.disabled = n === 0;
+  }
+}
+function setFile(f) { picked = f; S3.selected.clear(); updatePicked(); }
+
+// ── 제출 ───────────────────────────────────────────────────────────────────
+function opts(fd) {
   fd.append('method', $('#method').value);
   fd.append('conf', $('#conf').value);
   fd.append('imgsz', $('#imgsz').value);
   fd.append('batch_size', $('#batch').value);
   fd.append('keep_audio', $('#audio').checked);
-
+  return fd;
+}
+function explain(status, text) {
+  let m = text; try { m = JSON.parse(text).detail; } catch (_) {}
+  if (status === 429) return '대기열이 가득 찼습니다. 잠시 후 다시 시도하세요.';
+  if (status === 503) return '서버가 아직 준비되지 않았습니다. ' + m;
+  if (status === 507) return '디스크 여유가 부족합니다. ' + m;
+  return m;
+}
+go.onclick = async () => {
+  if (picked) return uploadFile();
+  const keys = [...S3.selected];
+  if (!keys.length) return;
+  go.disabled = true;
+  const failed = [];
+  for (let i = 0; i < keys.length; i++) {
+    go.textContent = `제출 중… ${i+1}/${keys.length}`;
+    const fd = opts(new FormData()); fd.append('s3_key', keys[i]);
+    const r = await fetch('/api/jobs', { method:'POST', body:fd });
+    if (r.status !== 202) failed.push(`${keys[i]}: ${explain(r.status, await r.text())}`);
+  }
+  go.textContent = '비식별화 시작';
+  S3.selected.clear(); renderBrowser(); poll();
+  if (failed.length) alert('일부 실패\n\n' + failed.join('\n'));
+};
+function uploadFile() {
+  const fd = opts(new FormData()); fd.append('file', picked);
   go.disabled = true; go.textContent = '업로드 중… 0%';
   const xhr = new XMLHttpRequest();
   xhr.open('POST', '/api/jobs');
   xhr.upload.onprogress = e => {
-    if (e.lengthComputable)
-      go.textContent = `업로드 중… ${Math.round(100 * e.loaded / e.total)}%`;
+    if (e.lengthComputable) go.textContent = `업로드 중… ${Math.round(100*e.loaded/e.total)}%`;
   };
   xhr.onload = () => {
-    go.textContent = '처리 시작'; go.disabled = false;
-    if (xhr.status === 202) { poll(); }
-    else {
-      let m = xhr.responseText;
-      try { m = JSON.parse(m).detail; } catch (_) {}
-      if (xhr.status === 429) m = '대기열이 가득 찼습니다. 잠시 후 다시 시도하세요.';
-      else if (xhr.status === 503) m = '서버가 아직 준비되지 않았습니다. ' + m;
-      alert(m);
-    }
+    go.textContent = '비식별화 시작';
+    picked = null; fileInput.value = ''; updatePicked();
+    if (xhr.status === 202) poll(); else alert(explain(xhr.status, xhr.responseText));
   };
-  xhr.onerror = () => { go.textContent = '처리 시작'; go.disabled = false;
-                        alert('업로드 실패'); };
+  xhr.onerror = () => { go.textContent = '비식별화 시작'; updatePicked(); alert('업로드 실패'); };
   xhr.send(fd);
-};
+}
+document.addEventListener('dragover', e => e.preventDefault());
+document.addEventListener('drop', e => {
+  e.preventDefault();
+  if (e.dataTransfer.files.length) setFile(e.dataTransfer.files[0]);
+});
+fileInput.onchange = () => fileInput.files.length && setFile(fileInput.files[0]);
+$('#q').addEventListener('input', renderBrowser);
+
+function setFilter(f) {
+  filter = f;
+  for (const k of ['','running','queued','done','failed'])
+    document.getElementById('nav-' + (k || 'all')).classList.toggle('on', k === f);
+  poll();
+}
+
+// ── KPI · 상태 박스 · 작업 목록 ────────────────────────────────────────────
+const RAD = 24, CIRC = 2 * Math.PI * RAD;
+function ring(pct) {
+  return `<div class="ringwrap">
+    <svg width="58" height="58" viewBox="0 0 58 58">
+      <circle class="trk" cx="29" cy="29" r="${RAD}"></circle>
+      <circle class="fil" cx="29" cy="29" r="${RAD}"
+              stroke-dasharray="${CIRC*pct/100} ${CIRC}"></circle>
+    </svg><span class="pct">${pct}%</span></div>`;
+}
+
+function avgSeconds(jobs) {
+  const d = jobs.filter(j => j.status === 'done' && j.result).slice(0, 5);
+  return d.length ? d.reduce((a, j) => a + j.result.seconds, 0) / d.length : null;
+}
+
+function kpis(jobs, st) {
+  const running = jobs.find(j => j.status === 'running');
+  const queued = jobs.filter(j => j.status === 'queued');
+  const done = jobs.filter(j => j.status === 'done');
+  const failed = jobs.filter(j => j.status === 'failed');
+  const avg = avgSeconds(jobs);
+  const remain = (running ? 1 : 0) + queued.length;
+  const etaAll = running ? running.eta + (avg ? queued.length * avg : 0) : null;
+  const rf = done.length && done[0].result ? done[0].result.realtime_factor : null;
+
+  $('#kpis').innerHTML = `
+    <div class="tile hero">
+      <div class="lb">전체 남은 시간</div>
+      <div class="v">${etaAll != null && avg ? fmt(etaAll) : (remain ? '계산 중' : '없음')}</div>
+      <div class="sub">${remain ? `남은 작업 ${remain}건` : '처리할 작업이 없습니다'}</div>
+    </div>
+    <div class="tile">
+      <div class="lb">수행중 · 대기</div>
+      <div class="v">${running ? 1 : 0}<small>/</small>${queued.length}</div>
+      <div class="sub">${running ? running.name : '유휴'}</div>
+    </div>
+    <div class="tile">
+      <div class="lb">완료</div>
+      <div class="v">${done.length}${failed.length
+        ? `<small style="color:var(--critical)"> · 실패 ${failed.length}</small>` : ''}</div>
+      <div class="sub">${avg ? `평균 ${fmt(avg)}` : '기록 없음'}</div>
+    </div>
+    <div class="tile">
+      <div class="lb">처리 속도</div>
+      <div class="v">${rf ? rf.toFixed(2) : '—'}<small>× 실시간</small></div>
+      <div class="sub">${st && st.free_mb != null
+        ? `디스크 여유 ${(st.free_mb/1024).toFixed(1)} GB` : ''}</div>
+    </div>`;
+}
+
+function hud(jobs, st) {
+  const dot = $('#hdot'), title = $('#htitle'), body = $('#hbody');
+  if (!st) {
+    dot.className = 'dot err'; title.textContent = '서버 연결 끊김';
+    body.innerHTML = '<div class="idle">응답이 없습니다</div>'; return;
+  }
+  if (!st.ready) {
+    dot.className = 'dot err'; title.textContent = '준비 중';
+    body.innerHTML = `<div class="idle">${st.model_error || '모델을 올리는 중'}</div>`; return;
+  }
+  const running = jobs.find(j => j.status === 'running');
+  const queued = jobs.filter(j => j.status === 'queued');
+  const remain = (running ? 1 : 0) + queued.length;
+  const avg = avgSeconds(jobs);
+
+  dot.className = 'dot ' + (running ? 'run' : 'ok');
+  title.textContent = running ? `수행중 · 남은 ${remain}건`
+                              : (remain ? `대기 ${remain}건` : '유휴');
+  if (!running) {
+    body.innerHTML = `<div class="idle">${remain ? '곧 시작합니다' : '처리할 작업이 없습니다'}</div>
+      <div class="hgrid">
+        <div><span>대기</span><b>${queued.length}건</b></div>
+        <div><span>디스크</span><b>${st.free_mb != null
+          ? (st.free_mb/1024).toFixed(1) + ' GB' : '—'}</b></div>
+      </div>`;
+    return;
+  }
+  const stage = running.stage === 'detect' ? '검출' : running.stage === 'render' ? '렌더' : '준비';
+  body.innerHTML = `
+    <div class="ring">${ring(running.overall)}
+      <div class="who">
+        <div class="nm" title="${running.name}">${running.name}</div>
+        <div class="st">
+          <span class="chip ${running.stage==='detect'?'on':''}">검출</span>
+          <span class="chip ${running.stage==='render'?'on':''}">렌더</span>
+        </div>
+        <div class="st" style="margin-top:3px">${stage} ${running.percent}% ·
+          ${running.fps.toFixed(0)} f/s</div>
+      </div></div>
+    <div class="hgrid">
+      <div><span>이 작업</span><b>${fmt(running.eta)}</b></div>
+      <div><span>전체</span><b>${avg ? fmt(running.eta + queued.length*avg) : '—'}</b></div>
+    </div>`;
+}
+
+const WARN_TEXT = { 'no-detections':
+  '얼굴이 하나도 검출되지 않았습니다 — 원본이 그대로 출력됐습니다. 임계값을 낮추거나 영상 회전을 확인하세요.' };
 
 function card(j) {
-  const cls = j.status === 'done' ? 'done'
-            : j.status === 'failed' ? 'err'
-            : j.status === 'running' ? 'run' : '';
-  const label = { queued: '대기', running: '수행중', done: '완료', failed: '실패' }[j.status];
+  const cls = j.status === 'done' ? 'ok' : '';
+  const label = { queued:'대기', running:'수행중', done:'완료', failed:'실패' }[j.status];
+  const tagcls = j.status === 'done' ? 'done' : j.status === 'failed' ? 'err'
+               : j.status === 'running' ? 'run' : '';
   let body = '';
   if (j.status === 'running') {
     const stage = j.stage === 'detect' ? '검출' : j.stage === 'render' ? '렌더' : '준비';
-    body = `<div class="bar"><i style="width:${j.overall}%"></i></div>
-      <div class="meta">${stage} ${j.percent}% · 전체 ${j.overall}% ·
-        ${j.fps.toFixed(1)} f/s · 남은 시간 ${fmt(j.eta)}</div>`;
+    body = `<div class="bar2"><i style="width:${j.overall}%"></i></div>
+      <div class="meta">${stage} ${j.percent}% · ${j.fps.toFixed(0)} f/s ·
+        남은 시간 ${fmt(j.eta)}</div>`;
   } else if (j.status === 'queued') {
     const retry = j.attempts ? ` · 재시도 ${j.attempts}/${j.max_attempts}` : '';
-    body = `<div class="bar"><i style="width:0"></i></div>
-      <div class="meta">앞에 ${j.queued_ahead}건 대기 중${retry}</div>`;
+    body = `<div class="bar2"><i style="width:0"></i></div>
+      <div class="meta">앞에 ${j.queued_ahead}건${retry}</div>`;
   } else if (j.status === 'failed') {
-    body = `<div class="err">${j.error} (${j.attempts}회 시도)</div>`;
+    body = `<div class="warn"><b>실패 (${j.attempts}회 시도)</b>${j.error}</div>`;
   } else {
     const r = j.result, t = r.timing;
-    const W = { 'no-detections':
-                  '얼굴이 하나도 검출되지 않았습니다 — 원본이 그대로 출력됐습니다. '
-                  + '임계값(conf)을 낮추거나 영상 회전을 확인하세요.' };
-    const warn = (r.warnings || []).length ? `<div class="warn"><b>확인 필요</b>${
-        r.warnings.map(w => W[w] || w).join('<br>')}</div>` : '';
-    body = `<div class="bar"><i style="width:100%"></i></div>${warn}
+    const warns = (r.warnings || []).length
+      ? `<div class="warn"><b>확인 필요</b>${
+          r.warnings.map(w => WARN_TEXT[w] || w).join('<br>')}</div>` : '';
+    body = `<div class="bar2"><i style="width:100%"></i></div>${warns}
       <div class="stats">
         <div><span>처리 시간</span><b>${fmt(r.seconds)}</b></div>
-        <div><span>처리 속도</span><b>${r.fps} f/s</b></div>
-        <div><span>실시간 대비</span><b>${r.realtime_factor}x</b></div>
+        <div><span>속도</span><b>${r.fps} f/s</b></div>
+        <div><span>실시간 대비</span><b>${r.realtime_factor}×</b></div>
         <div><span>프레임</span><b>${r.frames}</b></div>
-        <div><span>검출 박스</span><b>${r.raw_boxes}</b></div>
-        <div><span>보간 박스</span><b>${r.filled_boxes}</b></div>
-        <div><span>검출된 프레임</span><b>${(r.detection_rate*100).toFixed(1)}%</b></div>
+        <div><span>검출</span><b>${r.raw_boxes}</b></div>
+        <div><span>보간</span><b>${r.filled_boxes}</b></div>
       </div>
-      <div class="meta" style="margin-top:10px">
-        검출 ${fmt(t.detect)} · 추적 ${fmt(t.track)} · 렌더 ${fmt(t.render)} ·
-        오디오 ${fmt(t.audio)} (${r.audio}) · ${r.video.width}x${r.video.height}
-        @${r.video.fps}fps · ${r.method}</div>
+      <div class="meta" style="margin-top:8px">검출 ${fmt(t.detect)} · 추적 ${fmt(t.track)}
+        · 렌더 ${fmt(t.render)} · ${r.video.width}×${r.video.height} · ${r.method}</div>
       <div class="row">
         <a class="dl" href="/api/jobs/${j.id}/download">내려받기</a>
         <button class="ghost" onclick="preview('${j.id}')">미리보기</button>
         <button class="ghost" onclick="del('${j.id}')">삭제</button>
-      </div>
-      <div id="pv-${j.id}"></div>`;
+      </div><div id="pv-${j.id}"></div>`;
   }
   return `<div class="job ${cls}" id="job-${j.id}">
-    <div class="jhead"><div class="jname">${j.name}</div>
-      <span class="badge ${cls}">${label}</span></div>${body}</div>`;
+    <div class="jhead"><div class="jname" title="${j.name}">${j.name}</div>
+      <span class="tag ${tagcls}">${label}</span></div>${body}</div>`;
 }
 
 function preview(id) {
   const el = document.getElementById('pv-' + id);
-  el.innerHTML = el.innerHTML
-    ? '' : `<video controls src="/api/jobs/${id}/download"></video>`;
+  el.innerHTML = el.innerHTML ? '' : `<video controls src="/api/jobs/${id}/download"></video>`;
 }
-
-async function del(id) {
-  await fetch('/api/jobs/' + id, { method: 'DELETE' });
-  poll();
-}
+async function del(id) { await fetch('/api/jobs/' + id, { method:'DELETE' }); poll(); }
 
 async function poll() {
-  const jobs = await fetch('/api/jobs').then(r => r.json()).catch(() => null);
+  const [jobs, st] = await Promise.all([
+    fetch('/api/jobs').then(r => r.json()).catch(() => null),
+    fetch('/api/status').then(r => r.json()).catch(() => null),
+  ]);
+  hud(jobs || [], st);
   if (!jobs) return;
+  kpis(jobs, st);
+  const shown = filter ? jobs.filter(j => j.status === filter) : jobs;
+  $('#jobcnt').textContent = `${shown.length}건`;
   const open = [...document.querySelectorAll('video')].map(v => v.parentElement.id);
-  $('#jobs').innerHTML = jobs.map(card).join('');
-  open.forEach(preview_restore);
+  $('#jobs').innerHTML = shown.length ? shown.map(card).join('')
+    : '<div class="empty">작업이 없습니다</div>';
+  open.forEach(pid => {
+    const el = document.getElementById(pid);
+    if (el && !el.innerHTML)
+      el.innerHTML = `<video controls src="/api/jobs/${pid.slice(3)}/download"></video>`;
+  });
   const busy = jobs.some(j => j.status === 'running' || j.status === 'queued');
   clearTimeout(timer);
   timer = setTimeout(poll, busy ? 700 : 5000);
 }
-function preview_restore(pid) {
-  const el = document.getElementById(pid);
-  if (el && !el.innerHTML)
-    el.innerHTML = `<video controls src="/api/jobs/${pid.slice(3)}/download"></video>`;
-}
-poll();
+
+fetch('/api/health').then(r => r.json()).then(h => {
+  $('#dev').textContent = h.model_loaded
+    ? `${h.device} · half=${h.half} · imgsz ${h.imgsz}` : '모델 준비 중';
+}).catch(() => $('#dev').textContent = '연결 실패');
+
+setFilter('');
+loadObjects();
 </script>
 </body>
 </html>

@@ -3,3 +3,6 @@
 fastapi>=0.110
 uvicorn[standard]>=0.27
 python-multipart>=0.0.9
+
+# S3 연동 (FA_S3_BUCKET 을 쓸 때만 필요)
+boto3>=1.34

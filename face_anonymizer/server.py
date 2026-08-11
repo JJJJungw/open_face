@@ -34,6 +34,9 @@
     FA_QUEUE_MAX       대기열 개수 상한    (기본: 0 = 무제한)
     FA_MIN_FREE_MB     최소 여유 디스크    (기본: 2048, 미달이면 507)
     FA_LIST_LIMIT      목록 기본 개수      (기본: 100)
+
+S3 설정은 face_anonymizer/s3.py 참고 (FA_S3_BUCKET 등). 버킷이 설정돼 있으면
+입력을 S3 에서 내려받고 결과물을 다시 올린다.
     FA_MAX_ATTEMPTS    일시적 오류 재시도  (기본: 3)
 
 실행
@@ -60,6 +63,7 @@ except ImportError:                   # pragma: no cover
 from fastapi import FastAPI, File, Form, HTTPException, Response, UploadFile
 from fastapi.responses import FileResponse, HTMLResponse
 
+from . import s3 as s3mod
 from .anonymize import METHODS
 from .pipeline import VideoOpenError, VideoWriteError
 from .webui import INDEX_HTML
@@ -164,6 +168,8 @@ class Job:
     workdir: str
     status: str = "queued"        # queued(대기) | running(수행중) | done(완료) | failed(실패)
     attempts: int = 0             # 시도 횟수 (재시도 포함)
+    s3_key: str = ""              # S3 입력 키 (업로드면 빈 문자열)
+    s3_output: str = ""           # S3 결과물 키
     stage: str = ""               # detect | render
     done: int = 0
     total: int = 0
@@ -260,6 +266,7 @@ def snapshot(j, queued_ahead=0):
         "percent": pct, "overall": overall, "fps": round(fps, 1),
         "eta": round(eta), "error": j.error, "result": j.result,
         "attempts": j.attempts, "max_attempts": MAX_ATTEMPTS,
+        "s3_key": j.s3_key, "s3_output": j.s3_output,
         "queued_ahead": queued_ahead,
     }
 
@@ -397,9 +404,22 @@ def _run(job_id):
     src = os.path.join(workdir, "input" + os.path.splitext(name)[1])
     dst = os.path.join(workdir, os.path.splitext(name)[0] + "_anon.mp4")
     try:
+        if j.s3_key and not os.path.exists(src):
+            store = s3mod.get_store()
+            if store is None:
+                raise s3mod.S3Error("S3 가 설정되지 않았다")
+            log.info("S3 에서 내려받는다: %s", j.s3_key)
+            store.download(j.s3_key, src)
         # 프로세스가 여러 개여도 GPU 는 한 번에 하나만 쓴다.
         with gpu_lock(os.path.join(JOBS_DIR, GPU_LOCK_FILE)):
             res = get_anonymizer().process(src, dst, progress=progress, **params)
+        if j.s3_key:
+            store = s3mod.get_store()
+            key = store.output_key(j.s3_key)
+            log.info("S3 에 올린다: %s", key)
+            store.upload(res.output, key)
+            with _LOCK:
+                j.s3_output = key
         with _LOCK:
             j.status, j.output, j.finished = "done", res.output, time.time()
             j.result = {
@@ -422,6 +442,7 @@ def _run(job_id):
                            "audio": round(res.timing.audio, 3)},
                 "video": {"width": res.video.width, "height": res.video.height,
                           "fps": round(res.video.fps, 2)},
+                "s3_key": j.s3_key, "s3_output": j.s3_output,
             }
             j.error = ""
         save_job(j)
@@ -464,7 +485,8 @@ def index():
 def status():
     """오케스트레이터용 최소 응답. 디스크를 훑지 않는다."""
     return {"ready": is_ready(), "busy": is_busy(),
-            "queued": queue_depth(), "free_mb": free_mb()}
+            "queued": queue_depth(), "free_mb": free_mb(),
+            "model_error": _model_error}
 
 
 @app.get("/api/health")
@@ -496,9 +518,33 @@ def health(response: Response):
     return info
 
 
+@app.get("/api/s3/objects")
+def s3_objects(prefix: str = ""):
+    """버킷을 한 단계씩 나열한다 (S3 콘솔과 같은 방식).
+
+    설정 전이면 404. UI 는 그때 안내만 띄우고 직접 업로드로 쓴다.
+    """
+    store = s3mod.get_store()
+    if store is None:
+        raise HTTPException(404, "S3 가 설정되지 않았다 (FA_S3_BUCKET)")
+    if ".." in prefix:
+        raise HTTPException(400, "잘못된 prefix")
+    try:
+        folders, objects = store.list(prefix)
+    except s3mod.S3Error as e:
+        raise HTTPException(502, str(e)) from e
+    done = store.processed_keys()
+    for o in objects:
+        o["processed"] = store.output_key(o["key"]) in done
+    return {"bucket": store.bucket, "prefix": prefix or store.root_prefix,
+            "folders": folders, "objects": objects,
+            "output_prefix": store.output_prefix}
+
+
 @app.post("/api/jobs", status_code=202)
 async def create_job(
-    file: UploadFile = File(...),
+    file: UploadFile = File(None),
+    s3_key: str = Form(""),
     method: str = Form("mosaic"),
     conf: float = Form(0.25),
     imgsz: int = Form(1280),
@@ -509,11 +555,23 @@ async def create_job(
     interp: bool = Form(True),
     keep_audio: bool = Form(True),
 ):
+    # 입력은 둘 중 하나다 — 업로드한 파일이거나 S3 키.
+    if bool(s3_key) == bool(file is not None and file.filename):
+        raise HTTPException(400, "file 또는 s3_key 중 하나만 보내라")
     if method not in METHODS:
         raise HTTPException(400, f"unknown method: {method}")
     if not 0 < conf < 1:
         raise HTTPException(400, "conf 는 0~1 사이여야 한다")
-    ext = os.path.splitext(file.filename or "")[1].lower()
+
+    if s3_key:
+        if s3mod.get_store() is None:
+            raise HTTPException(404, "S3 가 설정되지 않았다 (FA_S3_BUCKET)")
+        if ".." in s3_key or s3_key.startswith("/"):
+            raise HTTPException(400, "잘못된 s3_key")
+        name = os.path.basename(s3_key)
+    else:
+        name = os.path.basename(file.filename)
+    ext = os.path.splitext(name)[1].lower()
     if ext not in VIDEO_EXT:
         raise HTTPException(400, f"지원하지 않는 확장자: {ext or '(없음)'}")
     # stride 배수 맞추기는 검출기가 한다(geometry.snap_to_stride). 여기서
@@ -533,25 +591,29 @@ async def create_job(
     os.makedirs(workdir, exist_ok=True)
     src = os.path.join(workdir, "input" + ext)
 
-    size = 0
-    try:
-        with open(src, "wb") as f:
-            while True:
-                chunk = await file.read(CHUNK)
-                if not chunk:
-                    break
-                size += len(chunk)
-                if size > MAX_BYTES:
-                    raise HTTPException(413, f"업로드 상한 초과 ({MAX_BYTES // 1048576} MB)")
-                f.write(chunk)
-    except Exception:
-        shutil.rmtree(workdir, ignore_errors=True)
-        raise
-    if size == 0:
-        shutil.rmtree(workdir, ignore_errors=True)
-        raise HTTPException(400, "빈 파일")
+    # S3 입력은 워커가 내려받는다. 접수 요청을 붙들고 수백 MB 를 받으면
+    # 클라이언트가 그동안 응답을 기다리게 된다.
+    if not s3_key:
+        size = 0
+        try:
+            with open(src, "wb") as f:
+                while True:
+                    chunk = await file.read(CHUNK)
+                    if not chunk:
+                        break
+                    size += len(chunk)
+                    if size > MAX_BYTES:
+                        raise HTTPException(413,
+                                            f"업로드 상한 초과 ({MAX_BYTES // 1048576} MB)")
+                    f.write(chunk)
+        except Exception:
+            shutil.rmtree(workdir, ignore_errors=True)
+            raise
+        if size == 0:
+            shutil.rmtree(workdir, ignore_errors=True)
+            raise HTTPException(400, "빈 파일")
 
-    job = Job(id=jid, name=os.path.basename(file.filename), workdir=workdir,
+    job = Job(id=jid, name=name, workdir=workdir, s3_key=s3_key,
               params=dict(method=method, conf=conf, imgsz=imgsz,
                           batch_size=batch_size, pad=pad,
                           mosaic_scale=mosaic_scale, linger=linger,
