@@ -49,6 +49,11 @@ INDEX_HTML = r"""<!doctype html>
   nav a.on{background:var(--accent-dim);color:var(--accent-ink);font-weight:600}
   nav .grp{font-size:10.5px;color:var(--faint);padding:14px 10px 5px;
            letter-spacing:.04em;text-transform:uppercase}
+  /* 눌렀을 때 목록이 비어 있으면 아무 일도 안 일어난 것처럼 보인다.
+     개수를 옆에 붙여 두면 무엇이 걸러지는지 누르기 전에 안다. */
+  nav a .c{margin-left:auto;font-size:11px;color:var(--faint);
+           font-variant-numeric:tabular-nums}
+  nav a.on .c{color:var(--accent-ink)}
 
   main{min-width:0;overflow:auto;display:flex;flex-direction:column}
   .top{display:flex;align-items:center;gap:14px;padding:15px 24px;
@@ -240,14 +245,12 @@ INDEX_HTML = r"""<!doctype html>
   <aside class="side">
     <div class="brand"><span class="mk"></span>face-anonymizer</div>
     <nav>
-      <div class="grp">작업</div>
-      <a class="on">파일 브라우저</a>
-      <div class="grp">보기</div>
-      <a onclick="setFilter('')" id="nav-all">전체</a>
-      <a onclick="setFilter('running')" id="nav-running">수행중</a>
-      <a onclick="setFilter('queued')" id="nav-queued">대기</a>
-      <a onclick="setFilter('done')" id="nav-done">완료</a>
-      <a onclick="setFilter('failed')" id="nav-failed">실패</a>
+      <div class="grp">작업 보기</div>
+      <a onclick="setFilter('')" id="nav-all">전체<span class="c"></span></a>
+      <a onclick="setFilter('running')" id="nav-running">수행중<span class="c"></span></a>
+      <a onclick="setFilter('queued')" id="nav-queued">대기<span class="c"></span></a>
+      <a onclick="setFilter('done')" id="nav-done">완료<span class="c"></span></a>
+      <a onclick="setFilter('failed')" id="nav-failed">실패<span class="c"></span></a>
     </nav>
     <div class="hud">
       <div class="hd">
@@ -519,6 +522,14 @@ function paramObject() {
 }
 $('#q').addEventListener('input', renderBrowser);
 
+function navCounts(jobs) {
+  const n = { '': jobs.length };
+  for (const k of ['running', 'queued', 'done', 'failed'])
+    n[k] = jobs.filter(j => j.status === k).length;
+  for (const k of ['', 'running', 'queued', 'done', 'failed'])
+    document.querySelector('#nav-' + (k || 'all') + ' .c').textContent = n[k] || '';
+}
+
 function setFilter(f) {
   filter = f;
   for (const k of ['','running','queued','done','failed'])
@@ -718,6 +729,7 @@ async function poll() {
   hud(jobs || [], st);
   if (!jobs) return;
   kpis(jobs, st);
+  navCounts(jobs);
   const shown = filter ? jobs.filter(j => j.status === filter) : jobs;
   $('#jobcnt').textContent = `${shown.length}건`;
   const open = [...document.querySelectorAll('video')].map(v => v.parentElement.id);
