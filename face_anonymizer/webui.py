@@ -135,11 +135,8 @@ INDEX_HTML = r"""<!doctype html>
   .tag.err::before{background:var(--critical)}
   .tag.plain::before{display:none}
   .empty{text-align:center;color:var(--faint);padding:38px 16px;font-size:12.5px}
-  .actionbar{display:flex;align-items:center;gap:12px;padding:12px 16px;
-             border-top:1px solid var(--line);background:#fafcfe;
-             border-radius:0 0 12px 12px}
-  .actionbar .n{font-size:12.5px;color:var(--dim);flex:1}
-  .actionbar .n b{color:var(--fg)}
+  .bar .n{font-size:12.5px;color:var(--dim);margin-left:auto;white-space:nowrap}
+  .bar .n b{color:var(--fg)}
 
   /* ── 폼 ─────────────────────────────────────────────────────────────── */
   .opts{display:grid;grid-template-columns:repeat(auto-fit,minmax(120px,1fr));gap:11px}
@@ -240,7 +237,6 @@ INDEX_HTML = r"""<!doctype html>
     <nav>
       <div class="grp">작업</div>
       <a class="on">파일 브라우저</a>
-      <a onclick="document.getElementById('file').click()">직접 업로드</a>
       <div class="grp">보기</div>
       <a onclick="setFilter('')" id="nav-all">전체</a>
       <a onclick="setFilter('running')" id="nav-running">수행중</a>
@@ -274,6 +270,8 @@ INDEX_HTML = r"""<!doctype html>
             <button class="ghost" onclick="loadObjects()">새로고침</button>
             <span class="divider"></span>
             <label class="toggle"><input type="checkbox" id="skipdone" checked><span>처리된 건 건너뛰기</span></label>
+            <span class="n" id="picked">선택된 항목 없음</span>
+            <button id="go" disabled>비식별화 시작</button>
           </div>
           <div id="browser"></div>
           <details class="pad" style="border-top:1px solid var(--line)">
@@ -298,10 +296,6 @@ INDEX_HTML = r"""<!doctype html>
               <div class="chk"><input type="checkbox" id="audio" checked><span>오디오 유지</span></div>
             </div>
           </details>
-          <div class="actionbar">
-            <span class="n" id="picked">선택된 항목 없음</span>
-            <button id="go" disabled>비식별화 시작</button>
-          </div>
         </section>
 
         <section class="card">
@@ -312,12 +306,11 @@ INDEX_HTML = r"""<!doctype html>
     </div>
   </main>
 </div>
-<input type="file" id="file" accept="video/*" hidden>
 
 <script>
 const $ = s => document.querySelector(s);
-const fileInput = $('#file'), go = $('#go');
-let picked = null, timer = null, filter = '';
+const go = $('#go');
+let timer = null, filter = '';
 
 function fmt(s) {
   s = Math.max(0, Math.round(s));
@@ -455,11 +448,6 @@ function split() {
 }
 function updatePicked() {
   const { files, dirs } = split();
-  if (picked) {
-    $('#picked').innerHTML = `업로드 <b>${picked.name}</b> · ${(picked.size/1048576).toFixed(1)} MB`;
-    go.disabled = false;
-    return;
-  }
   const bits = [];
   if (files.length) bits.push(`영상 <b>${files.length}개</b>`);
   if (dirs.length) bits.push(`폴더 <b>${dirs.length}개</b>`);
@@ -467,17 +455,8 @@ function updatePicked() {
                                        : '선택된 항목 없음';
   go.disabled = !bits.length;
 }
-function setFile(f) { picked = f; S3.selected.clear(); updatePicked(); }
 
 // ── 제출 ───────────────────────────────────────────────────────────────────
-function opts(fd) {
-  fd.append('method', $('#method').value);
-  fd.append('conf', $('#conf').value);
-  fd.append('imgsz', $('#imgsz').value);
-  fd.append('batch_size', $('#batch').value);
-  fd.append('keep_audio', $('#audio').checked);
-  return fd;
-}
 // 서버가 RFC 9457 problem+json 을 준다. title/detail/hint 를 그대로 보여 주면
 // "왜 안 되는지" 와 "무엇을 하면 되는지" 가 같이 전달된다.
 function problemText(p) {
@@ -511,7 +490,6 @@ async function submitJobs(body, label) {
 }
 
 go.onclick = () => {
-  if (picked) return uploadFile();
   const { files, dirs } = split();
   if (!files.length && !dirs.length) return;
   const skip = $('#skipdone').checked;
@@ -534,29 +512,6 @@ function paramObject() {
            imgsz: +$('#imgsz').value, batch_size: +$('#batch').value,
            keep_audio: $('#audio').checked };
 }
-function uploadFile() {
-  const fd = opts(new FormData()); fd.append('file', picked);
-  go.disabled = true; go.textContent = '업로드 중… 0%';
-  const xhr = new XMLHttpRequest();
-  xhr.open('POST', '/api/jobs');
-  xhr.upload.onprogress = e => {
-    if (e.lengthComputable) go.textContent = `업로드 중… ${Math.round(100*e.loaded/e.total)}%`;
-  };
-  xhr.onload = () => {
-    go.textContent = '비식별화 시작';
-    picked = null; fileInput.value = ''; updatePicked();
-    if (xhr.status === 202) poll();
-    else alert(explain(xhr.status, xhr.responseText));
-  };
-  xhr.onerror = () => { go.textContent = '비식별화 시작'; updatePicked(); alert('업로드 실패'); };
-  xhr.send(fd);
-}
-document.addEventListener('dragover', e => e.preventDefault());
-document.addEventListener('drop', e => {
-  e.preventDefault();
-  if (e.dataTransfer.files.length) setFile(e.dataTransfer.files[0]);
-});
-fileInput.onchange = () => fileInput.files.length && setFile(fileInput.files[0]);
 $('#q').addEventListener('input', renderBrowser);
 
 function setFilter(f) {
