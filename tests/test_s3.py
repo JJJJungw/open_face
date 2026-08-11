@@ -85,21 +85,25 @@ def test_list_shows_one_level_like_console():
     assert objects[0]["modified"].startswith("2026-08-07")
 
 
-def test_output_key_collects_results_in_one_place():
+def test_output_key_follows_dataset_convention():
+    """정체성 필드는 그대로 두고 STATE 만 raw -> deid."""
     store = make_store()
-    assert store.output_key("videos/2026-08/face4.mp4") \
-        == "v1/results/face/face4_anon.mp4"
-    assert store.output_key("a/b/c/clip.mov") == "v1/results/face/clip_anon.mp4"
+    assert store.output_key("videos/2026-08/f_00001_00_0000000_0042000_raw.mp4") \
+        == "v1/results/face/f_00001_00_0000000_0042000_deid.mp4"
+    # 규칙 밖 파일(직접 업로드 등)도 결과 폴더에 떨어진다
+    assert store.output_key("a/b/c/clip.mov") == "v1/results/face/clip_deid.mp4"
 
 
 def test_processed_keys_are_listed_once_not_per_object():
     """객체마다 HEAD 를 날리면 목록 한 번에 수백 번 왕복한다."""
-    store = make_store({"v1/results/face/face4_anon.mp4": (b"x", NOW)})
+    store = make_store({"v1/results/face/f_00001_00_0000000_0042000_deid.mp4":
+                        (b"x", NOW)})
     calls = []
     orig = store.client.list_objects_v2
     store.client.list_objects_v2 = lambda **kw: (calls.append(kw), orig(**kw))[1]
 
-    assert "v1/results/face/face4_anon.mp4" in store.processed_keys()
+    assert "v1/results/face/f_00001_00_0000000_0042000_deid.mp4" \
+        in store.processed_keys()
     store.processed_keys()                      # 캐시가 먹어야 한다
     assert len(calls) == 1
 
@@ -115,8 +119,8 @@ def test_upload_invalidates_processed_cache(tmp_path):
     store.processed_keys()
     p = tmp_path / "out.mp4"
     p.write_bytes(b"video")
-    store.upload(str(p), "v1/results/face/out_anon.mp4")
-    assert "v1/results/face/out_anon.mp4" in store.processed_keys()
+    store.upload(str(p), "v1/results/face/out_deid.mp4")
+    assert "v1/results/face/out_deid.mp4" in store.processed_keys()
 
 
 # ── 서버 경로 ────────────────────────────────────────────────────────────────
@@ -124,11 +128,12 @@ def test_upload_invalidates_processed_cache(tmp_path):
 @pytest.fixture
 def s3client(tmp_path, monkeypatch, make_video):
     """S3 가 설정된 서버. 버킷에 영상 하나가 들어 있다."""
-    src, n, size = make_video(name="clip.mp4", frames=12)
+    src, n, size = make_video(name="f_00001_00_0000000_0042000_raw.mp4",
+                              frames=12)
     data = open(src, "rb").read()
     store = s3mod.S3Store(bucket="ax-mbc-label-data-storage",
                           client=FakeS3Client({
-                              "videos/2026-08/clip.mp4": (data, NOW),
+                              "videos/2026-08/f_00001_00_0000000_0042000_raw.mp4": (data, NOW),
                               "videos/2026-08/notes.txt": (b"hi", NOW)}),
                           output_prefix="v1/results/face/", root_prefix="")
     monkeypatch.setattr(s3mod, "get_store", lambda: store)
@@ -151,8 +156,9 @@ def test_objects_endpoint(s3client):
     d = r.json()
     assert d["bucket"] == "ax-mbc-label-data-storage"
     assert d["output_prefix"] == "v1/results/face/"
-    assert [o["key"] for o in d["objects"]] == ["videos/2026-08/clip.mp4",
-                                               "videos/2026-08/notes.txt"]
+    assert [o["key"] for o in d["objects"]] == [
+        "videos/2026-08/f_00001_00_0000000_0042000_raw.mp4",
+        "videos/2026-08/notes.txt"]
     assert d["objects"][0]["processed"] is False
 
 
@@ -164,7 +170,7 @@ def test_objects_endpoint_404_when_not_configured(tmp_path, monkeypatch):
 
 
 def test_s3_job_downloads_processes_and_uploads(s3client):
-    r = s3client.post("/api/jobs", data={"s3_key": "videos/2026-08/clip.mp4",
+    r = s3client.post("/api/jobs", data={"s3_key": "videos/2026-08/f_00001_00_0000000_0042000_raw.mp4",
                                          "batch_size": "4", "keep_audio": "false"})
     assert r.status_code == 202, r.text
     jid = r.json()["id"]
@@ -178,13 +184,17 @@ def test_s3_job_downloads_processes_and_uploads(s3client):
 
     assert s["status"] == "done", s.get("error")
     assert s["result"]["frames"] == s3client.frames
-    assert s["result"]["s3_output"] == "v1/results/face/clip_anon.mp4"
-    assert s3client.store.client.downloads == ["videos/2026-08/clip.mp4"]
-    assert s3client.store.client.uploaded["v1/results/face/clip_anon.mp4"]
+    assert s["result"]["s3_output"] \
+        == "v1/results/face/f_00001_00_0000000_0042000_deid.mp4"
+    assert s3client.store.client.downloads == [
+        "videos/2026-08/f_00001_00_0000000_0042000_raw.mp4"]
+    assert s3client.store.client.uploaded[
+        "v1/results/face/f_00001_00_0000000_0042000_deid.mp4"]
 
 
 def test_processed_flag_appears_after_run(s3client):
-    s3client.store.client.objects["v1/results/face/clip_anon.mp4"] = (b"x", NOW)
+    s3client.store.client.objects[
+        "v1/results/face/f_00001_00_0000000_0042000_deid.mp4"] = (b"x", NOW)
     s3client.store._out_cache = (0.0, set())
     d = s3client.get("/api/s3/objects?prefix=videos/2026-08/").json()
     assert d["objects"][0]["processed"] is True
@@ -198,7 +208,7 @@ def test_requires_exactly_one_input(s3client, make_video):
     with open(src, "rb") as f:
         r = s3client.post("/api/jobs",
                           files={"file": ("both.mp4", f, "video/mp4")},
-                          data={"s3_key": "videos/2026-08/clip.mp4"})
+                          data={"s3_key": "videos/2026-08/f_00001_00_0000000_0042000_raw.mp4"})
     assert r.status_code == 400
 
 

@@ -19,7 +19,7 @@ import os
 import sys
 import time
 
-from . import __version__
+from . import __version__, naming
 from .pipeline import DetectionSanityError, VideoOpenError, VideoWriteError
 
 
@@ -30,7 +30,8 @@ def build_parser():
         formatter_class=argparse.ArgumentDefaultsHelpFormatter,
     )
     p.add_argument("input", help="입력 영상 경로")
-    p.add_argument("-o", "--output", default=None, help="출력 경로 (기본: *_anon.mp4)")
+    p.add_argument("-o", "--output", default=None,
+                   help="출력 경로 (기본: 데이터셋 규칙에 따라 *_deid.mp4)")
     p.add_argument("--version", action="version", version=f"%(prog)s {__version__}")
 
     g = p.add_argument_group("익명화")
@@ -138,7 +139,9 @@ def main(argv=None):
         format="%(message)s",
     )
 
-    out = args.output or (os.path.splitext(args.input)[0] + "_anon.mp4")
+    # 데이터셋 규칙(naming.py)을 따른다. 규칙 밖 이름이면 <이름>_deid.mp4.
+    out = args.output or os.path.join(
+        os.path.dirname(args.input), naming.output_name(args.input))
 
     detector_kwargs = {"device": args.device, "half": args.half, "imgsz": args.imgsz}
     if args.weights:

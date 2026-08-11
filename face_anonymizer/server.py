@@ -63,6 +63,7 @@ except ImportError:                   # pragma: no cover
 from fastapi import FastAPI, File, Form, HTTPException, Response, UploadFile
 from fastapi.responses import FileResponse, HTMLResponse
 
+from . import naming
 from . import s3 as s3mod
 from .anonymize import METHODS
 from .pipeline import VideoOpenError, VideoWriteError
@@ -402,7 +403,7 @@ def _run(job_id):
         save_job(j, force=False)      # 폴링용 — 간격을 두고 흘려 쓴다
 
     src = os.path.join(workdir, "input" + os.path.splitext(name)[1])
-    dst = os.path.join(workdir, os.path.splitext(name)[0] + "_anon.mp4")
+    dst = os.path.join(workdir, naming.output_name(name))
     try:
         if j.s3_key and not os.path.exists(src):
             store = s3mod.get_store()
@@ -681,7 +682,7 @@ def download(jid: str):
         raise HTTPException(409, f"아직 준비되지 않았다 (status={j.status})")
     if not j.output or not os.path.exists(j.output):
         raise HTTPException(410, "결과물이 더 이상 없다 (보관 기간 만료)")
-    name = os.path.splitext(j.name)[0] + "_anon.mp4"
+    name = naming.output_name(j.name)
     return FileResponse(j.output, media_type="video/mp4", filename=name)
 
 

@@ -20,6 +20,8 @@ import logging
 import os
 import time
 
+from . import naming
+
 log = logging.getLogger(__name__)
 
 BUCKET = os.environ.get("FA_S3_BUCKET") or ""
@@ -94,10 +96,15 @@ class S3Store:
         return folders, objects
 
     def output_key(self, key):
-        """입력 키에 대응하는 결과물 키. 결과는 한곳에 모은다."""
-        name = os.path.basename(key)
-        stem = os.path.splitext(name)[0]
-        return f"{self.output_prefix}{stem}_anon.mp4"
+        """입력 키에 대응하는 결과물 키.
+
+        데이터셋 규칙(naming.py)을 따른다 — 정체성 필드는 그대로 두고 STATE 만
+        raw -> deid 로 바꾼다. 결과는 한곳에 모은다.
+
+            videos/2026-08/f_00001_00_0000000_0042000_raw.mp4
+            -> v1/results/face/f_00001_00_0000000_0042000_deid.mp4
+        """
+        return self.output_prefix + naming.output_name(key)
 
     def processed_keys(self):
         """결과물 프리픽스에 이미 있는 키 집합. 짧게 캐시한다.
