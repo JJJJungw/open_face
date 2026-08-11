@@ -82,6 +82,7 @@ INDEX_HTML = r"""<!doctype html>
   /* ── 카드 ───────────────────────────────────────────────────────────── */
   .grid2{display:grid;grid-template-columns:minmax(0,1.7fr) minmax(320px,1fr);
          gap:18px;align-items:start}
+  .grid2.solo{grid-template-columns:minmax(0,1fr)}
   .card{background:var(--surface);border:1px solid var(--line);border-radius:12px;
         min-width:0;display:flex;flex-direction:column;box-shadow:var(--shadow)}
   .card > h2{font-size:12.5px;margin:0;font-weight:600;color:var(--dim);
@@ -95,6 +96,24 @@ INDEX_HTML = r"""<!doctype html>
         padding:2px 6px 2px 9px;font-size:11px;font-weight:600}
   .chip b{cursor:pointer;font-size:13px;line-height:1;opacity:.7}
   .chip b:hover{opacity:1}
+  /* ── 현황 ───────────────────────────────────────────────────────────── */
+  .prow{padding:11px 0;border-bottom:1px solid #f1f5f9}
+  .prow:last-child{border-bottom:0}
+  .prow .t{display:flex;align-items:baseline;gap:8px;font-size:12.5px}
+  .prow .t b{font-weight:600}
+  .prow .t span{margin-left:auto;color:var(--dim);font-size:11.5px;
+                font-variant-numeric:tabular-nums}
+  .track{height:7px;background:var(--accent-dim);border-radius:99px;
+         overflow:hidden;margin-top:7px}
+  .track>i{display:block;height:100%;background:var(--accent)}
+  .track.full>i{background:var(--good)}
+  .ops{display:grid;grid-template-columns:1fr 1fr;gap:9px}
+  .ops div{background:var(--bg);border-radius:8px;padding:9px 11px}
+  .ops span{display:block;color:var(--faint);font-size:10.5px;margin-bottom:3px}
+  .ops b{font-size:15px;font-weight:600;font-variant-numeric:tabular-nums}
+  .ops b small{font-size:11px;color:var(--dim);font-weight:500;margin-left:3px}
+  .ops .wide{grid-column:1/-1}
+  .ops .warnv b{color:var(--critical)}
   .card .pad{padding:14px 16px}
 
   /* ── S3 브라우저 ────────────────────────────────────────────────────── */
@@ -257,7 +276,11 @@ INDEX_HTML = r"""<!doctype html>
   <aside class="side">
     <div class="brand"><span class="mk"></span>face-anonymizer</div>
     <nav>
-      <div class="grp">작업 보기</div>
+      <div class="grp">화면</div>
+      <a onclick="go2('overview')" id="tab-overview">현황</a>
+      <a onclick="go2('browser')" id="tab-browser">파일 브라우저</a>
+      <a onclick="go2('jobs')" id="tab-jobs">작업<span class="c" id="c-jobs"></span></a>
+      <div class="grp">작업 상태</div>
       <a onclick="setFilter('')" id="nav-all">전체<span class="c"></span></a>
       <a onclick="setFilter('running')" id="nav-running">수행중<span class="c"></span></a>
       <a onclick="setFilter('queued')" id="nav-queued">대기<span class="c"></span></a>
@@ -282,8 +305,24 @@ INDEX_HTML = r"""<!doctype html>
     <div class="content">
       <div class="kpis" id="kpis"></div>
 
-      <div class="grid2">
-        <section class="card">
+      <!-- 현황 -->
+      <section class="view" id="view-overview" hidden>
+        <div class="grid2">
+          <section class="card">
+            <h2>폴더별 진척률
+              <span class="cnt" id="progsum"></span></h2>
+            <div id="prog" class="pad"><div class="empty">불러오는 중…</div></div>
+          </section>
+          <section class="card">
+            <h2>큐 · 자원</h2>
+            <div id="opsbody" class="pad"></div>
+          </section>
+        </div>
+      </section>
+
+      <!-- 파일 브라우저 · 작업 -->
+      <div class="grid2" id="view-work">
+        <section class="card" id="card-browser">
           <div class="bar">
             <div class="crumb" id="crumb"></div>
             <div class="search"><input id="q" placeholder="이름으로 검색" autocomplete="off"></div>
@@ -318,7 +357,7 @@ INDEX_HTML = r"""<!doctype html>
           </details>
         </section>
 
-        <section class="card">
+        <section class="card" id="card-jobs">
           <h2>작업
             <span class="chip" id="jobfilter" hidden></span>
             <span class="cnt" id="jobcnt"></span></h2>
@@ -537,6 +576,82 @@ function paramObject() {
 $('#q').addEventListener('input', renderBrowser);
 
 const FILTER_TEXT = { running:'수행중', queued:'대기', done:'완료', failed:'실패' };
+const VIEW_TITLE = { overview:'현황', browser:'파일 브라우저', jobs:'작업' };
+let view = 'browser', lastOverview = 0;
+
+// 사이드바가 목록 필터 하나만 바꾸면 사이드바를 둘 이유가 없다. 화면을 실제로
+// 바꾼다 — 현황은 버킷 기준 진척률과 큐·자원, 나머지 둘은 하던 일.
+function go2(v) {
+  view = v;
+  for (const k of ['overview', 'browser', 'jobs'])
+    document.getElementById('tab-' + k).classList.toggle('on', k === v);
+  $('#page').textContent = VIEW_TITLE[v];
+  $('#view-overview').hidden = v !== 'overview';
+  $('#view-work').hidden = v === 'overview';
+  $('#card-browser').hidden = v === 'jobs';
+  $('#view-work').classList.toggle('solo', v === 'jobs');
+  $('#kpis').hidden = v === 'overview';
+  if (v === 'overview') loadOverview();
+  poll();
+}
+
+async function loadOverview() {
+  lastOverview = Date.now();
+  const [m, p] = await Promise.all([
+    fetch('/api/metrics').then(r => r.json()).catch(() => null),
+    fetch('/api/s3/progress').then(r => r.ok ? r.json() : null).catch(() => null),
+  ]);
+  renderProgress(p);
+  renderOps(m);
+}
+
+function renderProgress(p) {
+  const el = $('#prog');
+  if (!p || !p.folders || !p.folders.length) {
+    $('#progsum').textContent = '';
+    el.innerHTML = '<div class="empty">집계할 입력이 없습니다</div>';
+    return;
+  }
+  $('#progsum').textContent = `${p.done} / ${p.total}건`;
+  el.innerHTML = p.folders.map(f => {
+    const pc = f.percent;
+    return `<div class="prow">
+      <div class="t"><b>${f.name}</b>
+        <span>${f.done} / ${f.total} · 남음 ${f.remain}</span></div>
+      <div class="track ${pc >= 100 ? 'full' : ''}"><i style="width:${pc}%"></i></div>
+    </div>`;
+  }).join('');
+}
+
+function renderOps(m) {
+  const el = $('#opsbody');
+  if (!m) { el.innerHTML = '<div class="empty">불러오지 못했습니다</div>'; return; }
+  const g = m.gpu;
+  const cells = [
+    ['대기', `${m.depth}<small>건</small>`, ''],
+    // 깊이만 보면 '빨리 빠지는 100건'과 '멈춰 있는 3건'을 구분할 수 없다.
+    ['가장 오래 기다린 건', m.depth ? fmt(m.latency) : '—',
+      m.latency > 1800 ? 'warnv' : ''],
+    ['최근 1시간 처리', `${m.throughput_1h}<small>건</small>`, ''],
+    ['최근 1시간 실패', `${m.failed_1h}<small>건</small>`,
+      m.failed_1h ? 'warnv' : ''],
+    ['평균 처리 시간', m.avg_seconds ? fmt(m.avg_seconds) : '—', ''],
+    ['재시도한 작업', `${m.retried}<small>건</small>`, m.retried ? 'warnv' : ''],
+  ];
+  if (g) cells.push(
+    ['GPU 사용률', `${g.util}<small>%</small>`, ''],
+    ['GPU 메모리', `${(g.mem_used/1024).toFixed(1)}<small>/${(g.mem_total/1024).toFixed(0)} GB</small>`, ''],
+    ['GPU 온도', `${g.temp}<small>°C</small>`, g.temp >= 85 ? 'warnv' : '']);
+  cells.push(['디스크 여유',
+    m.free_mb != null ? `${(m.free_mb/1024).toFixed(1)}<small>GB</small>` : '—',
+    (m.free_mb != null && m.free_mb < m.min_free_mb) ? 'warnv' : '']);
+
+  const head = g ? `<div class="wide"><span>워커</span><b style="font-size:12.5px">${g.name}</b></div>`
+                 : `<div class="wide"><span>워커</span><b style="font-size:12.5px">GPU 없음 (CPU 추론)</b></div>`;
+  el.innerHTML = `<div class="ops">${head}${cells.map(([k, v, c]) =>
+    `<div class="${c}"><span>${k}</span><b>${v}</b></div>`).join('')}</div>`;
+}
+
 
 function navCounts(jobs) {
   const n = { '': jobs.length };
@@ -544,10 +659,12 @@ function navCounts(jobs) {
     n[k] = jobs.filter(j => j.status === k).length;
   for (const k of ['', 'running', 'queued', 'done', 'failed'])
     document.querySelector('#nav-' + (k || 'all') + ' .c').textContent = n[k] || '';
+  $('#c-jobs').textContent = jobs.length || '';
 }
 
 function setFilter(f) {
   filter = f;
+  if (view === 'overview') return go2('jobs');
   for (const k of ['','running','queued','done','failed'])
     document.getElementById('nav-' + (k || 'all')).classList.toggle('on', k === f);
   poll();
@@ -776,6 +893,7 @@ async function poll() {
     if (el && !el.innerHTML)
       el.innerHTML = `<video controls src="/api/jobs/${pid.slice(3)}/download"></video>`;
   });
+  if (view === 'overview' && Date.now() - lastOverview > 10000) loadOverview();
   const busy = jobs.some(j => j.status === 'running' || j.status === 'queued');
   clearTimeout(timer);
   timer = setTimeout(poll, busy ? 700 : 5000);
@@ -803,6 +921,7 @@ fetch('/api/defaults').then(r => r.json()).then(d => {
 }).catch(() => { $('#dsum').textContent = '(서버 기본값을 쓰지 못함)'; });
 
 setFilter('');
+go2('browser');
 loadObjects();
 </script>
 </body>

@@ -71,7 +71,7 @@ except ImportError:                   # pragma: no cover
 from fastapi import FastAPI, Request, Response
 from fastapi.responses import FileResponse, HTMLResponse, RedirectResponse
 
-from . import errors, naming
+from . import errors, metrics, naming
 from . import s3 as s3mod
 from .anonymize import METHODS
 from .pipeline import (
@@ -603,6 +603,46 @@ def status():
     return {"ready": is_ready(), "busy": is_busy(),
             "queued": queue_depth(), "free_mb": free_mb(),
             "model_error": _model_error}
+
+
+@app.get("/api/metrics")
+def metrics_endpoint():
+    """현황 화면용. 큐 지표 + 자원 상태.
+
+    작업 큐 대시보드가 공통으로 띄우는 것들이다(metrics.py 주석 참고).
+    특히 ``latency`` 는 깊이만으로 못 보는 정체를 잡아 준다 — 3건이 두 시간째
+    안 빠지는 것과 100건이 1분 만에 빠지는 것은 다른 상황이다.
+    """
+    m = metrics.queue_metrics(all_jobs())
+    m.update({
+        "ready": is_ready(), "model_error": _model_error,
+        "max_attempts": MAX_ATTEMPTS,
+        "free_mb": free_mb(), "min_free_mb": MIN_FREE_MB,
+        "gpu": metrics.gpu_status(),
+    })
+    return m
+
+
+@app.get("/api/s3/progress")
+def s3_progress(prefix: str = ""):
+    """입력 폴더별 진척률. 큐가 아니라 **버킷** 기준이다.
+
+    큐 지표는 지금 들어와 있는 것만 안다. 데이터셋을 통째로 돌리는 작업에서
+    정작 궁금한 건 전체 중 얼마나 남았는지이고, 그건 결과 버킷에 있다.
+    """
+    store = s3mod.get_store()
+    if store is None:
+        raise errors.S3_NOT_CONFIGURED()
+    if ".." in prefix:
+        raise errors.INVALID_KEY(prefix)
+    try:
+        rows = metrics.folder_progress(store, prefix or store.root_prefix)
+    except s3mod.S3Error as e:
+        raise (e.problem or errors.S3_UPSTREAM)(str(e)) from e
+    return {"prefix": prefix, "output_prefix": store.output_prefix,
+            "folders": rows,
+            "total": sum(r["total"] for r in rows),
+            "done": sum(r["done"] for r in rows)}
 
 
 @app.get("/api/health")
