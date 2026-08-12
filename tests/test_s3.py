@@ -18,7 +18,8 @@ pytest.importorskip("httpx", reason="pip install -r requirements-dev.txt")
 from fastapi.testclient import TestClient            # noqa: E402
 
 from face_anonymizer import VideoAnonymizer                # noqa: E402
-from face_anonymizer.service import server                 # noqa: E402
+from face_anonymizer.service import jobs as jobsmod        # noqa: E402
+from face_anonymizer.service import config, server, worker  # noqa: E402
 from face_anonymizer.storage import s3 as s3mod              # noqa: E402
 
 
@@ -184,13 +185,13 @@ def s3client(tmp_path, monkeypatch, make_video):
                               "videos/2026-08/notes.txt": (b"hi", NOW)}),
                           output_prefix="v1/results/face/", root_prefix="")
     monkeypatch.setattr(s3mod, "get_store", lambda: store)
-    monkeypatch.setattr(server, "JOBS_DIR", str(tmp_path / "jobs"))
-    monkeypatch.setattr(server, "_JOBS", {})
-    monkeypatch.setattr(server, "_current", None)
-    monkeypatch.setattr(server, "_model_error", None)
+    monkeypatch.setattr(config, "JOBS_DIR", str(tmp_path / "jobs"))
+    monkeypatch.setattr(jobsmod, "JOBS", {})
+    monkeypatch.setattr(worker, "current", None)
+    monkeypatch.setattr(worker, "model_error", None)
     anon = VideoAnonymizer(detector=FakeDetector(size))
-    monkeypatch.setattr(server, "get_anonymizer", lambda: anon)
-    monkeypatch.setattr(server, "_anonymizer", anon)
+    monkeypatch.setattr(worker, "get_anonymizer", lambda: anon)
+    monkeypatch.setattr(worker, "_anonymizer", anon)
     c = TestClient(server.app)
     c.store = store
     c.frames = n
@@ -211,7 +212,7 @@ def test_objects_endpoint(s3client):
 
 def test_objects_endpoint_404_when_not_configured(tmp_path, monkeypatch):
     monkeypatch.setattr(s3mod, "get_store", lambda: None)
-    monkeypatch.setattr(server, "JOBS_DIR", str(tmp_path / "jobs"))
+    monkeypatch.setattr(config, "JOBS_DIR", str(tmp_path / "jobs"))
     c = TestClient(server.app)
     assert c.get("/api/s3/objects").status_code == 404
 
@@ -311,15 +312,15 @@ def test_batch_applies_shared_params(s3client):
     r = s3client.post("/api/jobs",
                       json={"s3_keys": [KEY], "params": {"conf": 0.4}})
     jid = r.json()["accepted"][0]["id"]
-    assert server._JOBS[jid].params["conf"] == 0.4
-    assert server._JOBS[jid].params["method"] == server.JOB_DEFAULTS["method"]
+    assert jobsmod.JOBS[jid].params["conf"] == 0.4
+    assert jobsmod.JOBS[jid].params["method"] == server.JOB_DEFAULTS["method"]
     wait(s3client, jid, timeout=60)
 
 
 def test_batch_rejects_empty_and_oversized(s3client, monkeypatch):
     assert s3client.post("/api/jobs", json={"s3_keys": []}).json()["code"] \
         == "missing_input"
-    monkeypatch.setattr(server, "BATCH_MAX", 2)
+    monkeypatch.setattr(config, "BATCH_MAX", 2)
     b = s3client.post("/api/jobs",
                       json={"s3_keys": [KEY] + seed(s3client, 2)}).json()
     assert b["code"] == "batch_too_large" and b["limit"] == 2
@@ -343,7 +344,7 @@ def test_download_redirects_to_s3_when_local_copy_is_gone(s3client):
     jid = s3client.post("/api/jobs", data={"s3_key": KEY}).json()["accepted"][0]["id"]
     wait(s3client, jid, timeout=60)
 
-    os.remove(server._JOBS[jid].output)
+    os.remove(jobsmod.JOBS[jid].output)
     r = s3client.get(f"/api/jobs/{jid}/download", follow_redirects=False)
     assert r.status_code == 302
     assert r.headers["location"].startswith("https://signed/")
@@ -351,7 +352,7 @@ def test_download_redirects_to_s3_when_local_copy_is_gone(s3client):
 
 def test_result_before_done_is_409(s3client):
     jid = s3client.post("/api/jobs", data={"s3_key": KEY}).json()["accepted"][0]["id"]
-    server._JOBS[jid].status = "running"
+    jobsmod.JOBS[jid].status = "running"
     b = s3client.get(f"/api/jobs/{jid}/result")
     assert b.status_code == 409 and b.json()["code"] == "job_not_finished"
 
@@ -507,12 +508,12 @@ def test_batch_size_is_unbounded_by_default(s3client, monkeypatch):
     """폴더 하나에 수천 건이 들어 있는 게 정상이다. 상한에 걸려서 사용자가
     폴더를 손으로 쪼개게 만들면 안 된다. 필요하면 FA_BATCH_MAX 로 다시 건다."""
     three = [KEY] + seed(s3client, 2)
-    monkeypatch.setattr(server, "BATCH_MAX", 2)
+    monkeypatch.setattr(config, "BATCH_MAX", 2)
     capped = s3client.post("/api/jobs", json={"s3_keys": three})
     assert capped.status_code == 400
     assert capped.json()["code"] == "batch_too_large"
 
-    monkeypatch.setattr(server, "BATCH_MAX", 0)          # 기본값
+    monkeypatch.setattr(config, "BATCH_MAX", 0)          # 기본값
     r = s3client.post("/api/jobs", json={"s3_keys": three})
     assert r.status_code == 202, r.text
     assert len(r.json()["accepted"]) == 3

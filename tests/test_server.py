@@ -19,23 +19,24 @@ pytest.importorskip("httpx", reason="pip install -r requirements-dev.txt")
 from fastapi.testclient import TestClient           # noqa: E402
 
 from face_anonymizer import VideoAnonymizer                # noqa: E402
-from face_anonymizer.service import server                 # noqa: E402
+from face_anonymizer.service import jobs as jobsmod        # noqa: E402
+from face_anonymizer.service import config, server, worker          # noqa: E402
 
 
 @pytest.fixture
 def client(tmp_path, monkeypatch):
     """작업 디렉터리와 전역 상태를 테스트마다 격리한다."""
     jobs = tmp_path / "jobs"
-    monkeypatch.setattr(server, "JOBS_DIR", str(jobs))
-    monkeypatch.setattr(server, "_JOBS", {})
-    monkeypatch.setattr(server, "_anonymizer", None)
-    monkeypatch.setattr(server, "_current", None)
-    monkeypatch.setattr(server, "_model_error", None)
+    monkeypatch.setattr(config, "JOBS_DIR", str(jobs))
+    monkeypatch.setattr(jobsmod, "JOBS", {})
+    monkeypatch.setattr(worker, "_anonymizer", None)
+    monkeypatch.setattr(worker, "current", None)
+    monkeypatch.setattr(worker, "model_error", None)
 
     def attach(size, miss_frames=()):
         anon = VideoAnonymizer(detector=FakeDetector(size, miss_frames))
-        monkeypatch.setattr(server, "get_anonymizer", lambda: anon)
-        monkeypatch.setattr(server, "_anonymizer", anon)
+        monkeypatch.setattr(worker, "get_anonymizer", lambda: anon)
+        monkeypatch.setattr(worker, "_anonymizer", anon)
         return anon
 
     c = TestClient(server.app)
@@ -106,7 +107,7 @@ def test_download_before_done_is_409(client, make_video):
     client.attach(size)
     jid = job_id(submit(client, path))
     # 완료 전 상태를 강제로 만들어 둔다 (실제 진행 중 상태를 잡으려면 경쟁이 생긴다)
-    server._JOBS[jid].status = "running"
+    jobsmod.JOBS[jid].status = "running"
     assert client.get(f"/api/jobs/{jid}/download").status_code == 409
     assert client.delete(f"/api/jobs/{jid}").status_code == 409
 
@@ -116,7 +117,7 @@ def test_imgsz_is_range_clamped(client, make_video):
     path, n, size = make_video(frames=6)
     client.attach(size)
     jid = job_id(submit(client, path, imgsz="99999"))
-    assert server._JOBS[jid].params["imgsz"] == 2048
+    assert jobsmod.JOBS[jid].params["imgsz"] == 2048
     wait(client, jid)
 
 
@@ -182,7 +183,7 @@ def test_survives_restart(client, tmp_path, make_video):
     jid = job_id(submit(client, path))
     wait(client, jid)
 
-    server._JOBS.clear()                       # 재시작 또는 다른 워커의 시야
+    jobsmod.JOBS.clear()                       # 재시작 또는 다른 워커의 시야
 
     r = client.get(f"/api/jobs/{jid}")
     assert r.status_code == 200
@@ -199,12 +200,12 @@ def test_orphaned_running_job_is_marked_failed(client, tmp_path, make_video):
     jid = job_id(submit(client, path))
     wait(client, jid)
 
-    j = server._JOBS[jid]
+    j = jobsmod.JOBS[jid]
     j.status, j.finished = "running", 0.0
-    server.save_job(j)
-    server._JOBS.clear()                       # 프로세스가 죽은 상태
+    jobsmod.save_job(j)
+    jobsmod.JOBS.clear()                       # 프로세스가 죽은 상태
 
-    assert server.recover_orphans() == 1
+    assert jobsmod.recover_orphans() == 1
     s = client.get(f"/api/jobs/{jid}").json()
     assert s["status"] == "failed"
     assert s["error"]["code"] == "interrupted"
@@ -217,11 +218,11 @@ def test_sweep_removes_expired_jobs(client, tmp_path, make_video, monkeypatch):
     jid = job_id(submit(client, path))
     wait(client, jid)
 
-    monkeypatch.setattr(server, "JOB_TTL", 1)
-    server._JOBS[jid].finished = time.time() - 10
-    server.save_job(server._JOBS[jid])
+    monkeypatch.setattr(config, "JOB_TTL", 1)
+    jobsmod.JOBS[jid].finished = time.time() - 10
+    jobsmod.save_job(jobsmod.JOBS[jid])
 
-    assert server.sweep() == 1
+    assert jobsmod.sweep() == 1
     assert not (tmp_path / "jobs" / jid).exists()
     assert client.get(f"/api/jobs/{jid}").status_code == 404
 
@@ -233,7 +234,7 @@ def test_missing_output_reports_410_not_500(client, tmp_path, make_video):
     jid = job_id(submit(client, path))
     wait(client, jid)
 
-    os.remove(server._JOBS[jid].output)
+    os.remove(jobsmod.JOBS[jid].output)
     assert client.get(f"/api/jobs/{jid}/download").status_code == 410
 
 
@@ -260,7 +261,7 @@ class SlowDetector:
 
 def test_queue_is_unlimited_by_default(client, make_video, monkeypatch):
     """전체 수행처럼 한꺼번에 여러 건 넣는 게 정상이다."""
-    assert server.QUEUE_MAX == 0
+    assert config.QUEUE_MAX == 0
     path, n, size = make_video(frames=6)
     client.attach(size)
 
@@ -274,8 +275,8 @@ def test_rejects_when_disk_is_low(client, make_video, monkeypatch):
     """대기 중인 작업은 입력 파일을 들고 있다. 진짜 제약은 개수가 아니라 디스크다."""
     path, n, size = make_video(frames=4)
     client.attach(size)
-    monkeypatch.setattr(server, "free_mb", lambda: 10)
-    monkeypatch.setattr(server, "MIN_FREE_MB", 2048)
+    monkeypatch.setattr(jobsmod, "free_mb", lambda: 10)
+    monkeypatch.setattr(config, "MIN_FREE_MB", 2048)
 
     r = submit(client, path)
     assert r.status_code == 507
@@ -295,11 +296,11 @@ def test_list_is_bounded_and_filterable(client, make_video):
 
 
 def test_queue_max_still_works_when_set(client, make_video, monkeypatch):
-    monkeypatch.setattr(server, "QUEUE_MAX", 2)
+    monkeypatch.setattr(config, "QUEUE_MAX", 2)
     path, n, size = make_video(frames=40)
     anon = VideoAnonymizer(detector=SlowDetector())
-    monkeypatch.setattr(server, "get_anonymizer", lambda: anon)
-    monkeypatch.setattr(server, "_anonymizer", anon)
+    monkeypatch.setattr(worker, "get_anonymizer", lambda: anon)
+    monkeypatch.setattr(worker, "_anonymizer", anon)
 
     ids = []
     codes = []
@@ -318,7 +319,7 @@ def test_queue_max_still_works_when_set(client, make_video, monkeypatch):
 
 def test_transient_failure_is_retried(client, make_video, monkeypatch):
     """일시적 오류는 다시 큐에 넣는다."""
-    monkeypatch.setattr(server, "MAX_ATTEMPTS", 3)
+    monkeypatch.setattr(config, "MAX_ATTEMPTS", 3)
     path, n, size = make_video(frames=6)
     calls = {"n": 0}
 
@@ -330,8 +331,8 @@ def test_transient_failure_is_retried(client, make_video, monkeypatch):
             return [[] for _ in frames]
 
     anon = VideoAnonymizer(detector=Flaky())
-    monkeypatch.setattr(server, "get_anonymizer", lambda: anon)
-    monkeypatch.setattr(server, "_anonymizer", anon)
+    monkeypatch.setattr(worker, "get_anonymizer", lambda: anon)
+    monkeypatch.setattr(worker, "_anonymizer", anon)
 
     jid = job_id(submit(client, path))
     s = wait(client, jid, timeout=60)
@@ -341,7 +342,7 @@ def test_transient_failure_is_retried(client, make_video, monkeypatch):
 
 
 def test_retries_are_exhausted_then_failed(client, make_video, monkeypatch):
-    monkeypatch.setattr(server, "MAX_ATTEMPTS", 2)
+    monkeypatch.setattr(config, "MAX_ATTEMPTS", 2)
     path, n, size = make_video(frames=6)
 
     class AlwaysBroken:
@@ -349,8 +350,8 @@ def test_retries_are_exhausted_then_failed(client, make_video, monkeypatch):
             raise RuntimeError("일시적인 척하는 영구 오류")
 
     anon = VideoAnonymizer(detector=AlwaysBroken())
-    monkeypatch.setattr(server, "get_anonymizer", lambda: anon)
-    monkeypatch.setattr(server, "_anonymizer", anon)
+    monkeypatch.setattr(worker, "get_anonymizer", lambda: anon)
+    monkeypatch.setattr(worker, "_anonymizer", anon)
 
     jid = job_id(submit(client, path))
     s = wait(client, jid, timeout=60)
@@ -362,7 +363,7 @@ def test_retries_are_exhausted_then_failed(client, make_video, monkeypatch):
 
 def test_permanent_error_is_not_retried(client, tmp_path, monkeypatch):
     """깨진 입력은 세 번 돌려도 결과가 같다 — 바로 실패로 둔다."""
-    monkeypatch.setattr(server, "MAX_ATTEMPTS", 3)
+    monkeypatch.setattr(config, "MAX_ATTEMPTS", 3)
     client.attach((320, 240))
     broken = tmp_path / "broken.mp4"
     broken.write_bytes(b"not a video at all" * 100)
@@ -396,7 +397,7 @@ def test_status_endpoint_reports_ready_and_queue(client, make_video):
 
 
 def test_health_is_503_before_model_is_ready(client):
-    server._anonymizer = None
+    worker._anonymizer = None
     r = client.get("/api/health")
     assert r.status_code == 503
     assert r.json()["ready"] is False
@@ -404,8 +405,8 @@ def test_health_is_503_before_model_is_ready(client):
 
 def test_upload_rejected_when_model_failed(client, make_video):
     path, n, size = make_video(frames=4)
-    server._anonymizer = None
-    server._model_error = "RuntimeError: 가중치 없음"
+    worker._anonymizer = None
+    worker.model_error = "RuntimeError: 가중치 없음"
 
     r = submit(client, path)
     assert r.status_code == 503
@@ -425,7 +426,7 @@ def test_submit_without_any_parameter(client, make_video):
         r = client.post("/api/jobs", files={"file": ("clip.mp4", f, "video/mp4")})
     jid = job_id(r)
 
-    assert server._JOBS[jid].params == server.JOB_DEFAULTS
+    assert jobsmod.JOBS[jid].params == server.JOB_DEFAULTS
     assert wait(client, jid)["status"] == "done"
 
 
@@ -441,7 +442,7 @@ def test_given_parameter_overrides_only_that_one(client, make_video):
     client.attach(size)
     jid = job_id(submit(client, path, conf="0.4"))
 
-    p = server._JOBS[jid].params
+    p = jobsmod.JOBS[jid].params
     assert p["conf"] == 0.4
     assert p["method"] == server.JOB_DEFAULTS["method"]
     assert p["batch_size"] == server.JOB_DEFAULTS["batch_size"]
@@ -454,7 +455,7 @@ def test_defaults_are_a_copy_not_the_live_dict(client, make_video):
     client.attach(size)
     jid = job_id(submit(client, path))
 
-    server._JOBS[jid].params["conf"] = 0.99
+    jobsmod.JOBS[jid].params["conf"] = 0.99
     assert server.JOB_DEFAULTS["conf"] != 0.99
     wait(client, jid)
 
@@ -490,8 +491,8 @@ def test_error_carries_actionable_fields(client):
 
 
 def test_retryable_errors_carry_retry_after(client, make_video, monkeypatch):
-    monkeypatch.setattr(server, "free_mb", lambda: 1)
-    monkeypatch.setattr(server, "MIN_FREE_MB", 2048)
+    monkeypatch.setattr(jobsmod, "free_mb", lambda: 1)
+    monkeypatch.setattr(config, "MIN_FREE_MB", 2048)
     path, n, size = make_video(frames=4)
     client.attach(size)
 
@@ -536,9 +537,9 @@ def test_job_failure_carries_a_code(client, make_video, monkeypatch):
             raise RuntimeError("CUDA out of memory")
 
     anon = VideoAnonymizer(detector=Broken())
-    monkeypatch.setattr(server, "get_anonymizer", lambda: anon)
-    monkeypatch.setattr(server, "_anonymizer", anon)
-    monkeypatch.setattr(server, "MAX_ATTEMPTS", 1)
+    monkeypatch.setattr(worker, "get_anonymizer", lambda: anon)
+    monkeypatch.setattr(worker, "_anonymizer", anon)
+    monkeypatch.setattr(config, "MAX_ATTEMPTS", 1)
 
     jid = job_id(submit(client, path))
     s = wait(client, jid, timeout=60)
@@ -553,8 +554,8 @@ def test_job_failure_carries_a_code(client, make_video, monkeypatch):
 def test_cancel_queued_job(client, make_video, monkeypatch):
     path, n, size = make_video(frames=40)
     anon = VideoAnonymizer(detector=SlowDetector(0.05))
-    monkeypatch.setattr(server, "get_anonymizer", lambda: anon)
-    monkeypatch.setattr(server, "_anonymizer", anon)
+    monkeypatch.setattr(worker, "get_anonymizer", lambda: anon)
+    monkeypatch.setattr(worker, "_anonymizer", anon)
 
     first = job_id(submit(client, path, batch_size="1"))
     second = job_id(submit(client, path, batch_size="1"))
@@ -571,8 +572,8 @@ def test_cancel_running_job_stops_it(client, make_video, monkeypatch):
     """수행 중인 작업도 다음 진행 보고에서 끊긴다."""
     path, n, size = make_video(frames=60)
     anon = VideoAnonymizer(detector=SlowDetector(0.03))
-    monkeypatch.setattr(server, "get_anonymizer", lambda: anon)
-    monkeypatch.setattr(server, "_anonymizer", anon)
+    monkeypatch.setattr(worker, "get_anonymizer", lambda: anon)
+    monkeypatch.setattr(worker, "_anonymizer", anon)
 
     jid = job_id(submit(client, path, batch_size="1"))
     for _ in range(200):                       # 실제로 돌기 시작할 때까지
@@ -608,16 +609,16 @@ def test_failed_jobs_survive_sweep(client, make_video, monkeypatch):
             raise RuntimeError("망가짐")
 
     anon = VideoAnonymizer(detector=Broken())
-    monkeypatch.setattr(server, "get_anonymizer", lambda: anon)
-    monkeypatch.setattr(server, "_anonymizer", anon)
-    monkeypatch.setattr(server, "MAX_ATTEMPTS", 1)
-    monkeypatch.setattr(server, "JOB_TTL", 1)
-    monkeypatch.setattr(server, "FAILED_TTL", 0)       # 기본값 = 안 지움
+    monkeypatch.setattr(worker, "get_anonymizer", lambda: anon)
+    monkeypatch.setattr(worker, "_anonymizer", anon)
+    monkeypatch.setattr(config, "MAX_ATTEMPTS", 1)
+    monkeypatch.setattr(config, "JOB_TTL", 1)
+    monkeypatch.setattr(config, "FAILED_TTL", 0)       # 기본값 = 안 지움
 
     jid = job_id(submit(client, path))
     wait(client, jid, timeout=60)
-    server._JOBS[jid].finished = time.time() - 9999
-    server.save_job(server._JOBS[jid])
+    jobsmod.JOBS[jid].finished = time.time() - 9999
+    jobsmod.save_job(jobsmod.JOBS[jid])
 
-    server.sweep()
+    jobsmod.sweep()
     assert client.get(f"/api/jobs/{jid}").status_code == 200
