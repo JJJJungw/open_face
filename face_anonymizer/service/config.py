@@ -16,6 +16,7 @@
     FA_QUEUE_MAX       대기열 개수 상한    (기본: 0 = 무제한)
     FA_BATCH_MAX       한 번에 넣을 개수   (기본: 0 = 무제한)
     FA_MIN_FREE_MB     최소 여유 디스크    (기본: 2048, 미달이면 507)
+    FA_KEEP_LOCAL_RESULT  S3 업로드 뒤에도 로컬 사본 유지 (기본: 0)
     FA_LIST_LIMIT      목록 기본 개수      (기본: 100)
     FA_MAX_ATTEMPTS    일시적 오류 재시도  (기본: 3)
 
@@ -89,6 +90,12 @@ def _bool_env(name, default):
 #
 # imgsz 는 검출기와 같은 값을 쓴다(FA_IMGSZ). 둘이 어긋나면 워밍업한 커널과
 # 실제 추론이 달라진다.
+# S3 작업은 결과를 버킷에 올린 뒤 로컬 사본을 바로 지운다. 다운로드 라우트가
+# 이미 "로컬에 없으면 S3 로 302" 이므로 들고 있을 이유가 없고, 안 지우면
+# 대량 처리에서 디스크가 먼저 찬다(docs/issues/001). 1 이면 예전처럼 남긴다.
+KEEP_LOCAL = _bool_env("FA_KEEP_LOCAL_RESULT", False)
+
+
 JOB_DEFAULTS = {
     "method": os.environ.get("FA_METHOD", "mosaic"),
     "conf": float(os.environ.get("FA_CONF", "0.25")),

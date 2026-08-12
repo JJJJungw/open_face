@@ -218,7 +218,6 @@
   a.dl{display:inline-block;background:var(--accent);color:#fff;text-decoration:none;
        border-radius:7px;padding:6px 13px;font-weight:600;font-size:12px}
   a.dl:hover{background:var(--accent-ink)}
-  video{width:100%;border-radius:8px;margin-top:10px;background:#000}
   .row{display:flex;gap:8px;align-items:center;margin-top:10px;flex-wrap:wrap}
 
   /* ── 좌측 하단 상태 박스 ────────────────────────────────────────────── */
@@ -836,8 +835,7 @@ function card(j) {
         · 렌더 ${fmt(t.render)} · ${r.video.width}×${r.video.height} · ${r.method}</div>
       <div class="row">
         <a class="dl" href="/api/jobs/${j.id}/download">내려받기</a>
-        <button class="ghost" onclick="preview('${j.id}')">미리보기</button>
-      </div><div id="pv-${j.id}"></div>`;
+      </div>`;
   }
   // 끝난 작업만 지울 수 있다. 대기·수행중은 '취소' 가 따로 있고, 둘을 같은
   // 자리에 두면 무엇이 멈추고 무엇이 사라지는지 구분이 안 된다.
@@ -849,10 +847,6 @@ function card(j) {
       <span class="tag ${tagcls}">${label}</span></div>${body}</div>`;
 }
 
-function preview(id) {
-  const el = document.getElementById('pv-' + id);
-  el.innerHTML = el.innerHTML ? '' : `<video controls src="/api/jobs/${id}/download"></video>`;
-}
 async function del(id) { await fetch('/api/jobs/' + id, { method:'DELETE' }); poll(); }
 async function cancel(id) {
   const r = await fetch(`/api/jobs/${id}/cancel`, { method:'POST' });
@@ -875,15 +869,9 @@ async function poll() {
   chip.hidden = !filter;
   if (filter) chip.innerHTML =
     `${FILTER_TEXT[filter]}만 <b onclick="setFilter('')" title="필터 해제">&times;</b>`;
-  const open = [...document.querySelectorAll('video')].map(v => v.parentElement.id);
   $('#jobs').innerHTML = shown.length ? shown.map(card).join('')
     : `<div class="empty">${filter ? `${FILTER_TEXT[filter]} 상태인 작업이 없습니다`
                                    : '작업이 없습니다'}</div>`;
-  open.forEach(pid => {
-    const el = document.getElementById(pid);
-    if (el && !el.innerHTML)
-      el.innerHTML = `<video controls src="/api/jobs/${pid.slice(3)}/download"></video>`;
-  });
   if (view === 'overview' && Date.now() - lastOverview > 10000) loadOverview();
   const busy = jobs.some(j => j.status === 'running' || j.status === 'queued');
   clearTimeout(timer);

@@ -158,12 +158,78 @@ def snapshot(j, queued_ahead=0):
     }
 
 
+def drop_media(j, why=""):
+    """작업 폴더에서 영상 파일만 지우고 ``job.json`` 은 남긴다.
+
+    원인을 보는 데 필요한 것은 사유·단계·시도 횟수이고 그건 전부 job.json 에
+    있다. 200MB 짜리 영상을 몇 KB 짜리 기록 때문에 붙들고 있을 이유가 없다.
+    S3 작업이면 원본도 결과물도 버킷에 있으므로 잃는 것이 없다.
+    """
+    workdir = j.workdir or os.path.join(config.JOBS_DIR, j.id)
+    freed = 0
+    for name in os.listdir(workdir) if os.path.isdir(workdir) else []:
+        if name == config.STATE_FILE:
+            continue
+        path = os.path.join(workdir, name)
+        try:
+            if os.path.isdir(path):
+                freed += _dir_size(path)
+                shutil.rmtree(path, ignore_errors=True)
+            else:
+                freed += os.path.getsize(path)
+                os.remove(path)
+        except OSError as e:                        # 지우기 실패로 작업을 망치지 않는다
+            log.warning("정리 실패 %s: %s", path, e)
+    if freed:
+        log.info("작업 %s 로컬 파일 정리 %.1f MB%s", j.id, freed / 1e6,
+                 f" ({why})" if why else "")
+    return freed
+
+
+def _dir_size(path):
+    total = 0
+    for root, _dirs, files in os.walk(path):
+        for f in files:
+            try:
+                total += os.path.getsize(os.path.join(root, f))
+            except OSError:
+                pass
+    return total
+
+
+def sweep_temp():
+    """죽은 프로세스가 남긴 임시 디렉터리를 치운다.
+
+    파이프라인은 작업 폴더 안에 ``.anon-*`` 를 만들고 finally 에서 지운다.
+    프로세스가 강제로 죽으면 그 finally 가 안 돈다 — 서버를 재시작할 때마다
+    하나씩 쌓인다.
+    """
+    removed = 0
+    for jid in os.listdir(config.JOBS_DIR) if os.path.isdir(config.JOBS_DIR) else []:
+        d = os.path.join(config.JOBS_DIR, jid)
+        if not os.path.isdir(d):
+            continue
+        for name in os.listdir(d):
+            if not name.startswith(".anon-"):
+                continue
+            with LOCK:
+                live = jid in JOBS and JOBS[jid].status == "running"
+            if live:                                # 지금 쓰고 있는 것은 건드리지 않는다
+                continue
+            shutil.rmtree(os.path.join(d, name), ignore_errors=True)
+            removed += 1
+    if removed:
+        log.info("남은 임시 디렉터리 %d개 정리", removed)
+    return removed
+
+
 def sweep():
     """TTL 지난 작업 정리.
 
     예전에는 새 작업이 들어올 때만 돌아서, 업로드가 끊기면 디스크가 영원히
     안 비워졌다. 지금은 백그라운드 스레드가 주기적으로 돈다.
     """
+    sweep_temp()
     if not config.JOB_TTL:
         return 0
     now, removed = time.time(), 0

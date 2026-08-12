@@ -339,15 +339,61 @@ def test_result_gives_presigned_url_for_s3_job(s3client):
     assert d["expires_in"] > 0
 
 
+# ── 로컬 디스크 정리 (docs/issues/001) ──────────────────────────────────────
+#
+# 결과물을 버킷에 올린 뒤에도 로컬 사본을 들고 있으면 대량 처리에서 디스크가
+# 먼저 찬다. 5분 클립 한 건이 입력 40~75MB + 결과물 131MB 다.
+
+def workdir_files(client, jid):
+    d = jobsmod.JOBS[jid].workdir
+    return sorted(os.listdir(d)) if os.path.isdir(d) else []
+
+
+def test_local_copy_is_removed_after_upload(s3client):
+    """S3 에 올렸으면 로컬에 남길 이유가 없다. 기록만 남긴다."""
+    jid = s3client.post("/api/jobs", data={"s3_key": KEY}).json()["accepted"][0]["id"]
+    s = wait(s3client, jid, timeout=60)
+
+    assert s["status"] == "done"
+    assert s3client.store.client.objects.get(s["s3_key"]), "결과물이 버킷에 있어야 한다"
+    assert workdir_files(s3client, jid) == ["job.json"]
+
+
 def test_download_redirects_to_s3_when_local_copy_is_gone(s3client):
-    """보관 기간에 로컬 사본이 정리돼도 S3 원본은 남아 있다."""
+    """로컬 사본이 정리돼도 받을 수 있어야 한다 — 정리의 전제다."""
     jid = s3client.post("/api/jobs", data={"s3_key": KEY}).json()["accepted"][0]["id"]
     wait(s3client, jid, timeout=60)
 
-    os.remove(jobsmod.JOBS[jid].output)
     r = s3client.get(f"/api/jobs/{jid}/download", follow_redirects=False)
     assert r.status_code == 302
     assert r.headers["location"].startswith("https://signed/")
+
+
+def test_keeping_the_local_copy_can_be_turned_back_on(s3client, monkeypatch):
+    """로컬에서 결과를 바로 열어 보고 싶을 때가 있다."""
+    monkeypatch.setattr(config, "KEEP_LOCAL", True)
+    jid = s3client.post("/api/jobs", data={"s3_key": KEY}).json()["accepted"][0]["id"]
+    wait(s3client, jid, timeout=60)
+
+    assert len(workdir_files(s3client, jid)) > 1
+
+
+def test_failed_s3_job_keeps_only_the_record(s3client, monkeypatch):
+    """실패 원인을 보는 데 필요한 건 job.json 뿐이다. 원본은 버킷에 있다."""
+    monkeypatch.setattr(config, "MAX_ATTEMPTS", 1)
+
+    class Broken:
+        def detect_batch(self, frames, imgsz=None, conf=None, iou=None):
+            raise RuntimeError("일시적인 척하는 영구 오류")
+    anon = VideoAnonymizer(detector=Broken())
+    monkeypatch.setattr(worker, "get_anonymizer", lambda: anon)
+
+    jid = s3client.post("/api/jobs", data={"s3_key": KEY}).json()["accepted"][0]["id"]
+    s = wait(s3client, jid, timeout=60)
+
+    assert s["status"] == "failed"
+    assert workdir_files(s3client, jid) == ["job.json"]
+    assert s["error"]["detail"]                      # 사유는 남아 있다
 
 
 def test_result_before_done_is_409(s3client):

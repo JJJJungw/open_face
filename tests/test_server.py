@@ -622,3 +622,58 @@ def test_failed_jobs_survive_sweep(client, make_video, monkeypatch):
 
     jobsmod.sweep()
     assert client.get(f"/api/jobs/{jid}").status_code == 200
+
+
+# ── 로컬 디스크 정리 (docs/issues/001) ──────────────────────────────────────
+
+def test_direct_upload_keeps_its_local_copy(client, make_video):
+    """S3 를 안 쓰는 업로드는 로컬이 유일한 사본이다. 지우면 결과가 사라진다."""
+    path, n, size = make_video(frames=6)
+    client.attach(size)
+    jid = job_id(submit(client, path))
+    s = wait(client, jid)
+
+    assert s["status"] == "done"
+    left = sorted(os.listdir(jobsmod.JOBS[jid].workdir))
+    assert left != ["job.json"], "업로드분까지 지우면 안 된다"
+    assert client.get(f"/api/jobs/{jid}/download").status_code == 200
+
+
+def test_sweep_removes_temp_dirs_left_by_a_killed_process(client, tmp_path, monkeypatch):
+    """파이프라인의 .anon-* 는 finally 에서 지워진다. 강제 종료되면 남는다."""
+    monkeypatch.setattr(config, "JOBS_DIR", str(tmp_path))
+    d = tmp_path / "abc123"
+    (d / ".anon-dead").mkdir(parents=True)
+    (d / ".anon-dead" / "noaudio.mp4").write_bytes(b"x" * 100)
+    (d / "job.json").write_text("{}", encoding="utf-8")
+
+    assert jobsmod.sweep_temp() == 1
+    assert not (d / ".anon-dead").exists()
+    assert (d / "job.json").exists(), "기록까지 지우면 안 된다"
+
+
+def test_sweep_does_not_touch_a_running_jobs_temp_dir(client, tmp_path, monkeypatch):
+    """지금 쓰고 있는 임시 디렉터리를 지우면 그 작업이 깨진다."""
+    monkeypatch.setattr(config, "JOBS_DIR", str(tmp_path))
+    jid = "live0001"
+    d = tmp_path / jid
+    (d / ".anon-live").mkdir(parents=True)
+    j = jobsmod.Job(id=jid, name="x.mp4", params={}, workdir=str(d), status="running")
+    monkeypatch.setattr(jobsmod, "JOBS", {jid: j})
+
+    assert jobsmod.sweep_temp() == 0
+    assert (d / ".anon-live").exists()
+
+
+def test_drop_media_keeps_the_record(tmp_path):
+    d = tmp_path / "j1"
+    d.mkdir()
+    (d / "input.mp4").write_bytes(b"x" * 5000)
+    (d / "out_deid.mp4").write_bytes(b"y" * 7000)
+    (d / "job.json").write_text("{}", encoding="utf-8")
+    j = jobsmod.Job(id="j1", name="x.mp4", params={}, workdir=str(d))
+
+    freed = jobsmod.drop_media(j)
+
+    assert freed == 12000
+    assert sorted(os.listdir(d)) == ["job.json"]

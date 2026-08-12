@@ -146,6 +146,11 @@ def fail_or_retry(j, exc, permanent):
     else:
         log.error("작업 %s 실패 [%s] (%d회 시도, %s): %s", j.id, info["code"],
                   j.attempts, "재시도 불가" if permanent else "재시도 소진", msg)
+        # 원인 파악에 필요한 것은 사유·단계·시도 횟수이고 전부 job.json 에
+        # 있다. S3 작업이면 원본도 버킷에 그대로다 — 200MB 를 붙들고 있을
+        # 이유가 없다. 직접 업로드는 원본이 여기밖에 없어 남긴다.
+        if j.s3_key:
+            jobs.drop_media(j, "실패 — 기록만 남긴다")
 
 
 def run(job_id):
@@ -163,6 +168,21 @@ def run(job_id):
         j.attempts += 1
         params, workdir, name = dict(j.params), j.workdir, j.name
     jobs.save_job(j)
+
+    # 제출 시점에만 보면 500건짜리 배치 도중에 디스크가 차는 것을 못 잡는다.
+    # 부족하면 정리를 한 번 강제로 돌려 회수부터 시도한다 — TTL 지난 것이
+    # 남아 있으면 그때 비워진다.
+    if config.MIN_FREE_MB:
+        free = jobs.free_mb()
+        if free is not None and free < config.MIN_FREE_MB:
+            log.warning("여유 %sMB — 정리를 먼저 돌린다", free)
+            jobs.sweep()
+            free = jobs.free_mb()
+        if free is not None and free < config.MIN_FREE_MB:
+            fail_or_retry(j, errors.INSUFFICIENT_STORAGE(
+                f"남은 공간 {free}MB, 최소 {config.MIN_FREE_MB}MB 가 필요합니다"),
+                permanent=False)
+            return
 
     def progress(stage, done, total):
         # 취소는 여기서만 끊을 수 있다. 파이프라인이 프레임마다 부르는 유일한
@@ -222,6 +242,12 @@ def run(job_id):
             }
             j.error = {}
         jobs.save_job(j)
+        # 결과는 이미 버킷에 있다. 로컬 사본을 TTL 동안 들고 있으면 대량
+        # 처리에서 디스크가 먼저 찬다(docs/issues/001). 다운로드 라우트가
+        # "로컬에 없으면 S3 로 302" 이므로 잃는 것이 없다. 직접 업로드는
+        # 로컬이 유일한 사본이라 건드리지 않는다.
+        if j.s3_key and j.s3_output and not config.KEEP_LOCAL:
+            jobs.drop_media(j, "S3 업로드 완료")
     except JobCancelled:
         with jobs.LOCK:
             j.status, j.finished = "cancelled", time.time()
