@@ -18,8 +18,11 @@
     FA_MIN_FREE_MB     최소 여유 디스크    (기본: 2048, 미달이면 507)
     FA_KEEP_LOCAL_RESULT  S3 업로드 뒤에도 로컬 사본 유지 (기본: 0)
     FA_RECOVER         기동 시 중단 작업 복구 (기본: 1)
+    FA_RETRY_DELAYS    재시도 간격 목록    (기본: 5,30,60 — 95초 창)
+    FA_DEFER_SEC       보류 재확인 간격    (기본: 60)
+    FA_DEFER_MAX_SEC   보류 상한           (기본: 1800, 넘으면 실패)
     FA_LIST_LIMIT      목록 기본 개수      (기본: 100)
-    FA_MAX_ATTEMPTS    일시적 오류 재시도  (기본: 3)
+    FA_MAX_ATTEMPTS    일시적 오류 재시도  (기본: 4 = 처음 1회 + 재시도 3회)
 
 처리 파라미터 기본값 (JOB_DEFAULTS)
     FA_METHOD mosaic · FA_CONF 0.25 · FA_BATCH_SIZE 32 · FA_PAD 0.15
@@ -65,7 +68,8 @@ BATCH_MAX = int(os.environ.get("FA_BATCH_MAX", 0))          # 0 = 무제한
 FAILED_TTL = int(os.environ.get("FA_FAILED_TTL_MIN", 0)) * 60
 MIN_FREE_MB = int(os.environ.get("FA_MIN_FREE_MB", 2048))   # 0 = 검사 안 함
 LIST_LIMIT = int(os.environ.get("FA_LIST_LIMIT", 100))
-MAX_ATTEMPTS = int(os.environ.get("FA_MAX_ATTEMPTS", 3))
+# 처음 1회 + 재시도 3회. RETRY_DELAYS 와 짝이다.
+MAX_ATTEMPTS = int(os.environ.get("FA_MAX_ATTEMPTS", 4))
 
 # 다시 시도해도 결과가 같은 오류들. 깨진 파일이나 잘못된 인자를 세 번 돌리는 건
 # 그냥 낭비이고, 그동안 뒤에 쌓인 정상 작업이 밀린다.
@@ -98,6 +102,31 @@ KEEP_LOCAL = _bool_env("FA_KEEP_LOCAL_RESULT", False)
 # 기동 시 중단된 작업 정리. --workers N 으로 띄울 때는 한 프로세스만 켜 둔다 —
 # 여럿이 켜면 각자 같은 작업을 재큐해 중복 처리한다.
 RECOVER = _bool_env("FA_RECOVER", True)
+
+# 재시도 간격. 세 번을 같은 순간에 시도하면 세 번 다 같은 세상을 본다 —
+# 시도는 했는데 기다리지는 않은 것이다(docs/issues/003).
+#
+#   5초 -> 30초 -> 60초.  처음 1회 + 재시도 3회로 95초짜리 창을 덮는다.
+#
+# 공식(base x factor^n) 대신 **목록**으로 둔다. 재시도가 서너 번뿐이라 지수의
+# 이점(적은 시도로 자릿수를 덮는 것)이 거의 없고, 목록은 보는 순간 동작이
+# 보인다. 시도가 목록보다 많으면 마지막 값을 계속 쓴다.
+#
+# 첫 간격이 5초인 것은 S3 순단이 대부분 여기서 끝나기 때문이다 — 흔한 경우를
+# 빨리 통과시킨다. 창이 95초로 긴 것은 거의 순수한 이득이다. 대기가 큐를
+# 막지 않으므로(예약 방식) 처리량 손해가 없고, 그 시간을 쓰는 것은 정말
+# 일시적일 수 있는 오류뿐이다 — 권한 없음이나 키 오타는 애초에 재시도 대상이
+# 아니라 즉시 실패한다.
+RETRY_DELAYS = tuple(
+    float(x) for x in os.environ.get("FA_RETRY_DELAYS", "5,30,60").split(",") if x.strip()
+) or (5.0,)
+RETRY_JITTER = float(os.environ.get("FA_RETRY_JITTER", 0.2))   # ±20%
+
+# 보류는 재시도와 다르다. 실패가 아니라 "아직 시작할 조건이 안 됐다" 이므로
+# 시도 횟수를 쓰지 않는다 — 디스크를 세 번 확인했다고 포기할 일이 아니다.
+# 대신 상한을 둔다. 영구히 찬 디스크를 영원히 숨기지 않기 위해서다.
+DEFER_SEC = float(os.environ.get("FA_DEFER_SEC", 60))
+DEFER_MAX_SEC = float(os.environ.get("FA_DEFER_MAX_SEC", 1800))
 
 
 JOB_DEFAULTS = {

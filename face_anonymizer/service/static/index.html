@@ -793,8 +793,14 @@ function card(j) {
       <div class="row"><button class="ghost" onclick="cancel('${j.id}')">취소</button></div>`;
   } else if (j.status === 'queued') {
     const retry = j.attempts ? ` · 재시도 ${j.attempts}/${j.max_attempts}` : '';
+    // 그냥 '대기' 로 두면 왜 안 도는지 알 수 없다. 기다리는 이유를 적는다.
+    const why = { retry: '재시도 대기', defer: '보류' }[j.waiting];
+    const head = why ? `${why} · ${fmt(j.wait_left)} 뒤`
+                     : `앞에 ${j.queued_ahead}건`;
+    const reason = (j.waiting === 'defer' && j.error && j.error.title)
+                 ? `<br><span style="opacity:.8">${j.error.title}</span>` : '';
     body = `<div class="bar2"><i style="width:0"></i></div>
-      <div class="meta">앞에 ${j.queued_ahead}건${retry}</div>
+      <div class="meta">${head}${retry}${reason}</div>
       <div class="row"><button class="ghost" onclick="cancel('${j.id}')">취소</button></div>`;
   } else if (j.status === 'failed' || j.status === 'cancelled') {
     const e = j.error || {};

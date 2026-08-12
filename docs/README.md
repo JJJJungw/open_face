@@ -41,7 +41,7 @@
 |---|---|---|
 | [001](issues/001-disk-fills-up.md) | 처리가 끝나도 로컬 파일이 남아 디스크가 찬다 | **해결됨** |
 | [002](issues/002-queue-lost-on-restart.md) | 재시작하면 대기 중인 작업이 전부 실패로 바뀐다 | **해결됨** |
-| [003](issues/003-retry-without-backoff.md) | 재시도에 간격이 없어 3회가 순식간에 소진된다 | 미해결 |
+| [003](issues/003-retry-without-backoff.md) | 재시도에 간격이 없어 3회가 순식간에 소진된다 | **해결됨** |
 | [004](issues/004-cancel-blind-spot.md) | S3 전송 중에는 취소가 먹지 않는다 | 미해결 |
 | [005](issues/005-progress-api-cost.md) | 진척률 API 가 폴더 수만큼 S3 를 호출한다 | 미해결 |
 

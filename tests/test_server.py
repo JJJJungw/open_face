@@ -391,6 +391,7 @@ def test_queue_max_still_works_when_set(client, make_video, monkeypatch):
 def test_transient_failure_is_retried(client, make_video, monkeypatch):
     """일시적 오류는 다시 큐에 넣는다."""
     monkeypatch.setattr(config, "MAX_ATTEMPTS", 3)
+    monkeypatch.setattr(config, "RETRY_DELAYS", (0.01,))   # 테스트는 기다리지 않는다
     path, n, size = make_video(frames=6)
     calls = {"n": 0}
 
@@ -414,6 +415,7 @@ def test_transient_failure_is_retried(client, make_video, monkeypatch):
 
 def test_retries_are_exhausted_then_failed(client, make_video, monkeypatch):
     monkeypatch.setattr(config, "MAX_ATTEMPTS", 2)
+    monkeypatch.setattr(config, "RETRY_DELAYS", (0.01,))
     path, n, size = make_video(frames=6)
 
     class AlwaysBroken:
@@ -435,6 +437,7 @@ def test_retries_are_exhausted_then_failed(client, make_video, monkeypatch):
 def test_permanent_error_is_not_retried(client, tmp_path, monkeypatch):
     """깨진 입력은 세 번 돌려도 결과가 같다 — 바로 실패로 둔다."""
     monkeypatch.setattr(config, "MAX_ATTEMPTS", 3)
+    monkeypatch.setattr(config, "RETRY_DELAYS", (0.01,))
     client.attach((320, 240))
     broken = tmp_path / "broken.mp4"
     broken.write_bytes(b"not a video at all" * 100)
@@ -748,3 +751,103 @@ def test_drop_media_keeps_the_record(tmp_path):
 
     assert freed == 12000
     assert sorted(os.listdir(d)) == ["job.json"]
+
+
+# ── 재시도 백오프와 보류 (docs/issues/003) ──────────────────────────────────
+#
+# 세 번을 같은 순간에 시도하면 세 번 다 같은 세상을 본다. 시도는 했는데
+# 기다리지는 않은 것이다. 실제로 리전을 틀리게 준 서버에서 attempts 가 첫
+# 조회에 이미 3 이었다 — 연결 거부가 즉시 오니까 셋이 몇 밀리초 만에 끝났다.
+
+def test_backoff_follows_the_configured_list():
+    """5 -> 30 -> 60. 처음 1회 + 재시도 3회로 95초짜리 창을 덮는다."""
+    assert config.RETRY_DELAYS == (5, 30, 60)
+    assert config.MAX_ATTEMPTS == 4
+    assert sum(config.RETRY_DELAYS) == 95
+
+    for attempt, base in ((1, 5), (2, 30), (3, 60)):
+        got = [worker.backoff_for(attempt) for _ in range(50)]
+        assert all(base * 0.8 <= x <= base * 1.2 for x in got), (attempt, min(got), max(got))
+
+
+def test_backoff_reuses_the_last_delay_when_attempts_exceed_the_list(monkeypatch):
+    """목록이 짧아도 계산이 깨지면 안 된다."""
+    monkeypatch.setattr(config, "RETRY_DELAYS", (10,))
+    assert 8 <= worker.backoff_for(1) <= 12
+    assert 8 <= worker.backoff_for(9) <= 12
+
+
+def test_backoff_has_jitter():
+    """여러 건이 같은 순간에 실패했을 때 회복 순간에 몰리지 않게 흩뜨린다."""
+    got = {round(worker.backoff_for(1), 4) for _ in range(30)}
+    assert len(got) > 25, "간격이 전부 같으면 지터가 없는 것이다"
+
+
+def test_retry_is_scheduled_not_slept(client, make_video, monkeypatch):
+    """자면 뒤에 쌓인 정상 작업까지 멈춘다. 예약이어야 한다."""
+    monkeypatch.setattr(config, "MAX_ATTEMPTS", 2)
+    delays = []
+    monkeypatch.setattr(worker, "schedule",
+                        lambda jid, delay: delays.append(delay))
+
+    path, n, size = make_video(frames=6)
+    client.attach(size)                         # 먼저 붙이고
+
+    class Broken:
+        def detect_batch(self, frames, imgsz=None, conf=None, iou=None):
+            raise RuntimeError("일시적인 척")
+    anon = VideoAnonymizer(detector=Broken())
+    monkeypatch.setattr(worker, "get_anonymizer", lambda: anon)   # 덮어쓴다
+
+    jid = job_id(submit(client, path))
+    for _ in range(200):
+        if delays:
+            break
+        time.sleep(0.02)
+
+    assert delays and 4 <= delays[0] <= 6, delays   # 첫 간격 5초 ±20%
+    s = client.get(f"/api/jobs/{jid}").json()
+    assert s["waiting"] == "retry" and s["wait_left"] > 0
+
+
+def test_defer_does_not_burn_an_attempt(tmp_path, monkeypatch):
+    """디스크 부족은 이 작업이 실패한 것이 아니다. 세 번 확인했다고 포기할 일이 아니다."""
+    monkeypatch.setattr(config, "JOBS_DIR", str(tmp_path))
+    monkeypatch.setattr(worker, "schedule", lambda jid, delay: None)
+    j = jobsmod.Job(id="d1", name="x.mp4", params={}, workdir=str(tmp_path / "d1"))
+    os.makedirs(j.workdir, exist_ok=True)
+    j.attempts = 1
+
+    worker.defer(j, errors.INSUFFICIENT_STORAGE, "남은 공간 10MB")
+
+    assert j.attempts == 1                      # 그대로
+    assert j.status == "queued"
+    assert j.waiting == "defer"
+    assert j.not_before > time.time()
+
+
+def test_defer_gives_up_after_the_cap(tmp_path, monkeypatch):
+    """영구히 찬 디스크를 영원히 숨기면 안 된다."""
+    monkeypatch.setattr(config, "JOBS_DIR", str(tmp_path))
+    monkeypatch.setattr(config, "DEFER_MAX_SEC", 60)
+    monkeypatch.setattr(worker, "schedule", lambda jid, delay: None)
+    j = jobsmod.Job(id="d2", name="x.mp4", params={}, workdir=str(tmp_path / "d2"))
+    os.makedirs(j.workdir, exist_ok=True)
+    j.deferred_since = time.time() - 120        # 2분째 기다리는 중
+
+    worker.defer(j, errors.INSUFFICIENT_STORAGE, "남은 공간 10MB")
+
+    assert j.status == "failed"
+    assert j.error["code"] == "insufficient_storage"
+    assert j.error["policy"] == "deferred_too_long"
+
+
+def test_starting_clears_the_wait_marks(client, make_video, monkeypatch):
+    """보류가 풀렸는데 화면에 '보류' 가 남아 있으면 안 된다."""
+    path, n, size = make_video(frames=6)
+    client.attach(size)
+    jid = job_id(submit(client, path))
+    wait(client, jid)
+
+    s = client.get(f"/api/jobs/{jid}").json()
+    assert s["waiting"] == "" and s["wait_left"] == 0

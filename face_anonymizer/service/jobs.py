@@ -50,6 +50,10 @@ class Job:
     created: float = field(default_factory=time.time)
     finished: float = 0.0
     started: float = 0.0          # 실제로 돌기 시작한 시각 (대기 시간 제외)
+    # 이 시각 전에는 꺼내지 않는다. 재시도 백오프와 보류가 같이 쓴다.
+    not_before: float = 0.0
+    waiting: str = ""             # "" | retry | defer — 왜 기다리는가
+    deferred_since: float = 0.0   # 보류가 시작된 시각 (상한 판정용)
     stage_t0: float = 0.0
 
 
@@ -147,8 +151,13 @@ def snapshot(j, queued_ahead=0):
                if j.status == "running" and overall > 0
                and j.stage in ("detect", "render") else 0.0)
 
+    # 왜 안 도는지 화면이 말할 수 있어야 한다. not_before 가 미래인 queued 는
+    # 그냥 '대기' 가 아니라 '재시도 대기' 나 '보류' 다.
+    wait_left = max(0, round(j.not_before - time.time())) if j.not_before else 0
+
     return {
         "id": j.id, "name": j.name, "status": j.status, "stage": j.stage,
+        "waiting": j.waiting if wait_left else "", "wait_left": wait_left,
         "percent": pct, "overall": overall, "fps": round(fps, 1),
         "eta": round(eta), "job_eta": round(job_eta),
         "job_elapsed": round(job_elapsed), "error": j.error, "result": j.result,

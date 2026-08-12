@@ -13,6 +13,7 @@
 
 import errno
 import logging
+import random
 import os
 import shutil
 import threading
@@ -117,6 +118,67 @@ class JobCancelled(Exception):
     """진행 콜백이 취소 요청을 보고 던진다."""
 
 
+def schedule(jid, delay):
+    """``delay`` 초 뒤에 워커에 올린다.
+
+    **자는 게 아니라 예약한다.** 워커가 하나뿐이라 ``sleep`` 을 넣으면 뒤에
+    쌓인 정상 작업까지 그동안 멈춘다. 재시도 대기가 큐 전체를 막는 것은 원래
+    문제보다 나쁘다.
+
+    타이머는 프로세스가 죽으면 사라진다. 그래도 유실되지 않는 이유는 그 작업이
+    ``queued`` 로 남아 있어 **재시작 때 다시 큐에 들어가기** 때문이다
+    (docs/issues/002).
+    """
+    if delay <= 0:
+        EXEC.submit(run, jid)
+        return
+    t = threading.Timer(delay, lambda: EXEC.submit(run, jid))
+    t.daemon = True                 # 대기 중인 재시도가 종료를 막지 않는다
+    t.start()
+
+
+def backoff_for(attempt):
+    """``attempt`` 번 실패한 뒤 얼마나 기다릴지. 기본 5초 -> 30초 -> 60초.
+
+    목록이 시도 횟수보다 짧으면 마지막 값을 계속 쓴다.
+
+    지터를 섞는 이유는 여러 건이 같은 순간에 실패했을 때 회복하는 순간 한꺼번에
+    몰리지 않게 하기 위해서다. 지금은 워커가 하나라 어차피 직렬화되어 효과가
+    크지 않지만, 워커가 늘거나 배치 실행기로 갈 때 필요해진다.
+    """
+    delays = config.RETRY_DELAYS
+    base = delays[min(max(0, attempt - 1), len(delays) - 1)]
+    jitter = base * config.RETRY_JITTER
+    return max(0.0, base + random.uniform(-jitter, jitter))
+
+
+def defer(j, problem, why):
+    """실패가 아니라 **아직 시작할 조건이 안 됐다.**
+
+    시도 횟수를 쓰지 않는다 — 디스크를 세 번 확인했다고 포기할 일이 아니다.
+    대신 상한을 둔다. 영구히 찬 디스크를 영원히 숨기면 안 된다.
+    """
+    now = time.time()
+    with jobs.LOCK:
+        if not j.deferred_since:
+            j.deferred_since = now
+        waited = now - j.deferred_since
+        if waited > config.DEFER_MAX_SEC:
+            j.status, j.finished = "failed", now
+            j.error = problem(f"{why} — {round(waited / 60)}분째 기다렸습니다").body()
+            j.error["policy"] = "deferred_too_long"
+            j.waiting, j.not_before = "", 0.0
+        else:
+            j.status, j.waiting = "queued", "defer"
+            j.not_before = now + config.DEFER_SEC
+    jobs.save_job(j)
+    if j.status == "failed":
+        log.error("작업 %s 보류 상한 초과 (%.0f분): %s", j.id, waited / 60, why)
+        return
+    log.warning("작업 %s 보류 — %s (%.0f초 뒤 다시 확인)", j.id, why, config.DEFER_SEC)
+    schedule(j.id, config.DEFER_SEC)
+
+
 def fail_or_retry(j, exc, permanent):
     """실패 처리. 일시적 오류면 다시 큐에 넣는다.
 
@@ -140,9 +202,13 @@ def fail_or_retry(j, exc, permanent):
             j.status, j.finished = "failed", time.time()
     jobs.save_job(j)
     if retryable:
-        log.warning("작업 %s 실패 [%s] (%d/%d회) — 다시 시도한다: %s",
-                    j.id, info["code"], j.attempts, config.MAX_ATTEMPTS, msg)
-        EXEC.submit(run, j.id)
+        delay = backoff_for(j.attempts)
+        with jobs.LOCK:
+            j.not_before, j.waiting = time.time() + delay, "retry"
+        jobs.save_job(j)
+        log.warning("작업 %s 실패 [%s] (%d/%d회) — %.0f초 뒤 다시 시도한다: %s",
+                    j.id, info["code"], j.attempts, config.MAX_ATTEMPTS, delay, msg)
+        schedule(j.id, delay)
     else:
         log.error("작업 %s 실패 [%s] (%d회 시도, %s): %s", j.id, info["code"],
                   j.attempts, "재시도 불가" if permanent else "재시도 소진", msg)
@@ -163,15 +229,17 @@ def run(job_id):
             j.status, j.finished = "cancelled", j.finished or time.time()
             jobs.save_job(j)
             return
-        j.status, j.stage_t0 = "running", time.time()
-        j.started = time.time()
-        j.attempts += 1
-        params, workdir, name = dict(j.params), j.workdir, j.name
-    jobs.save_job(j)
 
-    # 제출 시점에만 보면 500건짜리 배치 도중에 디스크가 차는 것을 못 잡는다.
-    # 부족하면 정리를 한 번 강제로 돌려 회수부터 시도한다 — TTL 지난 것이
-    # 남아 있으면 그때 비워진다.
+    # 아직 예약 시각이 안 됐으면(재시도 대기·보류) 여기서 물러난다. 타이머가
+    # 겹쳐 도는 경우를 막는다.
+    if j.not_before and time.time() < j.not_before:
+        return
+
+    # 시작할 조건을 **시도 횟수를 쓰기 전에** 본다. 디스크 부족은 이 작업이
+    # 실패한 것이 아니므로 재시도를 소모하면 안 된다(docs/issues/003).
+    #
+    # 제출 시점에만 보면 500건짜리 배치 도중에 차는 것을 못 잡는다. 부족하면
+    # 정리를 한 번 강제로 돌려 회수부터 시도한다.
     if config.MIN_FREE_MB:
         free = jobs.free_mb()
         if free is not None and free < config.MIN_FREE_MB:
@@ -179,10 +247,17 @@ def run(job_id):
             jobs.sweep()
             free = jobs.free_mb()
         if free is not None and free < config.MIN_FREE_MB:
-            fail_or_retry(j, errors.INSUFFICIENT_STORAGE(
-                f"남은 공간 {free}MB, 최소 {config.MIN_FREE_MB}MB 가 필요합니다"),
-                permanent=False)
+            defer(j, errors.INSUFFICIENT_STORAGE,
+                  f"남은 공간 {free}MB, 최소 {config.MIN_FREE_MB}MB 가 필요합니다")
             return
+
+    with jobs.LOCK:
+        j.status, j.stage_t0 = "running", time.time()
+        j.started = time.time()
+        j.attempts += 1
+        j.not_before, j.waiting, j.deferred_since = 0.0, "", 0.0
+        params, workdir, name = dict(j.params), j.workdir, j.name
+    jobs.save_job(j)
 
     def progress(stage, done, total):
         # 취소는 여기서만 끊을 수 있다. 파이프라인이 프레임마다 부르는 유일한
