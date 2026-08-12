@@ -14,7 +14,8 @@ import pytest
 
 from conftest import FakeDetector, face_rect, read_frames, region_is_obscured
 
-from face_anonymizer import VideoAnonymizer, ingest
+from face_anonymizer import VideoAnonymizer
+from face_anonymizer.core import ingest
 
 pytestmark = pytest.mark.skipif(not shutil.which("ffmpeg"), reason="ffmpeg 없음")
 
@@ -94,7 +95,7 @@ def test_av1_runs_end_to_end(tmp_path, make_video):
 
 def test_unreadable_input_fails_permanently(tmp_path):
     """깨진 입력은 재시도해도 같다 — VideoOpenError 계열로 던진다."""
-    from face_anonymizer.pipeline import VideoOpenError
+    from face_anonymizer.core.pipeline import VideoOpenError
     broken = tmp_path / "broken.mp4"
     broken.write_bytes(b"not a video" * 100)
 
@@ -103,7 +104,7 @@ def test_unreadable_input_fails_permanently(tmp_path):
 
 
 def test_missing_input_is_reported_as_video_open_error(tmp_path):
-    from face_anonymizer.pipeline import VideoOpenError
+    from face_anonymizer.core.pipeline import VideoOpenError
     with pytest.raises(VideoOpenError):
         ingest.ensure_decodable(str(tmp_path / "nope.mp4"), str(tmp_path / "w"))
 

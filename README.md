@@ -49,11 +49,28 @@ res = anonymizer.process("input.mp4", "output_anon.mp4",
 print(res.frames, res.raw_boxes, res.filled_boxes, res.audio)
 ```
 
+## 구조
+
+```
+face_anonymizer/
+├── core/       영상 처리. 서버도 S3 도 없이 돈다 (fastapi·boto3 임포트 안 함)
+├── service/    HTTP API · 웹 UI · 운영 지표
+├── storage/    S3 입출력 · 데이터셋 이름 규칙
+└── cli.py      명령줄 진입점
+tests/          회귀 테스트 195개. 가중치·torch·GPU 없이 40초
+weights/        가중치 (setup_weights.py 가 받는다)
+third_party/    YOLO-FaceV2 리포 (체크포인트 unpickle 에 필요)
+```
+
+의존은 **한 방향**이다. `service` 와 `storage` 는 `core` 를 쓰지만 `core` 는
+둘을 모른다. 덕분에 코어만 떼어 배치 워커로 쓸 수 있고, 테스트가 가짜 검출기로
+torch 없이 돈다. 폴더마다 README 가 있으니 자세한 건 거기를 보면 된다.
+
 ## HTTP API + 웹 UI
 
 ```bash
 pip install -r requirements.txt -r requirements-serve.txt
-uvicorn face_anonymizer.server:app --host 0.0.0.0 --port 8000
+uvicorn face_anonymizer.service.server:app --host 0.0.0.0 --port 8000
 ```
 
 브라우저로 열면 S3 를 콘솔처럼 훑으면서 파일이나 폴더를 골라 제출하고, 진행률·fps·남은 시간을 보면서 결과를 내려받을 수 있다.

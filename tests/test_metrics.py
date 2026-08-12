@@ -8,9 +8,9 @@ import time
 
 import pytest
 
-from face_anonymizer import metrics
-from face_anonymizer import s3 as s3mod
-from face_anonymizer.server import Job
+from face_anonymizer.service import metrics
+from face_anonymizer.storage import s3 as s3mod
+from face_anonymizer.service.server import Job
 
 from test_s3 import NOW, FakeS3Client            # noqa: E402
 

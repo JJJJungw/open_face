@@ -1,7 +1,14 @@
 # weights & third-party repo (setup_weights.py 로 받음 — 커밋하지 않음)
+# 폴더가 무엇을 담는 곳인지는 README 로 남기므로 그것만 예외로 둔다.
 weights/*.pt
 weights/*.onnx
-third_party/
+third_party/*
+!third_party/README.md
+!third_party/.gitkeep
+
+# 브릿지로 파일을 옮길 때 쓰는 임시 자리
+_stage/
+_to_delete/
 
 # 입출력 영상
 *.mp4

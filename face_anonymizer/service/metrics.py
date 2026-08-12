@@ -22,7 +22,7 @@ import shutil
 import subprocess
 import time
 
-from . import naming
+from ..storage import naming
 
 VIDEO_EXT = {".mp4", ".mov", ".mkv", ".avi", ".webm", ".m4v"}
 NVIDIA_TIMEOUT = 4

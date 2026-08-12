@@ -12,7 +12,7 @@
 
 import pytest
 
-from face_anonymizer import naming
+from face_anonymizer.storage import naming
 
 
 def test_parses_the_convention():

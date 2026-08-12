@@ -17,8 +17,9 @@ pytest.importorskip("httpx", reason="pip install -r requirements-dev.txt")
 
 from fastapi.testclient import TestClient            # noqa: E402
 
-from face_anonymizer import VideoAnonymizer, server  # noqa: E402
-from face_anonymizer import s3 as s3mod              # noqa: E402
+from face_anonymizer import VideoAnonymizer                # noqa: E402
+from face_anonymizer.service import server                 # noqa: E402
+from face_anonymizer.storage import s3 as s3mod              # noqa: E402
 
 
 NOW = dt.datetime(2026, 8, 7, 0, 18)

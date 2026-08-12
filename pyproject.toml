@@ -31,7 +31,16 @@ dev = [
 face-anonymize = "face_anonymizer.cli:main"
 
 [tool.setuptools]
-packages = ["face_anonymizer"]
+packages = [
+    "face_anonymizer",
+    "face_anonymizer.core",      # 영상 처리 (서버·S3 없이 돈다)
+    "face_anonymizer.service",   # HTTP API · 웹 UI · 지표
+    "face_anonymizer.storage",   # S3 · 이름 규칙
+]
+
+# 웹 UI 는 static/index.html 파일 하나다. 빠지면 서버가 기동에서 터진다.
+[tool.setuptools.package-data]
+"face_anonymizer.service" = ["static/*.html"]
 
 [tool.pytest.ini_options]
 testpaths = ["tests"]

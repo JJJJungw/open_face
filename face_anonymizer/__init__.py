@@ -1,6 +1,6 @@
 """face_anonymizer — YOLO-FaceV2 + ByteTrack 기반 영상 얼굴 비식별화."""
 
-from .pipeline import (
+from .core.pipeline import (
     Result,
     VideoAnonymizer,
     VideoInfo,
@@ -27,6 +27,6 @@ def __getattr__(name):
     ``from face_anonymizer import VideoAnonymizer`` 가 된다.
     """
     if name == "FaceDetector":
-        from .detector import FaceDetector
+        from .core.detector import FaceDetector
         return FaceDetector
     raise AttributeError(f"module {__name__!r} has no attribute {name!r}")

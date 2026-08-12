@@ -15,7 +15,7 @@ import pytest
 from conftest import FakeDetector, face_rect, read_frames, region_is_obscured
 
 from face_anonymizer import VideoAnonymizer
-from face_anonymizer.tracking import (
+from face_anonymizer.core.tracking import (
     TRACK_SCORE_FLOOR,
     interpolate,
     make_tracker,

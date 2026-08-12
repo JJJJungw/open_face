@@ -50,7 +50,7 @@ S3 설정은 face_anonymizer/s3.py 참고 (FA_S3_BUCKET 등). 버킷이 설정�
     FA_MAX_ATTEMPTS    일시적 오류 재시도  (기본: 3)
 
 실행
-    uvicorn face_anonymizer.server:app --host 0.0.0.0 --port 8000
+    uvicorn face_anonymizer.service.server:app --host 0.0.0.0 --port 8000
 """
 
 import errno
@@ -73,10 +73,11 @@ except ImportError:                   # pragma: no cover
 from fastapi import FastAPI, Request, Response
 from fastapi.responses import FileResponse, HTMLResponse, RedirectResponse
 
-from . import errors, metrics, naming
-from . import s3 as s3mod
-from .anonymize import METHODS
-from .pipeline import (
+from ..core.anonymize import METHODS
+from ..storage import naming
+from . import errors, metrics
+from ..storage import s3 as s3mod
+from ..core.pipeline import (
     DEFAULT_BITRATE_RATIO,
     DEFAULT_CRF,
     DEFAULT_HEIGHT,

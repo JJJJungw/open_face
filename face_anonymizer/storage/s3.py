@@ -46,7 +46,7 @@ class S3Error(RuntimeError):
 
 def wrap(e, what):
     """botocore 예외를 원인이 드러나는 S3Error 로."""
-    from . import errors                             # 지연 임포트 (순환 방지)
+    from ..service import errors                     # 지연 임포트 (순환 방지)
     code = ""
     resp = getattr(e, "response", None)
     if isinstance(resp, dict):

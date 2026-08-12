@@ -18,7 +18,8 @@ pytest.importorskip("httpx", reason="pip install -r requirements-dev.txt")
 
 from fastapi.testclient import TestClient           # noqa: E402
 
-from face_anonymizer import VideoAnonymizer, server  # noqa: E402
+from face_anonymizer import VideoAnonymizer                # noqa: E402
+from face_anonymizer.service import server                 # noqa: E402
 
 
 @pytest.fixture
@@ -463,7 +464,7 @@ def test_defaults_are_a_copy_not_the_live_dict(client, make_video):
 # 호출하는 쪽은 재시도할지, 다른 인스턴스로 보낼지, 사람을 불러야 할지를 정해야
 # 한다. 한국어 문장을 파싱해서 정할 수는 없다.
 
-from face_anonymizer import errors                    # noqa: E402
+from face_anonymizer.service import errors            # noqa: E402
 
 
 def test_errors_are_problem_json(client):

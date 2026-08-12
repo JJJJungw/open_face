@@ -16,7 +16,7 @@ import pytest
 from conftest import FakeDetector, read_frames
 
 from face_anonymizer import VideoAnonymizer
-from face_anonymizer import pipeline as P
+from face_anonymizer.core import pipeline as P
 
 pytestmark = pytest.mark.skipif(
     not (shutil.which("ffmpeg") and shutil.which("ffprobe")),

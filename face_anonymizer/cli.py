@@ -19,8 +19,10 @@ import os
 import sys
 import time
 
-from . import __version__, naming
-from .pipeline import DetectionSanityError, VideoOpenError, VideoWriteError
+from . import __version__
+from .storage import naming
+from .core.pipeline import (DetectionSanityError, VideoOpenError,
+                            VideoWriteError)
 
 
 def build_parser():

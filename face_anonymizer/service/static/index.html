@@ -1,13 +1,4 @@
-"""웹 UI (단일 HTML 문자열).
-
-빌드 도구도 CDN 의존도 없이 파일 하나로 끝낸다. 서버가 파일을 못 찾는 사고를
-없애려고 패키지 데이터가 아니라 파이썬 모듈 상수로 들고 있다.
-
-화면은 대시보드 구성이다 — 좌측 사이드바(브랜드 · 내비 · 상태 박스), 상단
-KPI 타일, 본문에 S3 브라우저와 작업 목록.
-"""
-
-INDEX_HTML = r"""<!doctype html>
+<!doctype html>
 <html lang="ko">
 <head>
 <meta charset="utf-8">
@@ -926,4 +917,3 @@ loadObjects();
 </script>
 </body>
 </html>
-"""

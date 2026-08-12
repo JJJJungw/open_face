@@ -10,10 +10,10 @@ import pytest
 
 from conftest import FakeDetector, face_rect, read_frames, region_is_obscured
 from face_anonymizer import VideoAnonymizer, VideoOpenError
-from face_anonymizer.geometry import snap_to_stride
-from face_anonymizer.anonymize import pad_box
-from face_anonymizer.geometry import letterbox, unletterbox
-from face_anonymizer.pipeline import sane_fps
+from face_anonymizer.core.geometry import snap_to_stride
+from face_anonymizer.core.anonymize import pad_box
+from face_anonymizer.core.geometry import letterbox, unletterbox
+from face_anonymizer.core.pipeline import sane_fps
 
 
 def test_every_face_is_obscured(make_video, tmp_path):

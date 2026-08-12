@@ -14,7 +14,7 @@ import pytest
 from conftest import FakeDetector
 
 from face_anonymizer import VideoAnonymizer, probe
-from face_anonymizer import pipeline as P
+from face_anonymizer.core import pipeline as P
 
 
 class NoFaceDetector:

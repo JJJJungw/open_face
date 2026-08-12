@@ -210,8 +210,8 @@ def classify(exc):
     자기 예외를 던지고, 여기서 한 번에 대응시킨다 — 예외 종류가 늘어날 때
     고칠 곳이 한 군데여야 한다.
     """
-    from . import s3 as s3mod
-    from .pipeline import (
+    from ..storage import s3 as s3mod
+    from ..core.pipeline import (
         DecodeIncompleteError,
         DetectionSanityError,
         VideoOpenError,

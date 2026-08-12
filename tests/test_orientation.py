@@ -12,7 +12,7 @@ import numpy as np
 import pytest
 
 from face_anonymizer import VideoAnonymizer, probe
-from face_anonymizer import pipeline as P
+from face_anonymizer.core import pipeline as P
 
 pytestmark = pytest.mark.skipif(not shutil.which("ffmpeg"), reason="ffmpeg 없음")
 
