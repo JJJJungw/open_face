@@ -165,6 +165,32 @@
          padding:14px 16px;border-top:1px solid var(--line);
          color:var(--dim);font-size:12.5px}
   .pager button[disabled]{opacity:.4;cursor:default}
+  .pager input{width:52px;text-align:center;padding:4px 6px;font-size:12.5px;
+               border:1px solid var(--line);border-radius:7px;background:var(--surface)}
+  /* 위험한 동작은 목록 밖, 오른쪽 끝에 따로 둔다 — 카드의 '취소' 와 섞이면 안 된다 */
+  .danger{border-color:#f2c9c9;color:var(--critical-ink)}
+  .danger:hover{background:#fdf2f2}
+  .confirm{display:inline-flex;align-items:center;gap:7px;font-size:12px;
+           color:var(--critical-ink)}
+
+  /* ── 큐 UI ──────────────────────────────────────────────────────────── */
+  .flow{display:grid;grid-template-columns:1fr 26px 1fr 26px 1fr;align-items:stretch;
+        gap:0;padding:4px 0 2px}
+  .flow .box{border:1px solid var(--line);border-radius:11px;padding:13px 15px;
+             background:var(--raise);min-width:0}
+  .flow .box.mid{background:var(--accent-sel);border-color:#cfe0f6}
+  .flow .lb{font-size:11px;color:var(--dim);letter-spacing:.02em}
+  .flow .v{font-size:21px;font-weight:650;margin:3px 0 1px;
+           white-space:nowrap;overflow:hidden;text-overflow:ellipsis}
+  .flow .sub{font-size:11.5px;color:var(--faint);
+             white-space:nowrap;overflow:hidden;text-overflow:ellipsis}
+  .flow .arw{display:flex;align-items:center;justify-content:center;
+             color:var(--faint);font-size:15px}
+  .nextup{display:flex;flex-wrap:wrap;gap:6px;margin-top:13px;
+          padding-top:12px;border-top:1px solid var(--line)}
+  .nextup span{font-size:11.5px;color:var(--dim);background:var(--raise);
+               border:1px solid var(--line);border-radius:7px;padding:3px 8px}
+  .nextup .hd{background:none;border:none;color:var(--faint);padding-left:0}
   .bar .n{font-size:12.5px;color:var(--dim);margin-left:auto;white-space:nowrap}
   .bar .n b{color:var(--fg)}
 
@@ -356,10 +382,17 @@
           </details>
         </section>
 
+        <!-- 큐 화면. 무엇이 들어와 있고, 무엇이 돌고, 무엇이 나갔나. -->
+        <section class="card" id="card-queue" hidden>
+          <h2>큐<span class="cnt" id="queuesub"></span></h2>
+          <div id="queueui"></div>
+        </section>
+
         <section class="card" id="card-jobs">
-          <h2>작업
+          <h2><span id="jobstitle">작업</span>
             <span class="chip" id="jobfilter" hidden></span>
-            <span class="cnt" id="jobcnt"></span></h2>
+            <span class="cnt" id="jobcnt"></span>
+            <span class="cnt" id="jobsact"></span></h2>
           <div id="jobs"></div>
         </section>
       </div>
@@ -372,7 +405,7 @@ const $ = s => document.querySelector(s);
 const go = $('#go');
 // 기본 목록은 '진행중'(수행중 + 대기) 이다. 끝난 것을 같이 섞으면 수백 건짜리
 // 배치에서 지금 할 일이 완료 기록에 파묻힌다 — 완료는 완료 탭에서 본다.
-let timer = null, filter = 'active', page = 0, pageSize = 100;
+let timer = null, filter = 'active', page = 0, pageSize = 5, lastJobsHtml = '';
 
 function fmt(s) {
   // 값이 없으면 'NaN:NaN' 이 아니라 '—' 이어야 한다. 옛 기록에는 빠진 항목이 있다.
@@ -714,43 +747,136 @@ function jobSeconds(st, running) {
   return null;
 }
 
+function tile(lb, v, sub, cls) {
+  return `<div class="tile ${cls || ''}"><div class="lb">${lb}</div>
+    <div class="v">${v}</div><div class="sub">${sub || ''}</div></div>`;
+}
+
+// 탭마다 다른 숫자를 띄운다. 사이드바를 눌러도 같은 타일 넉 장이 그대로면
+// 사이드바가 목록 필터 하나짜리로 되돌아간다 — 화면이 실제로 달라야 한다.
 function kpis(jobs, st) {
-  const c = counts(st);
+  const c = counts(st), q = (st && st.queue) || {}, r = (st && st.recent) || {};
   // 수행중은 목록이 아니라 상태에서 받는다 — '완료' 탭을 눌러도 사라지면 안 된다.
   const running = (st && st.running) || jobs.find(j => j.status === 'running');
   const queued = c.queued || 0, done = c.done || 0, failed = c.failed || 0;
-  const avg = avgSeconds(st);
-  const per = jobSeconds(st, running);
-  const remain = (running ? 1 : 0) + queued;
-  // 수행중 작업은 '이 작업이 끝나기까지'(job_eta), 대기 작업은 한 건 소요 x 건수.
-  const etaAll = running && per != null
-    ? (running.job_eta || 0) + queued * per : null;
-  const rf = ((st && st.recent) || {}).realtime_factor || null;
+  const avg = avgSeconds(st), per = jobSeconds(st, running);
+  const disk = st && st.free_mb != null
+    ? `디스크 여유 ${(st.free_mb/1024).toFixed(1)} GB` : '';
+  let t;
 
-  $('#kpis').innerHTML = `
-    <div class="tile hero">
-      <div class="lb">전체 남은 시간</div>
-      <div class="v">${etaAll != null ? fmt(etaAll) : (remain ? '계산 중' : '없음')}</div>
-      <div class="sub">${remain ? `남은 작업 ${remain}건` : '처리할 작업이 없습니다'}</div>
+  if (filter === 'running') {
+    t = running ? [
+      tile('진행률', `${running.overall}<small>%</small>`,
+           `${STAGE_TEXT[running.stage] || '준비'} ${running.percent}%`, 'hero'),
+      tile('이 작업 남은 시간', fmt(running.job_eta),
+           `경과 ${fmt(running.job_elapsed)}`),
+      tile('속도', `${running.fps.toFixed(0)}<small> f/s</small>`,
+           running.name),
+      tile('뒤에 대기', `${queued}<small>건</small>`, disk),
+    ] : [tile('수행중', '없음', queued ? '곧 시작합니다' : '처리할 작업이 없습니다', 'hero'),
+         tile('대기', `${queued}<small>건</small>`, ''),
+         tile('완료', `${done}<small>건</small>`, avg ? `평균 ${fmt(avg)}` : ''),
+         tile('자원', '—', disk)];
+
+  } else if (filter === 'queued') {
+    t = [
+      tile('대기', `${queued}<small>건</small>`,
+           queued ? `가장 오래 기다린 건 ${fmt(q.latency || 0)}` : '큐가 비었습니다', 'hero'),
+      tile('예상 소요', per != null && queued ? fmt(queued * per) : '계산 중',
+           per != null ? `한 건 ${fmt(per)} 기준` : '완료 기록이 쌓이면 계산됩니다'),
+      tile('다음 차례', (st && st.next_up && st.next_up[0]) || '—',
+           running ? `지금은 ${running.name}` : '유휴'),
+      tile('최근 1시간 처리', `${q.throughput_1h || 0}<small>건</small>`,
+           q.failed_1h ? `같은 시간 실패 ${q.failed_1h}건` : disk),
+    ];
+
+  } else if (filter === 'done') {
+    t = [
+      tile('완료', `${done}<small>건</small>`,
+           avg ? `평균 ${fmt(avg)}` : '기록 없음', 'hero'),
+      tile('평균 처리 시간', q.avg_seconds ? fmt(q.avg_seconds) : '—',
+           q.slowest_seconds ? `가장 오래 걸린 건 ${fmt(q.slowest_seconds)}` : ''),
+      tile('처리 속도', r.realtime_factor ? r.realtime_factor.toFixed(2) : '—',
+           '<small>× 실시간</small>'),
+      tile('최근 1시간', `${q.throughput_1h || 0}<small>건</small>`, disk),
+    ];
+
+  } else if (filter === 'failed') {
+    t = [
+      tile('실패', `${failed}<small>건</small>`,
+           failed ? '카드에 단계와 사유가 있습니다' : '실패한 작업이 없습니다', 'hero'),
+      tile('최근 1시간 실패', `${q.failed_1h || 0}<small>건</small>`,
+           done + failed ? `실패율 ${(100*failed/(done+failed)).toFixed(1)}%` : ''),
+      tile('재시도한 작업', `${q.retried || 0}<small>건</small>`,
+           `최대 ${(st && st.max_attempts) || ''}회까지 시도합니다`),
+      tile('취소됨', `${c.cancelled || 0}<small>건</small>`, disk),
+    ];
+
+  } else if (filter === '') {
+    t = [
+      tile('전체 기록', `${c.total || 0}<small>건</small>`,
+           '이 서버가 기억하고 있는 전부입니다', 'hero'),
+      tile('완료', `${done}<small>건</small>`, avg ? `평균 ${fmt(avg)}` : ''),
+      tile('실패 · 취소', `${failed}<small> · </small>${c.cancelled || 0}`, ''),
+      tile('진행중', `${c.active || 0}<small>건</small>`, disk),
+    ];
+
+  } else {                                        // active — 기본 화면
+    const remain = (running ? 1 : 0) + queued;
+    // 수행중 작업은 '이 작업이 끝나기까지'(job_eta), 대기는 한 건 소요 x 건수.
+    const etaAll = running && per != null
+      ? (running.job_eta || 0) + queued * per : null;
+    t = [
+      tile('전체 남은 시간',
+           etaAll != null ? fmt(etaAll) : (remain ? '계산 중' : '없음'),
+           remain ? `남은 작업 ${remain}건` : '처리할 작업이 없습니다', 'hero'),
+      tile('수행중 · 대기', `${running ? 1 : 0}<small>/</small>${queued}`,
+           running ? running.name : '유휴'),
+      tile('완료', `${done}${failed
+             ? `<small style="color:var(--critical)"> · 실패 ${failed}</small>` : ''}`,
+           avg ? `평균 ${fmt(avg)}` : (per ? `추정 ${fmt(per)}` : '기록 없음')),
+      tile('처리 속도',
+           `${r.realtime_factor ? r.realtime_factor.toFixed(2) : '—'}<small>× 실시간</small>`,
+           disk),
+    ];
+  }
+  $('#kpis').innerHTML = t.join('');
+}
+
+// 큐 화면. **무엇이 들어와 있고, 무엇이 돌고, 무엇이 나갔나** 를 한 줄로 본다.
+// 카드 목록은 개별 작업을 보는 도구라 큐 전체의 모양은 보여 주지 못한다.
+function renderQueue(st) {
+  const c = counts(st), q = (st && st.queue) || {}, run = st && st.running;
+  const out = (c.done || 0) + (c.failed || 0);
+  $('#queuesub').textContent = `들어와 있는 것 ${c.queued || 0}건 · 나간 것 ${out}건`;
+  $('#queueui').innerHTML = `
+    <div class="flow">
+      <div class="box">
+        <div class="lb">들어와 있는 것</div>
+        <div class="v">${c.queued || 0}<small>건</small></div>
+        <div class="sub">${c.queued
+          ? `가장 오래 기다린 건 ${fmt(q.latency || 0)}` : '큐가 비었습니다'}</div>
+      </div>
+      <div class="arw">▶</div>
+      <div class="box mid">
+        <div class="lb">처리중</div>
+        <div class="v" title="${run ? run.name : ''}">${run ? run.name : '유휴'}</div>
+        <div class="sub">${run
+          ? `${STAGE_TEXT[run.stage] || '준비'} ${run.overall}% · 남은 ${fmt(run.eta)}`
+          : '큐에서 꺼낼 작업이 없습니다'}</div>
+      </div>
+      <div class="arw">▶</div>
+      <div class="box">
+        <div class="lb">나간 것</div>
+        <div class="v">${c.done || 0}<small>건</small>${c.failed
+          ? `<small style="color:var(--critical)"> · 실패 ${c.failed}</small>` : ''}</div>
+        <div class="sub">최근 1시간 ${q.throughput_1h || 0}건 · 평균 ${
+          q.avg_seconds ? fmt(q.avg_seconds) : '—'}</div>
+      </div>
     </div>
-    <div class="tile">
-      <div class="lb">수행중 · 대기</div>
-      <div class="v">${running ? 1 : 0}<small>/</small>${queued}</div>
-      <div class="sub">${running ? running.name : '유휴'}</div>
-    </div>
-    <div class="tile">
-      <div class="lb">완료</div>
-      <div class="v">${done}${failed
-        ? `<small style="color:var(--critical)"> · 실패 ${failed}</small>` : ''}</div>
-      <div class="sub">${avg ? `평균 ${fmt(avg)}`
-        : (per ? `추정 ${fmt(per)}` : '기록 없음')}</div>
-    </div>
-    <div class="tile">
-      <div class="lb">처리 속도</div>
-      <div class="v">${rf ? rf.toFixed(2) : '—'}<small>× 실시간</small></div>
-      <div class="sub">${st && st.free_mb != null
-        ? `디스크 여유 ${(st.free_mb/1024).toFixed(1)} GB` : ''}</div>
-    </div>`;
+    ${(st && st.next_up && st.next_up.length)
+      ? `<div class="nextup"><span class="hd">다음 차례</span>${
+          st.next_up.map(n => `<span>${n}</span>`).join('')}</div>` : ''}`;
 }
 
 function hud(jobs, st) {
@@ -898,18 +1024,51 @@ function safeCard(j) {
   }
 }
 
-// 페이지 막대. 총 건수는 목록이 아니라 집계에서 온다 — 목록은 한 페이지만 안다.
+// 페이지 막대. 총 건수는 목록이 아니라 집계에서 온다 — 목록은 한 쪽만 안다.
+// 한 쪽이 작아 쪽이 수십 개가 되므로 처음·마지막과 쪽 번호 입력을 같이 둔다.
 function pager(total) {
   const pages = Math.max(1, Math.ceil(total / pageSize));
   if (pages <= 1) return '';
   const from = page * pageSize + 1, to = Math.min(total, (page + 1) * pageSize);
+  const first = page === 0 ? 'disabled' : '', last = page >= pages - 1 ? 'disabled' : '';
   return `<div class="pager">
-    <button class="ghost" ${page === 0 ? 'disabled' : ''}
-            onclick="goPage(${page - 1})">이전</button>
-    <span>${from}–${to} / ${total}건 · ${page + 1} / ${pages} 쪽</span>
-    <button class="ghost" ${page >= pages - 1 ? 'disabled' : ''}
-            onclick="goPage(${page + 1})">다음</button>
+    <button class="ghost" ${first} onclick="goPage(0)">처음</button>
+    <button class="ghost" ${first} onclick="goPage(${page - 1})">이전</button>
+    <span>${from}–${to} / ${total}건 ·
+      <input type="number" min="1" max="${pages}" value="${page + 1}"
+             onchange="goPage(this.value - 1)"> / ${pages} 쪽</span>
+    <button class="ghost" ${last} onclick="goPage(${page + 1})">다음</button>
+    <button class="ghost" ${last} onclick="goPage(${pages - 1})">마지막</button>
   </div>`;
+}
+
+// 전체 취소. **카드의 '취소' 와 같은 자리에 두지 않는다** — 한 건을 멈추는 것과
+// 전부를 멈추는 것은 되돌릴 수 없는 정도가 다르다. 목록 밖 오른쪽 끝에 두고,
+// 누르면 바로 실행하지 않고 한 번 더 묻는다.
+let confirming = false;
+
+function askCancelAll(on) { confirming = on; poll(); }
+
+async function cancelAll() {
+  confirming = false;
+  const r = await fetch('/api/jobs/cancel-all', { method: 'POST' });
+  if (!r.ok) alert(explain(r.status, await r.text()));
+  poll();
+}
+
+function renderCancelAll(st) {
+  const n = counts(st).active || 0;
+  const el = $('#jobsact');
+  // 끝난 것을 보는 화면(완료·실패·전체 기록)에는 두지 않는다. 그 화면의 카드는
+  // 취소할 수 있는 것이 아니라서, 버튼이 무엇을 멈추는지 읽히지 않는다.
+  const here = ['active', 'running', 'queued'].includes(filter);
+  if (!n || !here) { confirming = false; el.innerHTML = ''; return; }
+  el.innerHTML = confirming
+    ? `<span class="confirm">진행중 ${n}건을 전부 멈춥니다. S3 파일은 그대로입니다.
+         <button class="ghost danger" onclick="cancelAll()">전부 멈춤</button>
+         <button class="ghost" onclick="askCancelAll(false)">아니오</button></span>`
+    : `<button class="ghost danger" onclick="askCancelAll(true)"
+               title="대기 전부와 지금 돌고 있는 1건을 멈춥니다">전체 취소</button>`;
 }
 
 async function del(id) { await fetch('/api/jobs/' + id, { method:'DELETE' }); poll(); }
@@ -926,10 +1085,10 @@ async function poll() {
   // 어느 필터로 요청했는지 붙잡아 둔다. 탭을 누르면 이전 폴링이 아직 날아오는
   // 중이라, 그게 나중에 도착해 방금 고른 탭 위에 옛 목록을 덮어쓴다.
   const asked = filter, askedPage = page;
-  const q = [asked ? 'status=' + asked : '',
+  const q = ['limit=' + pageSize, asked ? 'status=' + asked : '',
              askedPage ? 'offset=' + askedPage * pageSize : ''].filter(Boolean).join('&');
   const [jobs, st] = await Promise.all([
-    fetch('/api/jobs' + (q ? '?' + q : '')).then(r => r.json()).catch(() => null),
+    fetch('/api/jobs?' + q).then(r => r.json()).catch(() => null),
     fetch('/api/status').then(r => r.json()).catch(() => null),
   ]);
   // 그 사이 탭이나 쪽이 바뀌었다 — 새 폴링이 그린다
@@ -938,21 +1097,28 @@ async function poll() {
   if (!jobs) return;
   kpis(jobs, st);
   navCounts(st);
+  renderCancelAll(st);
   const c = counts(st);
-  if (st && st.list_limit) pageSize = st.list_limit;
+  if (st && st.page_size) pageSize = st.page_size;
+  // 큐 화면은 대기 탭에서만. 탭마다 화면이 실제로 달라야 사이드바가 의미를 갖는다.
+  $('#card-queue').hidden = !(filter === 'queued' && view !== 'overview');
+  if (!$('#card-queue').hidden) renderQueue(st);
+  $('#jobstitle').textContent = FILTER_TEXT[filter] || '전체 기록';
   const total = navCount(st, filter);
   // 큐가 빠지면서 총 건수가 줄면 지금 쪽이 빈 쪽이 된다. 뒤로 물러난다.
   const lastPage = Math.max(0, Math.ceil(total / pageSize) - 1);
   if (page > lastPage) return goPage(lastPage);
   $('#jobcnt').textContent = `${total}건`;
-  const chip = $('#jobfilter');
-  chip.hidden = !filter || filter === 'active';
-  if (!chip.hidden) chip.innerHTML =
-    `${FILTER_TEXT[filter]}만 <b onclick="setFilter('active')" title="진행중으로">&times;</b>`;
-  $('#jobs').innerHTML = jobs.length
+  // 제목이 이미 필터 이름이라 '대기만 ×' 칩은 같은 말을 두 번 하는 셈이다.
+  // 되돌아가는 길은 사이드바에 있다.
+  $('#jobfilter').hidden = true;
+  const html = jobs.length
     ? jobs.map(safeCard).join('') + pager(total)
     : `<div class="empty">${filter === 'active' ? '처리할 작업이 없습니다'
         : filter ? `${FILTER_TEXT[filter]} 상태인 작업이 없습니다` : '작업이 없습니다'}</div>`;
+  // 바뀐 게 없으면 다시 그리지 않는다. 0.7초마다 통째로 갈아 끼우면 쪽 번호를
+  // 입력하는 중에 포커스가 날아가고, 카드를 읽는 동안 화면이 미세하게 떨린다.
+  if (html !== lastJobsHtml) { $('#jobs').innerHTML = html; lastJobsHtml = html; }
   if (view === 'overview' && Date.now() - lastOverview > 10000) loadOverview();
   // 목록을 걸러 보고 있어도 큐가 돌면 빠르게 폴링해야 한다.
   const busy = (c.running || 0) + (c.queued || 0) > 0

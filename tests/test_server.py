@@ -467,6 +467,43 @@ def test_status_filter_is_a_server_side_contract(client):
     assert client.get("/api/jobs?status=running").json()[0]["id"] == "j003"
 
 
+def test_cancel_all_empties_the_queue_in_one_call(client):
+    """대기는 즉시 취소, 수행중은 중단 표시. 끝난 기록은 건드리지 않는다."""
+    n = config.LIST_LIMIT + 20
+    fill_queue(n=n, running=1, done=3)
+
+    r = client.post("/api/jobs/cancel-all")
+    assert r.status_code == 200, r.text
+    body = r.json()
+    assert body["queued"] == n - 4 and body["running"] == 1
+    assert body["cancelled"] == n - 3
+
+    c = client.get("/api/status").json()["counts"]
+    assert c["queued"] == 0 and c["active"] == 1   # 수행중은 스스로 빠져나온다
+    assert c["cancelled"] == n - 4
+    assert c["done"] == 3                          # 이미 끝난 것은 그대로
+
+
+def test_cancel_all_marks_the_running_job_for_the_worker(client):
+    """수행중은 상태를 바꾸지 않고 플래그만 세운다.
+
+    프레임 경계 밖에서 상태를 done/cancelled 로 바꿔 버리면, 워커가 그 뒤에
+    결과를 써서 취소한 작업이 완료로 되살아난다.
+    """
+    fill_queue(n=5, running=1, done=0)
+    client.post("/api/jobs/cancel-all")
+
+    run = jobsmod.JOBS["j000"]
+    assert run.status == "running" and run.cancel is True
+    assert all(j.status == "cancelled" for j in jobsmod.JOBS.values()
+               if j.id != "j000")
+
+
+def test_cancel_all_on_an_empty_queue_is_not_an_error(client):
+    r = client.post("/api/jobs/cancel-all")
+    assert r.status_code == 200 and r.json()["cancelled"] == 0
+
+
 def test_queue_max_still_works_when_set(client, make_video, monkeypatch):
     monkeypatch.setattr(config, "QUEUE_MAX", 2)
     path, n, size = make_video(frames=40)

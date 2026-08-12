@@ -21,7 +21,8 @@
     FA_RETRY_DELAYS    재시도 간격 목록    (기본: 5,30,60 — 95초 창)
     FA_DEFER_SEC       보류 재확인 간격    (기본: 60)
     FA_DEFER_MAX_SEC   보류 상한           (기본: 1800, 넘으면 실패)
-    FA_LIST_LIMIT      한 페이지 카드 수   (기본: 100)
+    FA_LIST_LIMIT      API 기본 상한       (기본: 100)
+    FA_PAGE_SIZE       화면 한 쪽 카드 수  (기본: 5)
     FA_MAX_ATTEMPTS    일시적 오류 재시도  (기본: 4 = 처음 1회 + 재시도 3회)
 
 처리 파라미터 기본값 (JOB_DEFAULTS)
@@ -72,6 +73,12 @@ MIN_FREE_MB = int(os.environ.get("FA_MIN_FREE_MB", 2048))   # 0 = 검사 안 함
 # 1000건이 26%, 3000건이면 75% 라 화면이 눈에 띄게 버벅인다. 상한을 없애는 대신
 # 페이지를 나누면 폴더가 몇천 건이어도 한 페이지 값만 낸다.
 LIST_LIMIT = int(os.environ.get("FA_LIST_LIMIT", 100))
+# 화면 한 쪽에 그리는 카드 수. API 기본 상한(LIST_LIMIT)과 다른 값인 이유는
+# 둘이 다른 질문에 답하기 때문이다. LIST_LIMIT 은 "한 번에 얼마나 내줄 수
+# 있나"(스크립트·오케스트레이터용), PAGE_SIZE 는 "사람이 한 화면에서 읽을
+# 만한 양이 얼마인가" 다. 카드는 크고, 큐 전체 모양은 카드가 아니라 큐 UI 가
+# 보여 준다.
+PAGE_SIZE = int(os.environ.get("FA_PAGE_SIZE", 5))
 # 처음 1회 + 재시도 3회. RETRY_DELAYS 와 짝이다.
 MAX_ATTEMPTS = int(os.environ.get("FA_MAX_ATTEMPTS", 4))
 

@@ -371,6 +371,20 @@ def counts():
     return out
 
 
+def memory_jobs():
+    """메모리에 있는 작업들. 폴링 경로에서 디스크를 훑지 않으려고 쓴다."""
+    with LOCK:
+        return list(JOBS.values())
+
+
+def next_up(limit=5):
+    """다음에 처리될 대기 작업 이름들. 큐 화면이 '무엇이 들어와 있나' 로 쓴다."""
+    with LOCK:
+        rows = [j for j in JOBS.values() if j.status == "queued"]
+    rows.sort(key=lambda x: x.created)
+    return [j.name for j in rows[:max(0, limit)]]
+
+
 def running_snapshot():
     """지금 도는 작업 한 건. 없으면 ``None``.
 
@@ -403,6 +417,36 @@ def recent_stats(limit=5):
     if rf:
         out["realtime_factor"] = round(sum(rf) / len(rf), 2)
     return out
+
+
+def cancel_all():
+    """진행중인 작업(수행중 + 대기)을 한 번에 취소한다.
+
+    **대기는 즉시, 수행중은 표시만 한다.** 대기는 아직 아무것도 시작하지 않아서
+    상태만 바꾸면 끝이다. 수행중은 프레임 경계에서만 안전하게 끊을 수 있어
+    플래그를 세우고 워커가 다음 진행 보고에서 스스로 빠져나온다(docs/issues/004
+    에서 만든 협조적 취소 지점을 그대로 쓴다).
+
+    한 건씩 라우트를 500번 부르지 않는 이유가 여기 있다. 그 사이에도 워커는
+    큐를 계속 꺼내므로, 앞에서 취소하는 동안 뒤에서 새 작업이 시작된다.
+    **락 한 번 안에서 전부 표시**해야 그 틈이 없다.
+
+    반환은 ``(취소한 대기 수, 표시한 수행중 수)``.
+    """
+    queued = running = 0
+    with LOCK:
+        rows = [j for j in JOBS.values() if j.status in ("queued", "running")]
+        now = time.time()
+        for j in rows:
+            j.cancel = True
+            if j.status == "queued":
+                j.status, j.finished = "cancelled", now
+                queued += 1
+            else:
+                running += 1
+    for j in rows:
+        save_job(j)          # 디스크 쓰기는 락 밖에서 — 폴링을 붙잡지 않는다
+    return queued, running
 
 
 def queued_ahead_of(job):

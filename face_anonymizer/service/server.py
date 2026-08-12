@@ -95,7 +95,11 @@ def status():
             "queued": jobs.queue_depth(), "free_mb": jobs.free_mb(),
             "model_error": worker.model_error,
             "counts": jobs.counts(), "running": jobs.running_snapshot(),
-            "recent": jobs.recent_stats(), "list_limit": config.LIST_LIMIT}
+            "recent": jobs.recent_stats(), "next_up": jobs.next_up(),
+            # 큐 화면이 쓰는 값들(대기 지연·처리량·재시도). GPU 는 여기서 안
+            # 본다 — nvidia-smi 는 프로세스를 띄우는 일이라 0.7초 폴링에 못 얹는다.
+            "queue": metrics.queue_metrics(jobs.memory_jobs()),
+            "list_limit": config.LIST_LIMIT, "page_size": config.PAGE_SIZE}
 
 
 @app.get("/api/metrics")
@@ -534,6 +538,26 @@ def download(jid: str):
         raise errors.RESULT_EXPIRED(jid)
     name = naming.output_name(j.name)
     return FileResponse(j.output, media_type="video/mp4", filename=name)
+
+
+@app.post("/api/jobs/cancel-all")
+def cancel_all_jobs():
+    """진행중인 작업을 한 번에 멈춘다. 대기는 즉시, 수행중은 몇 초 안에.
+
+    폴더를 잘못 넣었거나 파라미터가 틀렸을 때 필요한 건 '전부 멈춰' 다. 화면이
+    한 건씩 500번 호출하게 두면 그 사이에도 워커가 큐를 꺼내서, 취소하는 동안
+    새 작업이 시작된다. 표시는 서버가 락 한 번에 한다(jobs.cancel_all).
+
+    **S3 는 건드리지 않는다.** 원본도 이미 올라간 결과물도 그대로다. 여기서
+    사라지는 것은 아직 하지 않은 일과, 하던 일의 중간 산물뿐이다.
+
+    이 경로는 ``/api/jobs/{jid}/cancel`` 보다 먼저 선언해야 한다 — 뒤에 두면
+    ``cancel-all`` 이 작업 id 로 잡힌다.
+    """
+    queued, running = jobs.cancel_all()
+    log.info("전체 취소 — 대기 %d건 취소, 수행중 %d건에 중단 요청", queued, running)
+    return {"cancelled": queued + running, "queued": queued, "running": running,
+            "counts": jobs.counts()}
 
 
 @app.post("/api/jobs/{jid}/cancel")
