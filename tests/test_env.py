@@ -69,3 +69,37 @@ def test_explicit_path_wins_over_search(tmp_path, monkeypatch):
 def test_env_file_pointing_at_nothing_is_ignored(tmp_path, monkeypatch):
     monkeypatch.setenv("FA_ENV_FILE", str(tmp_path / "없다"))
     assert env.find() is None
+
+
+def test_trailing_comment_is_not_part_of_the_value():
+    """.env.example 을 그대로 복사해 쓰라고 해놓고 파싱이 안 되면 안 된다.
+
+    실제로 겪었다 — FA_OUTPUT_HEIGHT 값이 '720          # 짧은 변 상한...' 이
+    되어 int() 에서 터졌다.
+    """
+    got = env.parse("FA_OUTPUT_HEIGHT=720          # 짧은 변 상한. 0 이면 원본 유지")
+    assert got["FA_OUTPUT_HEIGHT"] == "720"
+
+
+def test_hash_inside_a_value_survives():
+    """비밀번호 같은 데 그냥 붙어 있는 # 은 주석이 아니다."""
+    assert env.parse("FA_X=abc#def")["FA_X"] == "abc#def"
+
+
+def test_quotes_protect_everything_inside():
+    got = env.parse('FA_X="값 # 안의 우물정"   # 이건 주석')
+    assert got["FA_X"] == "값 # 안의 우물정"
+
+
+def test_the_shipped_example_actually_parses():
+    """.env.example 의 모든 활성 줄이 읽히는지 — 복사해서 쓰는 파일이다."""
+    import os
+    root = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
+    with open(os.path.join(root, ".env.example"), encoding="utf-8") as fh:
+        got = env.parse(fh.read())
+    assert got["FA_OUTPUT_HEIGHT"] == "720"
+    assert got["FA_TARGET_BITRATE"] == "3500k"
+    assert got["FA_MAX_BITRATE"] == "4000k"
+    assert got["FA_S3_ROOT_PREFIX"] == "v1/input/"
+    for key, value in got.items():
+        assert "#" not in value, f"{key} 에 주석이 섞였다: {value!r}"

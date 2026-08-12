@@ -36,11 +36,28 @@ def parse(text):
         key = key.strip()
         if not key:
             continue
-        value = value.strip()
-        if len(value) >= 2 and value[0] == value[-1] and value[0] in "\"'":
-            value = value[1:-1]                 # 따옴표는 벗긴다
-        out[key] = value
+        out[key] = _value(value.strip())
     return out
+
+
+def _value(raw):
+    """따옴표를 벗기고 줄 끝 주석을 걷어낸다.
+
+    ``FA_OUTPUT_HEIGHT=720   # 짧은 변 상한`` 같은 줄이 흔하다. 안 걷어내면
+    주석까지 값이 되어 ``int("720   # ...")`` 에서 터진다.
+
+    잘라내는 기준은 **공백 뒤에 오는 #** 이다. 값 안에 그냥 붙어 있는 ``#`` 은
+    (비밀번호 같은 데 들어간다) 건드리지 않는다. 따옴표로 감싼 값은 통째로
+    지킨다 — 주석을 잘라내고 싶지 않을 때 쓰는 탈출구다.
+    """
+    if raw[:1] in ("\"", "'"):
+        quote = raw[0]
+        end = raw.find(quote, 1)
+        return raw[1:end] if end > 0 else raw[1:]
+    cut = raw.find(" #")
+    if cut < 0:
+        cut = raw.find("\t#")
+    return (raw[:cut] if cut >= 0 else raw).strip()
 
 
 def find():
