@@ -111,6 +111,10 @@ PAYLOAD_TOO_LARGE = _p(
     "payload_too_large", 413, "업로드 상한을 넘었다",
     "FA_MAX_UPLOAD_MB 를 올리거나 파일을 나눠라.")
 BATCH_EMPTY = _p("batch_empty", 400, "처리할 항목이 없다")
+ALREADY_PROCESSED = _p(
+    "already_processed", 409, "이미 비식별화된 영상이다",
+    "다시 처리하려면 '처리된 건 건너뛰기' 를 끄고 보내라 "
+    "(API 는 skip_processed=false).")
 BATCH_TOO_LARGE = _p(
     "batch_too_large", 400, "한 번에 넣을 수 있는 개수를 넘었다",
     "나눠서 보내라. 상한은 FA_BATCH_MAX.")

@@ -903,12 +903,9 @@ async def create_jobs(request: Request):
                         else store.list(prefix)[1])
             except s3mod.S3Error as e:
                 raise (e.problem or errors.S3_UPSTREAM)(str(e)) from e
-            done = store.processed_keys() if skip_processed else set()
-            expanded += [
-                o["key"] for o in objs
-                if os.path.splitext(o["key"])[1].lower() in VIDEO_EXT
-                and not naming.is_output(o["key"])
-                and (not skip_processed or store.output_key(o["key"]) not in done)]
+            expanded += [o["key"] for o in objs
+                         if os.path.splitext(o["key"])[1].lower() in VIDEO_EXT
+                         and not naming.is_output(o["key"])]
         if not expanded and not keys:
             raise errors.BATCH_EMPTY(
                 f"{' · '.join(prefixes)} 에 처리할 영상이 없다")
@@ -918,12 +915,32 @@ async def create_jobs(request: Request):
     # 화면에 보인 차례대로 큐에 들어가야 진행 상황이 읽힌다.
     keys = list(dict.fromkeys(keys))
 
+    # '처리된 건 건너뛰기' 는 폴더든 낱개든 똑같이 적용한다. 화면의 체크박스
+    # 하나가 폴더에서는 먹고 파일을 골랐을 때는 안 먹으면, 그건 설정이 아니라
+    # 함정이다. 그리고 조용히 빼지 않고 건별 사유로 돌려준다 — 눌렀는데 아무
+    # 일도 안 일어나는 것이 사용자가 겪을 수 있는 최악이다.
+    skipped = []
+    if skip_processed and keys:
+        store = s3mod.get_store()
+        if store is not None:
+            try:
+                done = store.processed_keys()
+            except s3mod.S3Error as e:
+                raise (e.problem or errors.S3_UPSTREAM)(str(e)) from e
+            fresh = []
+            for k in keys:
+                (skipped if store.output_key(k) in done else fresh).append(k)
+            keys = fresh
+
     if BATCH_MAX and len(keys) > BATCH_MAX:
         raise errors.BATCH_TOO_LARGE(f"{len(keys)}건 (상한 {BATCH_MAX})",
                                      limit=BATCH_MAX)
     check_admission()
 
     accepted, rejected = [], []
+    for k in skipped:
+        rejected.append({"s3_key": k,
+                         "error": errors.ALREADY_PROCESSED(k).body()})
 
     if uploaded:
         name = os.path.basename(upload.filename)

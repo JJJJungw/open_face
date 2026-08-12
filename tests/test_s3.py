@@ -386,16 +386,60 @@ def test_folder_submission_expands_prefix(s3client):
     wait(s3client, d["accepted"][0]["id"], timeout=60)
 
 
+def mark_done(client, key=None):
+    """결과물이 이미 있는 상태로 만든다."""
+    client.store.client.objects[client.store.output_key(key or KEY)] = (b"x", NOW)
+    client.store._out_cache = (0.0, set())
+
+
 def test_folder_submission_can_skip_processed(s3client):
     """폴더를 다시 돌릴 때 이미 끝난 건 건너뛴다."""
-    s3client.store.client.objects[
-        "v1/results/face/2026-08_deid/f_00001_00_0000000_0042000_deid.mp4"] = (b"x", NOW)
-    s3client.store._out_cache = (0.0, set())
+    mark_done(s3client)
 
     r = s3client.post("/api/jobs", json={"s3_prefix": "videos/2026-08/",
                                          "skip_processed": True})
-    assert r.status_code == 400
-    assert r.json()["code"] == "batch_empty"
+    assert r.status_code == 409
+    assert r.json()["code"] == "already_processed"
+
+
+def test_picking_one_file_obeys_skip_processed_too(s3client):
+    """체크박스 하나가 폴더에서는 먹고 파일을 골랐을 때는 안 먹으면 함정이다.
+
+    화면에서 이미 처리된 파일을 골라 다시 누르면 그냥 다시 돌아 버렸다.
+    """
+    mark_done(s3client)
+
+    r = s3client.post("/api/jobs", json={"s3_keys": [KEY],
+                                         "skip_processed": True})
+
+    assert r.status_code == 409
+    assert r.json()["code"] == "already_processed"
+    assert "건너뛰기" in r.json()["hint"]
+
+
+def test_skip_can_be_turned_off_to_reprocess(s3client):
+    """건너뛰기를 끄면 이미 끝난 것도 다시 돈다."""
+    mark_done(s3client)
+
+    r = s3client.post("/api/jobs", json={"s3_keys": [KEY],
+                                         "skip_processed": False})
+
+    assert r.status_code == 202, r.text
+    wait(s3client, r.json()["accepted"][0]["id"], timeout=60)
+
+
+def test_partial_skip_still_accepts_the_rest(s3client):
+    """한 건이 이미 끝났다고 나머지까지 막으면 안 된다."""
+    other, = seed(s3client, 1)
+    mark_done(s3client, KEY)
+
+    r = s3client.post("/api/jobs", json={"s3_keys": [KEY, other],
+                                         "skip_processed": True})
+
+    assert r.status_code == 202, r.text
+    assert [a["s3_key"] for a in r.json()["accepted"]] == [other]
+    assert r.json()["rejected"][0]["error"]["code"] == "already_processed"
+    wait(s3client, r.json()["accepted"][0]["id"], timeout=60)
 
 
 def test_folder_recursive_includes_subfolders(s3client):
