@@ -98,7 +98,7 @@ export FA_S3_OUTPUT_PREFIX=v1/results/face/     # 기본값
 ## 파일 이름 규칙
 
 ```
-f_NNNNN_SS_STARTMS_ENDMS_STATE.ext
+C_NNNNN_SS_STARTMS_ENDMS[_STATE].ext
 ```
 
 | 필드 | 의미 | 예 |
