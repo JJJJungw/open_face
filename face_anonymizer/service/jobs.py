@@ -136,7 +136,9 @@ def snapshot(j, queued_ahead=0):
     # 검출과 렌더가 각각 영상 전체를 한 번씩 훑으므로 절반씩 배분한다.
     # 전사(transcode)는 그 앞 단계라 자기 게이지를 따로 채운다 — 검출이
     # 시작되면 0 부터 다시 오른다.
-    if j.stage == "transcode":
+    if j.stage in ("download", "transcode", "upload"):
+        # 검출·렌더와 훑는 대상이 달라 한 게이지에 합치면 어느 쪽 진행도
+        # 안 읽힌다. 각자 채우고, 검출이 시작되면 0 부터 다시 오른다.
         overall = pct
     else:
         overall = pct // 2 + (50 if j.stage == "render" else 0)

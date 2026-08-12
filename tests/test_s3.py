@@ -51,12 +51,20 @@ class FakeS3Client:
             out["CommonPrefixes"] = [{"Prefix": p} for p in sorted(prefixes)]
         return out
 
-    def download_file(self, bucket, key, dest):
+    def download_file(self, bucket, key, dest, Callback=None):
         self.downloads.append(key)
         if key not in self.objects:
             raise KeyError(key)
+        data = self.objects[key][0]
         with open(dest, "wb") as f:
-            f.write(self.objects[key][0])
+            # 실제 boto3 처럼 청크마다 콜백을 부른다. 여기서 취소가 걸린다.
+            for i in range(0, len(data), 4096) or [0]:
+                chunk = data[i:i + 4096]
+                f.write(chunk)
+                if Callback:
+                    Callback(len(chunk))
+            if not data and Callback:
+                Callback(0)
 
     def generate_presigned_url(self, op, Params=None, ExpiresIn=None):
         return f"https://signed/{Params['Key']}?e={ExpiresIn}"
@@ -64,11 +72,14 @@ class FakeS3Client:
     def head_object(self, Bucket, Key):
         if Key not in self.objects:
             raise KeyError(Key)
-        return {}
+        return {"ContentLength": len(self.objects[Key][0])}
 
-    def upload_file(self, path, bucket, key, ExtraArgs=None):
+    def upload_file(self, path, bucket, key, ExtraArgs=None, Callback=None):
         with open(path, "rb") as f:
             data = f.read()
+        if Callback:
+            for i in range(0, len(data), 4096):
+                Callback(len(data[i:i + 4096]))
         self.uploaded[key] = data
         self.objects[key] = (data, NOW)      # 올린 뒤에는 목록에도 보여야 한다
 
@@ -604,3 +615,86 @@ def test_upload_cannot_be_mixed_with_s3_selection(s3client, make_video):
                           data={"s3_key": KEY})
     assert r.status_code == 400
     assert r.json()["code"] == "conflicting_input"
+
+
+# ── S3 전송 중 취소 · 진행률 (docs/issues/004) ──────────────────────────────
+#
+# 취소는 협조적이다. 플래그를 세우면 작업 쪽이 스스로 확인해서 빠져나온다.
+# 그런데 확인하는 자리가 파이프라인의 진행률 콜백 하나뿐이라, 그 앞뒤인 S3
+# 전송 구간에서는 취소를 눌러도 전송이 끝날 때까지 안 멈췄다.
+
+def test_download_reports_progress(s3client):
+    """받는 동안 진행률이 멈춰 있으면 멈춘 것처럼 보인다."""
+    seen = []
+    s3client.store.download(KEY, "/tmp/_fa_dl_test.mp4",
+                            callback=lambda n: seen.append(n))
+    os.remove("/tmp/_fa_dl_test.mp4")
+
+    assert seen, "콜백이 한 번도 안 불렸다"
+    assert sum(seen) == len(s3client.store.client.objects[KEY][0])
+
+
+def test_upload_reports_progress(s3client, tmp_path):
+    p = tmp_path / "out.mp4"
+    p.write_bytes(b"z" * 12000)
+    seen = []
+
+    s3client.store.upload(str(p), "v1/results/face/x_deid.mp4",
+                          callback=lambda n: seen.append(n))
+
+    assert sum(seen) == 12000
+
+
+def test_cancel_during_download_stops_the_transfer(s3client):
+    """전송 콜백에서 취소를 확인하지 않으면 다 받을 때까지 안 멈춘다."""
+    def cancel_now(_chunk):
+        raise s3mod.TransferAborted()
+
+    with pytest.raises(s3mod.TransferAborted):
+        s3client.store.download(KEY, "/tmp/_fa_cancel_test.mp4",
+                                callback=cancel_now)
+    if os.path.exists("/tmp/_fa_cancel_test.mp4"):
+        os.remove("/tmp/_fa_cancel_test.mp4")
+
+
+def test_transfer_abort_is_not_reported_as_an_s3_error(s3client, tmp_path):
+    """사용자가 취소한 것을 'S3 호출 실패' 로 보고하면 원인이 뒤바뀐다."""
+    p = tmp_path / "x.mp4"
+    p.write_bytes(b"z" * 9000)
+
+    def stop(_chunk):
+        raise s3mod.TransferAborted()
+
+    with pytest.raises(s3mod.TransferAborted):
+        s3client.store.upload(str(p), "v1/results/face/y_deid.mp4", callback=stop)
+
+
+def test_aborted_transfer_ends_as_cancelled_not_failed(s3client, monkeypatch):
+    """전송 중 취소가 '실패' 로 기록되면 원인이 뒤바뀐다."""
+    def aborted(key, dest, callback=None):
+        raise s3mod.TransferAborted()
+    monkeypatch.setattr(s3client.store, "download", aborted)
+
+    jid = s3client.post("/api/jobs", json={"s3_keys": [KEY]}).json()["accepted"][0]["id"]
+    s = wait(s3client, jid, timeout=30)
+
+    assert s["status"] == "cancelled", s.get("error")
+    assert s["error"]["code"] == "cancelled"
+
+
+def test_worker_callback_aborts_when_cancel_is_requested(s3client, monkeypatch):
+    """취소 플래그를 세우면 전송 콜백이 그 자리에서 중단을 요청해야 한다."""
+    seen = {}
+
+    def capture(key, dest, callback=None):
+        seen["cb"] = callback
+        raise s3mod.TransferAborted()          # 여기서 멈춰 콜백만 꺼내 온다
+    monkeypatch.setattr(s3client.store, "download", capture)
+
+    jid = s3client.post("/api/jobs", json={"s3_keys": [KEY]}).json()["accepted"][0]["id"]
+    wait(s3client, jid, timeout=30)
+
+    j = jobsmod.JOBS[jid]
+    j.cancel = True
+    with pytest.raises(s3mod.TransferAborted):
+        seen["cb"](1024)

@@ -34,6 +34,14 @@ URL_TTL = int(os.environ.get("FA_S3_URL_TTL", 3600))
 PAGE_MAX = 1000
 
 
+class TransferAborted(Exception):
+    """전송 콜백이 중단을 요청했다.
+
+    **S3 오류가 아니므로 감싸지 않고 그대로 올려보낸다.** 사용자가 취소를
+    누른 것을 "S3 호출 실패" 로 보고하면 원인이 완전히 뒤바뀐다.
+    """
+
+
 class S3Error(RuntimeError):
     """S3 호출 실패. 작업은 실패로 남기되 서버는 계속 산다.
 
@@ -201,10 +209,29 @@ class S3Store:
 
     # ── 전송 ──────────────────────────────────────────────────────────────
 
-    def download(self, key, dest):
+    def size_of(self, key):
+        """객체 크기(bytes). 알 수 없으면 0.
+
+        전송 진행률의 분모다. 작업 하나에 한 번이라 왕복이 아깝지 않다 —
+        목록에서 크기를 들고 다니게 만드는 쪽이 더 번거롭다.
+        """
+        try:
+            return int(self.client.head_object(Bucket=self.bucket,
+                                               Key=key).get("ContentLength", 0))
+        except Exception:                           # noqa: BLE001
+            return 0
+
+    def download(self, key, dest, callback=None):
+        """``callback(전송된 바이트)`` 는 boto3 가 청크마다 부른다.
+
+        여기서 취소를 확인할 수 있다. 그러지 않으면 큰 파일을 받는 동안에는
+        취소를 눌러도 다 받을 때까지 안 멈춘다(docs/issues/004).
+        """
         os.makedirs(os.path.dirname(os.path.abspath(dest)), exist_ok=True)
         try:
-            self.client.download_file(self.bucket, key, dest)
+            self.client.download_file(self.bucket, key, dest, Callback=callback)
+        except TransferAborted:
+            raise
         except Exception as e:                      # noqa: BLE001
             raise wrap(e, f"내려받지 못했습니다 ({key})") from e
         if not os.path.exists(dest) or os.path.getsize(dest) == 0:
@@ -232,10 +259,13 @@ class S3Store:
         except Exception:                           # noqa: BLE001
             return False
 
-    def upload(self, path, key, content_type="video/mp4"):
+    def upload(self, path, key, content_type="video/mp4", callback=None):
         try:
             self.client.upload_file(path, self.bucket, key,
-                                    ExtraArgs={"ContentType": content_type})
+                                    ExtraArgs={"ContentType": content_type},
+                                    Callback=callback)
+        except TransferAborted:
+            raise
         except Exception as e:                      # noqa: BLE001
             raise wrap(e, f"올리지 못했습니다 ({key})") from e
         self._out_cache = (0.0, set())              # 방금 올린 것이 반영되게

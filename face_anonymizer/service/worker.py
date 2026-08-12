@@ -270,6 +270,24 @@ def run(job_id):
             j.done, j.total = done, total
         jobs.save_job(j, force=False)      # 폴링용 — 간격을 두고 흘려 쓴다
 
+    def transfer(stage, total):
+        """전송 진행률을 보고하고, 그 김에 취소도 확인한다.
+
+        boto3 가 청크마다 부른다. 이 콜백이 없으면 큰 파일을 받는 동안
+        취소가 안 먹고(docs/issues/004) 진행률도 멈춰 보인다.
+        """
+        seen = [0]
+
+        def cb(chunk):
+            # 취소를 **먼저** 본다. 여기서 JobCancelled 를 던지면 전송 계층이
+            # 그걸 S3 오류로 감싸서, 사용자가 취소한 것이 "S3 호출 실패" 로
+            # 보고된다. 저장소가 아는 신호로 던지고 밖에서 되돌린다.
+            if j.cancel:
+                raise s3mod.TransferAborted()
+            seen[0] += chunk
+            progress(stage, min(seen[0], total) if total else seen[0], total)
+        return cb
+
     src = os.path.join(workdir, "input" + os.path.splitext(name)[1])
     dst = os.path.join(workdir, naming.output_name(name))
     try:
@@ -278,7 +296,11 @@ def run(job_id):
             if store is None:
                 raise s3mod.S3Error("S3 가 설정되어 있지 않습니다")
             log.info("S3 에서 내려받는다: %s", j.s3_key)
-            store.download(j.s3_key, src)
+            store.download(j.s3_key, src,
+                           callback=transfer("download", store.size_of(j.s3_key)))
+            # 콜백에서 던진 예외를 전송 계층이 삼키는 경우를 대비한 이중 확인.
+            if j.cancel:
+                raise JobCancelled()
         # 프로세스가 여러 개여도 GPU 는 한 번에 하나만 쓴다.
         with gpu_lock(os.path.join(config.JOBS_DIR, config.GPU_LOCK_FILE)):
             res = get_anonymizer().process(src, dst, progress=progress, **params)
@@ -286,7 +308,10 @@ def run(job_id):
             store = s3mod.get_store()
             key = store.output_key(j.s3_key)
             log.info("S3 에 올린다: %s", key)
-            store.upload(res.output, key)
+            store.upload(res.output, key,
+                         callback=transfer("upload", os.path.getsize(res.output)))
+            if j.cancel:
+                raise JobCancelled()
             with jobs.LOCK:
                 j.s3_output = key
         with jobs.LOCK:
@@ -323,7 +348,7 @@ def run(job_id):
         # 로컬이 유일한 사본이라 건드리지 않는다.
         if j.s3_key and j.s3_output and not config.KEEP_LOCAL:
             jobs.drop_media(j, "S3 업로드 완료")
-    except JobCancelled:
+    except (JobCancelled, s3mod.TransferAborted):
         with jobs.LOCK:
             j.status, j.finished = "cancelled", time.time()
             j.error = {"code": errors.CANCELLED.code,
