@@ -513,7 +513,7 @@ def _run(job_id):
         if j.s3_key and not os.path.exists(src):
             store = s3mod.get_store()
             if store is None:
-                raise s3mod.S3Error("S3 가 설정되지 않았다")
+                raise s3mod.S3Error("S3 가 설정되어 있지 않습니다")
             log.info("S3 에서 내려받는다: %s", j.s3_key)
             store.download(j.s3_key, src)
         # 프로세스가 여러 개여도 GPU 는 한 번에 하나만 쓴다.
@@ -741,7 +741,7 @@ def _coerce(key, value):
         if isinstance(ref, float):
             return float(value)
     except (TypeError, ValueError) as e:
-        raise errors.INVALID_INPUT(f"{key} 값이 숫자가 아니다: {value!r}",
+        raise errors.INVALID_INPUT(f"{key} 값이 숫자가 아닙니다: {value!r}",
                                    field=key) from e
     return value
 
@@ -750,10 +750,10 @@ def check_admission():
     """받을 수 있는 상태인지. 못 받으면 ProblemError."""
     if not is_ready():
         raise (errors.MODEL_LOAD_FAILED(_model_error) if _model_error
-               else errors.NOT_READY("기동 중이다"))
+               else errors.NOT_READY("서버가 기동 중입니다"))
     free = free_mb()
     if MIN_FREE_MB and free is not None and free < MIN_FREE_MB:
-        raise errors.INSUFFICIENT_STORAGE(f"{free}MB < {MIN_FREE_MB}MB",
+        raise errors.INSUFFICIENT_STORAGE(f"남은 공간 {free}MB, 최소 {MIN_FREE_MB}MB 가 필요합니다",
                                           free_mb=free, retry_after=RETRY_AFTER)
 
 
@@ -762,23 +762,23 @@ def resolve_params(given):
     params = {**JOB_DEFAULTS,
               **{k: v for k, v in given.items() if v is not None}}
     if params["method"] not in METHODS:
-        raise errors.INVALID_INPUT(f"모르는 방식: {params['method']}",
+        raise errors.INVALID_INPUT(f"모르는 익명화 방식입니다: {params['method']}",
                                    field="method", allowed=list(METHODS))
     if not 0 < params["conf"] < 1:
         raise errors.INVALID_INPUT(
-            f"conf 는 0~1 사이여야 한다 (받은 값 {params['conf']})", field="conf")
+            f"conf 는 0 과 1 사이여야 합니다 (받으신 값 {params['conf']})", field="conf")
     params["imgsz"] = max(320, min(int(params["imgsz"]), 2048))
     h = int(params["height"] or 0)
     if h and not 144 <= h <= 4320:
         raise errors.INVALID_INPUT(
-            f"height 는 0(원본 유지) 이거나 144~4320 이어야 한다 (받은 값 {h})",
+            f"height 는 0(원본 유지) 이거나 144~4320 이어야 합니다 (받으신 값 {h})",
             field="height")
     params["height"] = h
     for k in ("bitrate", "max_bitrate"):
         v = params[k]
         if v not in ("", None) and parse_bitrate(v) is None:
             raise errors.INVALID_INPUT(
-                f"{k} 를 읽을 수 없다: {v!r} (예: 3500k · 3.5M · 3500000)",
+                f"{k} 값을 읽지 못했습니다: {v!r} — 3500k · 3.5M · 3500000 형태로 보내 주세요",
                 field=k)
     return params
 
@@ -786,7 +786,7 @@ def resolve_params(given):
 def check_video_name(name):
     ext = os.path.splitext(name)[1].lower()
     if ext not in VIDEO_EXT:
-        raise errors.UNSUPPORTED_MEDIA(f"확장자 {ext or '(없음)'}",
+        raise errors.UNSUPPORTED_MEDIA(f"확장자가 {ext or '없습니다'}",
                                        supported=sorted(VIDEO_EXT))
     return ext
 
@@ -819,7 +819,7 @@ def enqueue(name, params, s3_key="", jid=None, workdir=None):
         if QUEUE_MAX and sum(1 for o in _JOBS.values()
                              if o.status == "queued") >= QUEUE_MAX:
             shutil.rmtree(workdir, ignore_errors=True)
-            raise errors.QUEUE_FULL(f"대기 {QUEUE_MAX}건", retry_after=RETRY_AFTER)
+            raise errors.QUEUE_FULL(f"대기 중인 작업이 {QUEUE_MAX}건입니다", retry_after=RETRY_AFTER)
         _JOBS[jid] = job
         _current = jid
     save_job(job)
@@ -871,21 +871,21 @@ async def create_jobs(request: Request):
         try:
             body = await request.json()
         except Exception as e:                      # noqa: BLE001
-            raise errors.INVALID_INPUT("JSON 을 읽을 수 없다") from e
+            raise errors.INVALID_INPUT("본문을 JSON 으로 읽지 못했습니다") from e
         if not isinstance(body, dict):
-            raise errors.INVALID_INPUT("객체를 보내라")
+            raise errors.INVALID_INPUT("본문은 JSON 객체여야 합니다")
         keys = body.get("s3_keys") or []
         prefixes = body.get("s3_prefix") or body.get("s3_prefixes") or []
         if isinstance(prefixes, str):               # 한 개는 문자열로도 받는다
             prefixes = [prefixes]
         if not isinstance(prefixes, list):
-            raise errors.INVALID_INPUT("s3_prefix 는 문자열이나 배열이어야 한다",
+            raise errors.INVALID_INPUT("s3_prefix 는 문자열이거나 배열이어야 합니다",
                                        field="s3_prefix")
         recursive = bool(body.get("recursive"))
         skip_processed = bool(body.get("skip_processed"))
         given = body.get("params") or {}
         if not isinstance(keys, list):
-            raise errors.INVALID_INPUT("s3_keys 는 배열이어야 한다", field="s3_keys")
+            raise errors.INVALID_INPUT("s3_keys 는 배열이어야 합니다", field="s3_keys")
     else:
         form = await request.form()
         upload = form.get("file")
@@ -907,7 +907,7 @@ async def create_jobs(request: Request):
         raise errors.MISSING_INPUT()
     if uploaded and (keys or prefixes):
         raise errors.CONFLICTING_INPUT(
-            "업로드(file)와 S3 선택은 같이 보낼 수 없다")
+            "업로드 파일과 S3 선택은 같이 보내실 수 없습니다")
 
     params = resolve_params(given)
 
@@ -931,7 +931,7 @@ async def create_jobs(request: Request):
                          and not naming.is_output(o["key"])]
         if not expanded and not keys:
             raise errors.BATCH_EMPTY(
-                f"{' · '.join(prefixes)} 에 처리할 영상이 없다")
+                f"{' · '.join(prefixes)} 안에 처리할 영상이 없습니다")
         keys = keys + expanded
 
     # 폴더를 펼친 결과가 따로 고른 파일과 겹칠 수 있다. 순서는 유지한다 —
@@ -956,7 +956,7 @@ async def create_jobs(request: Request):
             keys = fresh
 
     if BATCH_MAX and len(keys) > BATCH_MAX:
-        raise errors.BATCH_TOO_LARGE(f"{len(keys)}건 (상한 {BATCH_MAX})",
+        raise errors.BATCH_TOO_LARGE(f"{len(keys)}건을 보내셨습니다 (상한 {BATCH_MAX}건)",
                                      limit=BATCH_MAX)
     check_admission()
 

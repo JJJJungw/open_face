@@ -90,104 +90,117 @@ def _p(code, status, title, hint="", retryable=False):
 
 CATALOG = {}
 
+# 문구 규칙: 사용자에게 보이는 title/hint 는 존댓말로, 무엇이 잘못됐는지와
+# 다음에 무엇을 하면 되는지만 담는다. 명령조("확인하라", "낮춰라")는 쓰지
+# 않는다 — 오류를 만난 사람은 이미 곤란한 상태고, 여기서 다그칠 이유가 없다.
+# (코드 주석은 그대로 평서체다. 읽는 사람이 다르다.)
+
 # ── 요청이 잘못된 경우 (400 계열) ──────────────────────────────────────────
 INVALID_INPUT = _p(
-    "invalid_input", 400, "요청 값이 잘못됐다",
-    "보낸 파라미터를 확인하라. 값 범위는 GET /api/defaults 참고.")
+    "invalid_input", 400, "요청 값이 올바르지 않습니다",
+    "보내신 파라미터를 확인해 주세요. 값의 범위는 GET /api/defaults 에서 볼 수 있습니다.")
 MISSING_INPUT = _p(
-    "missing_input", 400, "입력이 없다",
-    "file 로 업로드하거나 s3_key 를 주어라.")
+    "missing_input", 400, "처리할 입력이 없습니다",
+    "파일을 업로드하시거나 S3 키를 함께 보내 주세요.")
 CONFLICTING_INPUT = _p(
-    "conflicting_input", 400, "입력이 둘이다",
-    "file 과 s3_key 중 하나만 보내라.")
+    "conflicting_input", 400, "입력이 두 가지로 들어왔습니다",
+    "업로드 파일과 S3 선택 중 하나만 보내 주세요.")
 INVALID_KEY = _p(
-    "invalid_key", 400, "s3_key 가 잘못됐다",
-    "상대 경로만 허용한다. '..' 이나 앞의 '/' 는 쓸 수 없다.")
+    "invalid_key", 400, "S3 키 형식이 올바르지 않습니다",
+    "상대 경로만 사용할 수 있습니다. '..' 이나 맨 앞의 '/' 는 넣을 수 없습니다.")
 UNSUPPORTED_MEDIA = _p(
-    "unsupported_media", 415, "지원하지 않는 형식이다",
-    "mp4 · mov · mkv · avi · webm · m4v 만 처리한다.")
-EMPTY_FILE = _p("empty_file", 400, "빈 파일이다")
+    "unsupported_media", 415, "지원하지 않는 파일 형식입니다",
+    "mp4 · mov · mkv · avi · webm · m4v 를 처리할 수 있습니다.")
+EMPTY_FILE = _p("empty_file", 400, "파일이 비어 있습니다")
 PAYLOAD_TOO_LARGE = _p(
-    "payload_too_large", 413, "업로드 상한을 넘었다",
-    "FA_MAX_UPLOAD_MB 를 올리거나 파일을 나눠라.")
-BATCH_EMPTY = _p("batch_empty", 400, "처리할 항목이 없다")
+    "payload_too_large", 413, "업로드 용량 상한을 넘었습니다",
+    "파일을 나눠서 보내시거나, 서버의 FA_MAX_UPLOAD_MB 값을 올리면 됩니다.")
+BATCH_EMPTY = _p("batch_empty", 400, "처리할 항목이 없습니다")
 ALREADY_PROCESSED = _p(
-    "already_processed", 409, "이미 비식별화된 영상이다",
-    "다시 처리하려면 '처리된 건 건너뛰기' 를 끄고 보내라 "
+    "already_processed", 409, "이미 비식별화된 영상입니다",
+    "다시 처리하시려면 '처리된 건 건너뛰기' 를 끄고 보내 주세요 "
     "(API 는 skip_processed=false).")
 BATCH_TOO_LARGE = _p(
-    "batch_too_large", 400, "한 번에 넣을 수 있는 개수를 넘었다",
-    "나눠서 보내라. 상한은 FA_BATCH_MAX.")
+    "batch_too_large", 400, "한 번에 넣을 수 있는 개수를 넘었습니다",
+    "나눠서 보내 주세요. 상한은 서버의 FA_BATCH_MAX 로 조정할 수 있습니다.")
 
 # ── 서비스 상태 (4xx/5xx) ──────────────────────────────────────────────────
 NOT_READY = _p(
-    "not_ready", 503, "모델이 아직 준비되지 않았다",
-    "기동 중이면 잠시 후 다시. 계속 이러면 model_error 를 확인하라.",
+    "not_ready", 503, "모델이 아직 준비되지 않았습니다",
+    "기동 중이라면 잠시 후 다시 시도해 주세요. 계속 같은 응답이면 "
+    "GET /api/status 의 model_error 를 확인해 보시면 됩니다.",
     retryable=True)
 MODEL_LOAD_FAILED = _p(
-    "model_load_failed", 503, "모델을 올리지 못했다",
-    "가중치 경로와 GPU 상태를 확인하라. python setup_weights.py 를 돌렸는가?")
+    "model_load_failed", 503, "모델을 불러오지 못했습니다",
+    "가중치 경로와 GPU 상태를 확인해 주세요. "
+    "python setup_weights.py 를 아직 실행하지 않았을 수 있습니다.")
 QUEUE_FULL = _p(
-    "queue_full", 429, "대기열이 가득 찼다",
-    "Retry-After 뒤에 다시 보내거나 다른 인스턴스로 보내라.", retryable=True)
+    "queue_full", 429, "대기열이 가득 찼습니다",
+    "Retry-After 에 적힌 시간 뒤에 다시 보내 주세요.", retryable=True)
 INSUFFICIENT_STORAGE = _p(
-    "insufficient_storage", 507, "디스크 여유가 부족하다",
-    "완료된 작업을 삭제하거나 볼륨을 늘려라.", retryable=True)
+    "insufficient_storage", 507, "디스크 여유 공간이 부족합니다",
+    "완료된 작업을 정리하시거나 볼륨을 늘리시면 다시 받을 수 있습니다.",
+    retryable=True)
 
 # ── 작업 (404/409/410) ─────────────────────────────────────────────────────
 JOB_NOT_FOUND = _p(
-    "job_not_found", 404, "그런 작업이 없다",
-    "id 를 확인하라. 보관 기간이 지나 정리됐을 수도 있다.")
+    "job_not_found", 404, "해당 작업을 찾을 수 없습니다",
+    "작업 id 를 확인해 주세요. 보관 기간이 지나 정리됐을 수도 있습니다.")
 JOB_NOT_FINISHED = _p(
-    "job_not_finished", 409, "아직 끝나지 않았다",
-    "status 가 done 이 된 뒤에 받아라.", retryable=True)
+    "job_not_finished", 409, "작업이 아직 끝나지 않았습니다",
+    "상태가 done 이 된 뒤에 받으실 수 있습니다.", retryable=True)
 JOB_FAILED = _p(
-    "job_failed", 409, "실패한 작업이다",
-    "error.code 로 원인을 확인하라.")
+    "job_failed", 409, "실패한 작업입니다",
+    "작업 상세의 error.code 에서 원인을 보실 수 있습니다.")
 RESULT_EXPIRED = _p(
-    "result_expired", 410, "결과물이 더 이상 없다",
-    "보관 기간이 지났다. 다시 처리해야 한다.")
+    "result_expired", 410, "결과물이 남아 있지 않습니다",
+    "보관 기간이 지났습니다. 다시 처리하시면 새로 만들어집니다.")
 JOB_NOT_CANCELLABLE = _p(
-    "job_not_cancellable", 409, "취소할 수 없는 상태다",
-    "이미 끝났거나 실패한 작업이다.")
+    "job_not_cancellable", 409, "취소할 수 없는 상태입니다",
+    "이미 끝났거나 실패한 작업입니다.")
 
 # ── S3 (404/502) ──────────────────────────────────────────────────────────
 S3_NOT_CONFIGURED = _p(
-    "s3_not_configured", 404, "S3 가 설정되지 않았다",
-    "FA_S3_BUCKET 을 설정하고 다시 띄워라. 직접 업로드는 그대로 쓸 수 있다.")
+    "s3_not_configured", 404, "S3 가 설정되어 있지 않습니다",
+    "FA_S3_BUCKET 을 설정하고 서버를 다시 띄우면 됩니다. "
+    "직접 업로드는 설정 없이도 쓰실 수 있습니다.")
 S3_OBJECT_NOT_FOUND = _p(
-    "s3_object_not_found", 404, "S3 에 그 객체가 없다",
-    "키를 확인하라. 대소문자와 프리픽스가 정확해야 한다.")
+    "s3_object_not_found", 404, "S3 에서 해당 파일을 찾지 못했습니다",
+    "키를 확인해 주세요. 대소문자와 폴더 경로가 정확해야 합니다.")
 S3_ACCESS_DENIED = _p(
-    "s3_access_denied", 502, "S3 접근이 거부됐다",
-    "인스턴스 역할이나 자격 증명의 s3:GetObject / s3:PutObject 권한을 확인하라.")
+    "s3_access_denied", 502, "S3 접근 권한이 없습니다",
+    "인스턴스 역할이나 자격 증명에 s3:GetObject · s3:PutObject 권한이 "
+    "있는지 확인해 주세요.")
 S3_UPSTREAM = _p(
-    "s3_upstream", 502, "S3 호출이 실패했다",
-    "리전과 네트워크를 확인하라.", retryable=True)
+    "s3_upstream", 502, "S3 호출에 실패했습니다",
+    "리전 설정과 네트워크 상태를 확인해 주세요.", retryable=True)
 
 # ── 처리 실패 (작업 error.code 로 쓰인다) ──────────────────────────────────
 VIDEO_UNREADABLE = _p(
-    "video_unreadable", 422, "영상을 열 수 없다",
-    "파일이 손상됐거나 지원하지 않는 코덱이다.")
+    "video_unreadable", 422, "영상을 열 수 없습니다",
+    "파일이 손상됐거나 지원하지 않는 코덱일 수 있습니다.")
 DECODE_INCOMPLETE = _p(
-    "decode_incomplete", 422, "디코딩이 중간에 끊겼다",
-    "손상된 파일일 수 있다. 의도한 것이면 allow_partial 로 보내라.")
+    "decode_incomplete", 422, "디코딩이 중간에 끊겼습니다",
+    "손상된 파일일 수 있습니다. 일부만 처리해도 괜찮다면 "
+    "allow_partial 을 켜고 보내 주세요.")
 ENCODE_FAILED = _p(
-    "encode_failed", 500, "출력을 만들지 못했다",
-    "인코더(mp4v/libx264/NVENC)와 디스크를 확인하라.")
+    "encode_failed", 500, "결과물을 만들지 못했습니다",
+    "인코더(NVENC · libx264)와 디스크 여유를 확인해 주세요.")
 NO_DETECTIONS = _p(
-    "no_detections", 422, "얼굴이 하나도 검출되지 않았다",
-    "conf 를 낮추거나 imgsz 를 올려라. 영상이 누워 있는지도 확인하라.")
+    "no_detections", 422, "얼굴이 하나도 검출되지 않았습니다",
+    "conf 를 낮추거나 imgsz 를 올려서 다시 시도해 보세요. "
+    "영상이 눕혀져 있는 경우에도 이렇게 나올 수 있습니다.")
 GPU_OUT_OF_MEMORY = _p(
-    "gpu_out_of_memory", 503, "GPU 메모리가 부족하다",
-    "batch_size 나 imgsz 를 낮춰라.", retryable=True)
+    "gpu_out_of_memory", 503, "GPU 메모리가 부족합니다",
+    "batch_size 나 imgsz 를 낮추면 통과할 수 있습니다.", retryable=True)
 FFMPEG_MISSING = _p(
-    "ffmpeg_missing", 500, "ffmpeg 를 찾을 수 없다",
-    "컨테이너에 ffmpeg 를 설치하라.")
-CANCELLED = _p("cancelled", 499, "사용자가 취소했다")
+    "ffmpeg_missing", 500, "ffmpeg 를 찾을 수 없습니다",
+    "서버에 ffmpeg 를 설치해 주세요.")
+CANCELLED = _p("cancelled", 499, "사용자가 취소했습니다")
 INTERNAL = _p(
-    "internal", 500, "내부 오류",
-    "서버 로그를 확인하라.", retryable=True)
+    "internal", 500, "서버 내부 오류가 발생했습니다",
+    "잠시 후 다시 시도해 주세요. 계속되면 서버 로그를 확인해 주세요.",
+    retryable=True)
 
 
 def classify(exc):

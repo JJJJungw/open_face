@@ -134,7 +134,7 @@ def transcode(src, dst, crf=INGEST_CRF, timeout=None, progress=None):
     """
     enc = pick_encoder()
     if enc is None:
-        raise TranscodeError("쓸 수 있는 H.264 인코더가 없다")
+        raise TranscodeError("쓸 수 있는 H.264 인코더가 없습니다")
     encoder, qflag, extra = enc
     cmd = ["ffmpeg", "-y", "-v", "error", "-i", src,
            "-map", "0:v:0", "-an",
@@ -143,12 +143,12 @@ def transcode(src, dst, crf=INGEST_CRF, timeout=None, progress=None):
     res = _run_with_progress(cmd, expected_frames(src), progress,
                              timeout or FFMPEG_TIMEOUT)
     if res is None:
-        raise TranscodeError("ffmpeg 타임아웃")
+        raise TranscodeError("ffmpeg 가 제한 시간 안에 끝나지 않았습니다")
     rc, err = res
     if rc != 0 or not os.path.exists(dst) or os.path.getsize(dst) == 0:
-        raise TranscodeError(f"ffmpeg 실패 ({rc}): {(err or '')[-200:].strip()}")
+        raise TranscodeError(f"ffmpeg 가 실패했습니다 (종료 코드 {rc}): {(err or '')[-200:].strip()}")
     if not opencv_can_decode(dst):
-        raise TranscodeError("옮겨 담은 파일도 읽을 수 없다")
+        raise TranscodeError("변환한 파일도 읽지 못했습니다")
     return dst
 
 
@@ -160,7 +160,7 @@ def ensure_decodable(path, workdir, crf=INGEST_CRF, progress=None):
     아무 비용도 내지 않는다.
     """
     if not os.path.exists(path):
-        raise VideoOpenError(f"input does not exist: {path}")
+        raise VideoOpenError(f"입력 파일이 없습니다: {path}")
     codec = probe_codec(path)
     if opencv_can_decode(path):
         return path, {"source_codec": codec, "transcoded": False}
@@ -172,6 +172,6 @@ def ensure_decodable(path, workdir, crf=INGEST_CRF, progress=None):
         transcode(path, dst, crf, progress=progress)
     except TranscodeError as e:
         raise TranscodeError(
-            f"입력을 읽을 수 없다 (codec={codec or '알 수 없음'}): {e}") from e
+            f"입력 영상을 읽지 못했습니다 (코덱 {codec or '알 수 없음'}): {e}") from e
     log.info("전사 완료: %s -> h264", codec or "?")
     return dst, {"source_codec": codec, "transcoded": True}

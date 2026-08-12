@@ -230,11 +230,11 @@ def sane_fps(value, default=DEFAULT_FPS):
 def probe(path):
     """영상 메타데이터. 열 수 없으면 VideoOpenError."""
     if not os.path.exists(path):
-        raise VideoOpenError(f"input does not exist: {path}")
+        raise VideoOpenError(f"입력 파일이 없습니다: {path}")
     cap, rotation = open_capture(path)
     try:
         if not cap.isOpened():
-            raise VideoOpenError(f"cannot open video (unsupported or corrupt): {path}")
+            raise VideoOpenError(f"영상을 열지 못했습니다 (지원하지 않는 형식이거나 손상된 파일): {path}")
         fps = sane_fps(cap.get(cv2.CAP_PROP_FPS))
         w = int(cap.get(cv2.CAP_PROP_FRAME_WIDTH) or 0)
         h = int(cap.get(cv2.CAP_PROP_FRAME_HEIGHT) or 0)
@@ -243,7 +243,7 @@ def probe(path):
     finally:
         cap.release()
     if w <= 0 or h <= 0:
-        raise VideoOpenError(f"video reports invalid frame size {w}x{h}: {path}")
+        raise VideoOpenError(f"영상 크기가 올바르지 않습니다 ({w}x{h}): {path}")
     # 직접 돌릴 예정이면 보고 크기도 회전 후 기준이어야 한다
     # (OpenCV 가 처리했다면 PROP 값이 이미 회전 후 크기다).
     if rotation in (90, 270):
@@ -616,13 +616,15 @@ def check_decode_complete(decoded, info, allow_partial=False):
         log.warning("디코딩 프레임 수가 예상보다 적다: %s", detail)
         return [f"decode-short: {decoded}/{expected}"]
 
-    msg = (f"디코딩이 중간에 끊겼다: {detail}. 뒷부분이 결과물에서 통째로 "
-           f"빠진다 — 손상된 파일이거나 디코더 문제다.")
+    msg = (f"디코딩이 중간에 끊겼습니다: {detail}. 이대로 두면 영상 뒷부분이 "
+           f"결과물에서 통째로 빠집니다 — 파일이 손상됐거나 디코더 문제일 수 "
+           f"있습니다.")
     if allow_partial:
         log.warning("%s (allow_partial 이라 계속 진행한다)", msg)
         return [f"decode-partial: {decoded}/{expected}"]
     raise DecodeIncompleteError(
-        msg + " 의도한 것이면 allow_partial=True (CLI: --allow-partial).")
+        msg + " 일부만 처리해도 괜찮다면 allow_partial=True "
+        "(CLI 는 --allow-partial) 로 보내 주세요.")
 
 
 def check_detections(raw_boxes, detected_frames, total, min_rate=None):
@@ -644,14 +646,14 @@ def check_detections(raw_boxes, detected_frames, total, min_rate=None):
     if raw_boxes == 0:
         warnings.append("no-detections")
         log.error("검출 0건 — 원본이 그대로 출력된다. conf/imgsz/가중치/영상 "
-                  "회전을 확인하라.")
+                  "회전을 확인할 것.")
     elif rate < 0.01:
         warnings.append(f"low-detection-rate: {rate:.2%}")
         log.warning("검출률 %.2f%% (%d/%d 프레임) — 비정상적으로 낮다",
                     rate * 100, detected_frames, total)
     if min_rate is not None and rate < min_rate:
         raise DetectionSanityError(
-            f"검출률 {rate:.2%} 가 요구치 {min_rate:.2%} 에 못 미친다 "
+            f"검출률 {rate:.2%} 가 요구치 {min_rate:.2%} 에 못 미칩니다 "
             f"({detected_frames}/{total} 프레임, 박스 {raw_boxes}개)")
     return warnings
 
@@ -687,14 +689,14 @@ class VideoAnonymizer:
         progress : callable(stage, done, total) | None
         """
         if method not in METHODS:
-            raise ValueError(f"unknown method: {method}. choose one of {list(METHODS)}")
+            raise ValueError(f"모르는 익명화 방식입니다: {method} — {list(METHODS)} 중에서 골라 주세요")
         # 음수 pad 는 박스를 뒤집고 mosaic_scale>=1 은 축소를 없앤다. 둘 다
         # 익명화 함수가 x2<=x1 에서 조용히 return 해서 픽셀을 안 건드리는데,
         # 파이프라인은 "박스 N개 처리 완료" 라고 보고한다.
         if pad < 0:
-            raise ValueError(f"pad 는 음수일 수 없다 (박스가 뒤집힌다): {pad}")
+            raise ValueError(f"pad 는 음수일 수 없습니다 (박스가 뒤집힙니다): {pad}")
         if not 0 < mosaic_scale < 1:
-            raise ValueError(f"mosaic_scale 은 0~1 사이여야 한다: {mosaic_scale}")
+            raise ValueError(f"mosaic_scale 은 0 과 1 사이여야 합니다: {mosaic_scale}")
         batch_size = max(1, int(batch_size))
 
         outdir = os.path.dirname(os.path.abspath(output_path))
@@ -763,7 +765,7 @@ class VideoAnonymizer:
             decode_path, imgsz, conf, iou, batch_size, report, rotation=rotate)
         t_detect = time.perf_counter() - t0
         if total == 0:
-            raise VideoOpenError(f"no frames decoded from {input_path}")
+            raise VideoOpenError(f"영상에서 프레임을 한 장도 읽지 못했습니다: {input_path}")
 
         warnings = check_decode_complete(total, info, allow_partial)
         warnings += check_detections(raw_boxes, detected_frames, total,
@@ -836,7 +838,7 @@ class VideoAnonymizer:
         cap, auto_rot = open_capture(path)
         if not cap.isOpened():
             cap.release()
-            raise VideoOpenError(f"cannot open video: {path}")
+            raise VideoOpenError(f"영상을 열지 못했습니다: {path}")
         rotation = (auto_rot + rotation) % 360
 
         per_frame, pending = [], []
@@ -889,8 +891,8 @@ class VideoAnonymizer:
             cap.release()
             writer.release()
             raise VideoWriteError(
-                f"인코더를 열 수 없다 ({info.width}x{info.height} @{info.fps}). "
-                "opencv 빌드에 mp4v 코덱이 없을 수 있다.")
+                f"인코더를 열지 못했습니다 ({info.width}x{info.height} "
+                f"@{info.fps}). opencv 빌드에 mp4v 코덱이 없을 수 있습니다.")
 
         kw = {"scale": mosaic_scale} if method == "mosaic" else {}
         i = 0
@@ -907,8 +909,8 @@ class VideoAnonymizer:
                 fh, fw = frame.shape[:2]
                 if (fw, fh) != (info.width, info.height):
                     raise VideoWriteError(
-                        f"frame {i} 디코딩 크기 {fw}x{fh} 가 컨테이너 메타 "
-                        f"{info.width}x{info.height} 와 다르다")
+                        f"{i}번 프레임의 크기 {fw}x{fh} 가 컨테이너 정보 "
+                        f"{info.width}x{info.height} 와 다릅니다")
                 if i % 60 == 0:
                     report("render", i)
                 for box in frame_dets.get(i, ()):
@@ -924,7 +926,7 @@ class VideoAnonymizer:
         if i != expected:
             # 프레임 수가 어긋나면 박스가 엉뚱한 프레임에 찍힌다. 더 많이
             # 디코딩된 경우 남는 프레임에는 박스가 없어 그대로 노출된다.
-            raise VideoWriteError(f"프레임 수 불일치: 1차 {expected} vs 2차 {i}")
+            raise VideoWriteError(f"프레임 수가 맞지 않습니다: 1차 {expected}, 2차 {i}")
         if not os.path.exists(out_path) or os.path.getsize(out_path) == 0:
-            raise VideoWriteError(f"인코더가 빈 파일을 만들었다: {out_path}")
+            raise VideoWriteError(f"인코더가 빈 파일을 만들었습니다: {out_path}")
         return i

@@ -521,7 +521,7 @@ function updatePicked() {
 // 서버가 RFC 9457 problem+json 을 준다. title/detail/hint 를 그대로 보여 주면
 // "왜 안 되는지" 와 "무엇을 하면 되는지" 가 같이 전달된다.
 function problemText(p) {
-  if (!p || !p.title) return '알 수 없는 오류';
+  if (!p || !p.title) return '알 수 없는 오류가 발생했습니다';
   return [p.title, p.detail, p.hint].filter(Boolean).join('\n');
 }
 function explain(status, text) {
@@ -545,7 +545,7 @@ async function submitJobs(body, label) {
   const d = await r.json();
   S3.selected.clear(); renderBrowser(); poll();
   if (d.rejected && d.rejected.length) {
-    alert(`${d.accepted.length}건 접수 · ${d.rejected.length}건 거절\n\n`
+    alert(`${d.accepted.length}건 접수, ${d.rejected.length}건은 넣지 못했습니다\n\n`
       + d.rejected.map(x => `${x.s3_key}\n  ${problemText(x.error)}`).join('\n\n'));
   }
 }
@@ -811,8 +811,8 @@ function card(j) {
     // '3회 시도' 라는 숫자만 있으면 그게 많은 건지 적은 건지 알 수 없다.
     // 어디서 넘어졌고 왜 그렇게 끝났는지를 같이 적는다.
     const why = {
-      permanent: `같은 입력이면 결과가 같은 오류라 다시 시도하지 않았습니다`,
-      exhausted: `일시적 오류로 보고 ${j.max_attempts}회까지 다시 시도했지만 계속 실패했습니다`,
+      permanent: `같은 파일로 다시 시도해도 결과가 같은 오류라 재시도하지 않았습니다`,
+      exhausted: `일시적인 오류로 보고 ${j.max_attempts}회까지 다시 시도했지만 계속 실패했습니다`,
     }[e.policy] || '';
     const rows = [
       ['단계', STAGE_TEXT[e.stage] || (e.stage || '—')],

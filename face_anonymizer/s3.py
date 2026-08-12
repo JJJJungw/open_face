@@ -118,7 +118,7 @@ class S3Store:
                 if not token:
                     break
         except Exception as e:                      # noqa: BLE001
-            raise wrap(e, "목록 조회 실패") from e
+            raise wrap(e, "목록을 불러오지 못했습니다") from e
         return folders, objects
 
     def list_all(self, prefix):
@@ -143,7 +143,7 @@ class S3Store:
                 if not token:
                     break
         except Exception as e:                      # noqa: BLE001
-            raise wrap(e, "목록 조회 실패") from e
+            raise wrap(e, "목록을 불러오지 못했습니다") from e
         return objects
 
     def output_key(self, key):
@@ -206,9 +206,9 @@ class S3Store:
         try:
             self.client.download_file(self.bucket, key, dest)
         except Exception as e:                      # noqa: BLE001
-            raise wrap(e, f"내려받기 실패 ({key})") from e
+            raise wrap(e, f"내려받지 못했습니다 ({key})") from e
         if not os.path.exists(dest) or os.path.getsize(dest) == 0:
-            raise S3Error(f"내려받은 파일이 비어 있다: {key}")
+            raise S3Error(f"내려받은 파일이 비어 있습니다: {key}")
         return dest
 
     def presigned_url(self, key, expires=None):
@@ -223,7 +223,7 @@ class S3Store:
                 Params={"Bucket": self.bucket, "Key": key},
                 ExpiresIn=int(expires or URL_TTL))
         except Exception as e:                      # noqa: BLE001
-            raise wrap(e, f"URL 생성 실패 ({key})") from e
+            raise wrap(e, f"다운로드 주소를 만들지 못했습니다 ({key})") from e
 
     def exists(self, key):
         try:
@@ -237,7 +237,7 @@ class S3Store:
             self.client.upload_file(path, self.bucket, key,
                                     ExtraArgs={"ContentType": content_type})
         except Exception as e:                      # noqa: BLE001
-            raise wrap(e, f"올리기 실패 ({key})") from e
+            raise wrap(e, f"올리지 못했습니다 ({key})") from e
         self._out_cache = (0.0, set())              # 방금 올린 것이 반영되게
         return key
 
