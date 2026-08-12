@@ -105,14 +105,16 @@ DEFAULT_BITRATE_RATIO = float(os.environ.get("FA_BITRATE_RATIO", "1.0"))
 #
 #   FA_OUTPUT_HEIGHT   짧은 변 기준 상한 (0 이면 원본 유지)
 #   FA_TARGET_BITRATE  목표 비트레이트 ("3500k" / "3500000" / "" 이면 안 씀)
-#   FA_MAX_BITRATE     순간 최대 (비면 목표의 1.15배)
+#   FA_MAX_BITRATE     순간 최대 (기본 4000k = 납품 대역 위끝)
 #
 # 목표 비트레이트를 주면 **CRF 와 원본 비례 상한은 쓰지 않는다.** 둘은 반대
 # 방향의 정책이다 — CRF 는 화질을 정해 두고 용량이 따라오게 하고, 목표
 # 비트레이트는 용량을 정해 두고 화질이 따라오게 한다. 같이 걸면 서로 싸운다.
 DEFAULT_HEIGHT = int(os.environ.get("FA_OUTPUT_HEIGHT", "720") or 0)
 DEFAULT_TARGET_BITRATE = os.environ.get("FA_TARGET_BITRATE", "3500k")
-DEFAULT_MAX_BITRATE = os.environ.get("FA_MAX_BITRATE", "")
+# 납품 대역이 3000~4000 kbps 다. 평균은 목표(3500k)로 가고 순간 최대는 대역
+# 위끝(4000k)에서 자른다 — 기본 여유(1.15배)로 두면 4025k 라 대역을 살짝 넘는다.
+DEFAULT_MAX_BITRATE = os.environ.get("FA_MAX_BITRATE", "4000k")
 MAXRATE_HEADROOM = 1.15
 
 CODEC_EFFICIENCY = {

@@ -36,7 +36,8 @@
     FA_METHOD mosaic · FA_CONF 0.25 · FA_BATCH_SIZE 32 · FA_PAD 0.15
     FA_MOSAIC_SCALE 0.06 · FA_LINGER 5 · FA_INTERP 1 · FA_KEEP_AUDIO 1
     FA_CRF 23 · FA_BITRATE_RATIO 1.0
-    FA_OUTPUT_HEIGHT 720 (0=원본 유지) · FA_TARGET_BITRATE 3500k · FA_MAX_BITRATE
+    FA_OUTPUT_HEIGHT 720 (0=원본 유지) · FA_TARGET_BITRATE 3500k
+    FA_MAX_BITRATE 4000k  (납품 대역 720p / 3000~4000 kbps)
     (imgsz 는 FA_IMGSZ 를 검출기와 공유한다)
     FA_QUEUE_MAX       대기열 개수 상한    (기본: 0 = 무제한)
     FA_BATCH_MAX       한 번에 넣을 개수   (기본: 0 = 무제한)
