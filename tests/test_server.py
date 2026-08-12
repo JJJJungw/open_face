@@ -205,10 +205,81 @@ def test_orphaned_running_job_is_marked_failed(client, tmp_path, make_video):
     jobsmod.save_job(j)
     jobsmod.JOBS.clear()                       # 프로세스가 죽은 상태
 
-    assert jobsmod.recover_orphans() == 1
+    assert jobsmod.recover_orphans() == []      # 재큐할 것은 없다
     s = client.get(f"/api/jobs/{jid}").json()
     assert s["status"] == "failed"
     assert s["error"]["code"] == "interrupted"
+
+
+# ── 재시작 시 대기열 복구 (docs/issues/002) ─────────────────────────────────
+#
+# queued 와 running 은 성격이 다르다. running 은 중간에 끊겨 결과를 믿을 수
+# 없지만, queued 는 아직 아무 일도 일어나지 않았다. 예전에는 둘을 한 덩어리로
+# 보고 전부 실패로 만들어서, 500건을 넣어 두고 배포하면 통째로 날아갔다.
+
+def orphan(jid, status, created=0.0):
+    """죽은 프로세스가 남긴 상태 파일을 만든다."""
+    import os
+    d = os.path.join(config.JOBS_DIR, jid)
+    os.makedirs(d, exist_ok=True)
+    j = jobsmod.Job(id=jid, name=f"{jid}.mp4", params={}, workdir=d,
+                    status=status, created=created or time.time())
+    jobsmod.save_job(j)
+    return j
+
+
+def test_queued_jobs_are_requeued_not_failed(client, tmp_path, monkeypatch):
+    """아직 시작도 안 한 작업을 실패로 만들면, 배포할 때마다 큐가 날아간다."""
+    monkeypatch.setattr(config, "JOBS_DIR", str(tmp_path))
+    monkeypatch.setattr(jobsmod, "JOBS", {})
+    orphan("q1", "queued", created=1.0)
+    orphan("q2", "queued", created=2.0)
+    orphan("r1", "running", created=3.0)
+
+    resumed = jobsmod.recover_orphans()
+
+    assert [j.id for j in resumed] == ["q1", "q2"]          # 만들어진 순서 그대로
+    assert jobsmod.find_job("q1").status == "queued"
+    assert jobsmod.find_job("r1").status == "failed"        # 이건 중간에 끊겼다
+
+
+def test_requeue_does_not_burn_a_retry(client, tmp_path, monkeypatch):
+    """재시작은 그 작업이 실패한 것이 아니다. 배포 세 번에 재시도가 소진되면 안 된다."""
+    monkeypatch.setattr(config, "JOBS_DIR", str(tmp_path))
+    monkeypatch.setattr(jobsmod, "JOBS", {})
+    j = orphan("q1", "queued")
+    j.attempts = 1
+    jobsmod.save_job(j)
+
+    jobsmod.recover_orphans()
+
+    assert jobsmod.find_job("q1").attempts == 1
+
+
+def test_recovery_can_be_turned_off(client, tmp_path, monkeypatch):
+    """--workers N 이면 한 프로세스만 복구해야 중복 처리가 안 생긴다."""
+    monkeypatch.setattr(config, "JOBS_DIR", str(tmp_path))
+    monkeypatch.setattr(jobsmod, "JOBS", {})
+    monkeypatch.setattr(config, "RECOVER", False)
+    orphan("q1", "queued")
+    orphan("r1", "running")
+
+    assert jobsmod.recover_orphans() == []
+    assert jobsmod.find_job("r1").status == "running"       # 손대지 않는다
+
+
+def test_resume_puts_them_back_on_the_worker(client, tmp_path, monkeypatch):
+    """상태만 되돌리고 제출을 안 하면 영원히 대기다."""
+    monkeypatch.setattr(config, "JOBS_DIR", str(tmp_path))
+    monkeypatch.setattr(jobsmod, "JOBS", {})
+    submitted = []
+    monkeypatch.setattr(worker.EXEC, "submit",
+                        lambda fn, *a: submitted.append(a[0]))
+    orphan("q1", "queued", created=1.0)
+    orphan("q2", "queued", created=2.0)
+
+    assert worker.resume_orphans() == 2
+    assert submitted == ["q1", "q2"]
 
 
 def test_sweep_removes_expired_jobs(client, tmp_path, make_video, monkeypatch):

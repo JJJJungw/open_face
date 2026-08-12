@@ -17,6 +17,7 @@
     FA_BATCH_MAX       한 번에 넣을 개수   (기본: 0 = 무제한)
     FA_MIN_FREE_MB     최소 여유 디스크    (기본: 2048, 미달이면 507)
     FA_KEEP_LOCAL_RESULT  S3 업로드 뒤에도 로컬 사본 유지 (기본: 0)
+    FA_RECOVER         기동 시 중단 작업 복구 (기본: 1)
     FA_LIST_LIMIT      목록 기본 개수      (기본: 100)
     FA_MAX_ATTEMPTS    일시적 오류 재시도  (기본: 3)
 
@@ -94,6 +95,9 @@ def _bool_env(name, default):
 # 이미 "로컬에 없으면 S3 로 302" 이므로 들고 있을 이유가 없고, 안 지우면
 # 대량 처리에서 디스크가 먼저 찬다(docs/issues/001). 1 이면 예전처럼 남긴다.
 KEEP_LOCAL = _bool_env("FA_KEEP_LOCAL_RESULT", False)
+# 기동 시 중단된 작업 정리. --workers N 으로 띄울 때는 한 프로세스만 켜 둔다 —
+# 여럿이 켜면 각자 같은 작업을 재큐해 중복 처리한다.
+RECOVER = _bool_env("FA_RECOVER", True)
 
 
 JOB_DEFAULTS = {

@@ -44,7 +44,7 @@ _sweeper = None
 async def lifespan(_app):
     global _sweeper
     os.makedirs(config.JOBS_DIR, exist_ok=True)
-    jobs.recover_orphans()
+    worker.resume_orphans()
     if config.SWEEP_SEC > 0 and _sweeper is None:
         _sweeper = threading.Thread(target=jobs.sweep_loop, daemon=True,
                                     name="sweeper")

@@ -261,26 +261,54 @@ def sweep_loop():
 def recover_orphans():
     """재시작 시, 중단된 채 남은 작업을 정리한다.
 
-    프로세스가 죽으면 queued/running 상태 파일이 그대로 남는다. 그대로 두면
-    클라이언트는 영원히 '처리 중' 을 폴링한다. 시작할 때 한 번 훑어 실패로
-    표시한다 (이 프로세스가 방금 만든 작업은 메모리에 있으므로 건드리지 않는다).
+    **``queued`` 와 ``running`` 은 성격이 다르다.**
+
+    - ``running`` — 중간에 끊겼다. 결과물이 온전한지 알 수 없으므로 실패로 둔다.
+    - ``queued`` — **아직 아무 일도 일어나지 않았다.** 입력도 그대로고 부작용도
+      없다. 다시 큐에 넣으면 그만이다.
+
+    예전에는 둘을 한 덩어리로 보고 전부 실패로 표시했다. 그래서 500건을 넣어
+    두고 코드를 배포하려고 서버를 내렸다 올리면 남은 대기 건이 통째로 날아갔다
+    (docs/issues/002).
+
+    재큐한 작업은 ``JOBS`` 에 넣어 돌려준다 — 실제로 워커에 제출하는 것은
+    호출하는 쪽 몫이다. 이 모듈이 워커를 임포트하면 의존이 순환한다.
+
+    ``FA_RECOVER=0`` 이면 아무것도 하지 않는다. ``--workers N`` 으로 여러 개를
+    띄울 때는 **한 프로세스만 켜 두어야 한다** — 그렇지 않으면 각자 같은 작업을
+    재큐해 중복 처리한다.
+
+    Returns 다시 돌려야 할 Job 목록 (오래된 순).
     """
-    n = 0
-    for j in all_jobs():
+    if not config.RECOVER:
+        return []
+    failed, resume = 0, []
+    for j in sorted(all_jobs(), key=lambda x: x.created):
         with LOCK:
             live = j.id in JOBS
-        if live or j.status not in ("queued", "running"):
+        if live:
             continue
-        j.status = "failed"
-        j.error = {"code": "interrupted", "title": "서버 재시작으로 중단됨",
-                   "detail": "처리 중 프로세스가 종료됐다", "hint": "다시 제출하라",
-                   "retryable": True}
-        j.finished = time.time()
-        save_job(j)
-        n += 1
-    if n:
-        log.warning("중단된 작업 %d건을 실패로 표시했다", n)
-    return n
+        if j.status == "running":
+            j.status = "failed"
+            j.error = {"code": "interrupted", "title": "서버 재시작으로 중단됐습니다",
+                       "detail": "처리 중 프로세스가 종료됐습니다",
+                       "hint": "다시 제출해 주세요.", "retryable": True}
+            j.finished = time.time()
+            save_job(j)
+            failed += 1
+        elif j.status == "queued":
+            # 시도 횟수는 올리지 않는다. 재시작은 이 작업이 실패한 것이 아니다 —
+            # 여기서 세면 배포를 몇 번 하는 것만으로 재시도가 소진된다.
+            j.stage, j.done, j.total = "", 0, 0
+            with LOCK:
+                JOBS[j.id] = j
+            save_job(j)
+            resume.append(j)
+    if failed:
+        log.warning("중단된 작업 %d건을 실패로 표시했다", failed)
+    if resume:
+        log.info("대기 중이던 작업 %d건을 다시 큐에 넣는다", len(resume))
+    return resume
 
 
 def free_mb():

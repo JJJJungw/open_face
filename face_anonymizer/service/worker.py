@@ -263,6 +263,18 @@ def run(job_id):
         fail_or_retry(j, e, permanent=False)
 
 
+def resume_orphans():
+    """재시작 뒤, 대기 중이던 작업을 다시 워커에 올린다.
+
+    상태를 정리하는 것은 jobs 가, 실제로 제출하는 것은 여기가 한다. 순서는
+    만들어진 순 그대로다 — 재시작했다고 순번이 뒤바뀌면 진행 상황이 안 읽힌다.
+    """
+    resumed = jobs.recover_orphans()
+    for j in resumed:
+        EXEC.submit(run, j.id)
+    return len(resumed)
+
+
 # ── 큐에 넣기 ────────────────────────────────────────────────────────────────
 
 def new_job_id():
