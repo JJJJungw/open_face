@@ -10,6 +10,10 @@ third_party/*
 _stage/
 _to_delete/
 
+# 로컬 설정. .env.example 만 저장소에 남긴다
+.env
+!.env.example
+
 # 입출력 영상
 *.mp4
 *.avi

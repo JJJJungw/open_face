@@ -1,6 +1,12 @@
 """face_anonymizer — YOLO-FaceV2 + ByteTrack 기반 영상 얼굴 비식별화."""
 
-from .core.pipeline import (
+# .env 는 다른 무엇보다 먼저 읽어야 한다. 설정 모듈들이 임포트 시점에
+# os.environ 을 읽으므로, 그 뒤에 채우면 아무 효과가 없다.
+from . import env as _env
+
+_env.load()
+
+from .core.pipeline import (  # noqa: E402
     Result,
     VideoAnonymizer,
     VideoInfo,
