@@ -132,8 +132,9 @@ NOT_READY = _p(
     retryable=True)
 MODEL_LOAD_FAILED = _p(
     "model_load_failed", 503, "모델을 불러오지 못했습니다",
-    "가중치 경로와 GPU 상태를 확인해 주세요. "
-    "python setup_weights.py 를 아직 실행하지 않았을 수 있습니다.")
+    "가중치와 GPU 상태를 확인해 주세요. 가중치는 S3(FA_S3_WEIGHTS_KEY)에서 "
+    "받아 오며, 버킷이 설정되어 있지 않으면 python setup_weights.py 로 "
+    "직접 준비할 수 있습니다.")
 QUEUE_FULL = _p(
     "queue_full", 429, "대기열이 가득 찼습니다",
     "Retry-After 에 적힌 시간 뒤에 다시 보내 주세요.", retryable=True)
@@ -211,6 +212,7 @@ def classify(exc):
     고칠 곳이 한 군데여야 한다.
     """
     from ..storage import s3 as s3mod
+    from ..storage.weights import WeightsUnavailable
     from ..core.pipeline import (
         DecodeIncompleteError,
         DetectionSanityError,
@@ -220,6 +222,8 @@ def classify(exc):
 
     if isinstance(exc, ProblemError):
         return exc.problem
+    if isinstance(exc, WeightsUnavailable):
+        return MODEL_LOAD_FAILED
     if isinstance(exc, DecodeIncompleteError):
         return DECODE_INCOMPLETE
     if isinstance(exc, VideoOpenError):

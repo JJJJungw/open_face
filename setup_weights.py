@@ -1,13 +1,20 @@
-"""YOLO-FaceV2 리포 클론 + 가중치 다운로드.
+"""YOLO-FaceV2 리포 클론 + 가중치 준비.
 
-한 번만 실행하면 third_party/YOLO-FaceV2 (model/utils 코드) 와
-weights/yolo-facev2.pt 가 준비된다.
+    python setup_weights.py            준비 (S3 우선, 없으면 GitHub)
+    python setup_weights.py --upload   지금 있는 가중치를 S3 에 올린다
 
-    python setup_weights.py
+가중치는 **S3 를 먼저 본다.** 배포할 때마다 GitHub 릴리스에 의존하면 레이트
+리밋에 걸리고, 네트워크 정책에 막히고, 업스트림 태그가 바뀌면 어제와 다른
+파일을 받는다. 버킷에 없거나 S3 가 설정되어 있지 않으면 GitHub 로 물러선다 —
+처음 한 번은 어딘가에서 받아 와야 하고, 그게 곧 `--upload` 로 올릴 파일이다.
+
+리포는 그대로 GitHub 에서 클론한다. 바꾸는 범위를 가중치 하나로 좁힌다.
 """
 
+import argparse
 import os
 import subprocess
+import sys
 import urllib.request
 
 ROOT = os.path.dirname(os.path.abspath(__file__))
@@ -17,25 +24,68 @@ WEIGHTS = os.path.join(ROOT, "weights", "yolo-facev2.pt")
 REPO_URL = "https://github.com/clibdev/YOLO-FaceV2.git"
 WEIGHTS_URL = "https://github.com/clibdev/YOLO-FaceV2/releases/latest/download/yolo-facev2.pt"
 
+sys.path.insert(0, ROOT)
+
+
+def ensure_repo():
+    os.makedirs(os.path.dirname(REPO_DIR), exist_ok=True)
+    if os.path.isdir(REPO_DIR):
+        print("리포 있음 :", REPO_DIR)
+        return
+    print(f"리포 클론 : {REPO_URL}")
+    subprocess.run(["git", "clone", "--depth", "1", REPO_URL, REPO_DIR], check=True)
+
+
+def ensure_weights():
+    from face_anonymizer.storage import weights as store
+
+    if store.looks_complete(WEIGHTS):
+        print(f"가중치 있음: {WEIGHTS} ({os.path.getsize(WEIGHTS)/1e6:.1f} MB)")
+        return
+
+    os.makedirs(os.path.dirname(WEIGHTS), exist_ok=True)
+    try:
+        store.ensure(WEIGHTS)
+        print("가중치 준비: S3 에서 받음")
+        return
+    except store.WeightsUnavailable as e:
+        print(f"S3 에서 받지 못함 — GitHub 릴리스로 받습니다.\n  ({e})")
+
+    print(f"내려받는 중: {WEIGHTS_URL}")
+    urllib.request.urlretrieve(WEIGHTS_URL, WEIGHTS)
+    print("가중치 준비: GitHub 에서 받음")
+    print("  → 다음부터 S3 에서 받으려면: python setup_weights.py --upload")
+
+
+def upload():
+    """지금 있는 가중치를 S3 에 올린다. 한 번만 하면 된다."""
+    from face_anonymizer.storage import s3 as s3mod
+    from face_anonymizer.storage import weights as store
+
+    if not store.looks_complete(WEIGHTS):
+        sys.exit(f"올릴 가중치가 없습니다: {WEIGHTS}")
+    bucket = s3mod.get_store()
+    if bucket is None:
+        sys.exit("S3 가 설정되어 있지 않습니다. FA_S3_BUCKET 을 설정해 주세요.")
+    key = store.WEIGHTS_KEY
+    print(f"올리는 중: {WEIGHTS} → s3://{bucket.bucket}/{key}")
+    bucket.upload(WEIGHTS, key)
+    print("완료. 이제 새 서버는 여기서 받습니다.")
+
 
 def main():
-    os.makedirs(os.path.dirname(REPO_DIR), exist_ok=True)
-    os.makedirs(os.path.dirname(WEIGHTS), exist_ok=True)
+    ap = argparse.ArgumentParser(description=__doc__.splitlines()[0])
+    ap.add_argument("--upload", action="store_true",
+                    help="지금 있는 가중치를 S3 에 올린다")
+    args = ap.parse_args()
 
-    if not os.path.isdir(REPO_DIR):
-        print(f"cloning {REPO_URL} ...")
-        subprocess.run(["git", "clone", "--depth", "1", REPO_URL, REPO_DIR], check=True)
-    else:
-        print("repo already present:", REPO_DIR)
+    if args.upload:
+        return upload()
 
-    if not (os.path.exists(WEIGHTS) and os.path.getsize(WEIGHTS) > 1_000_000):
-        print(f"downloading weights → {WEIGHTS}")
-        urllib.request.urlretrieve(WEIGHTS_URL, WEIGHTS)
-    else:
-        print("weights already present:", WEIGHTS)
-
+    ensure_repo()
+    ensure_weights()
     size = os.path.getsize(WEIGHTS) / 1e6 if os.path.exists(WEIGHTS) else 0
-    print(f"ready. weights {size:.1f} MB")
+    print(f"\n준비 완료. 가중치 {size:.1f} MB")
 
 
 if __name__ == "__main__":

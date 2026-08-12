@@ -50,7 +50,14 @@ def get_anonymizer():
     global _anonymizer
     with _anon_lock:
         if _anonymizer is None:
-            from .pipeline import VideoAnonymizer
+            from ..core.detector import DEFAULT_WEIGHTS
+            from ..core.pipeline import VideoAnonymizer
+            from ..storage import weights as weights_store
+
+            # 새 EC2 나 컨테이너에서는 여기서 처음 받는다. 이미 있으면 네트워크
+            # 호출조차 없다. 검출기(core)가 S3 를 모르게 하려고 만드는 쪽에서
+            # 갖춰 놓고 넘긴다.
+            weights_store.ensure(DEFAULT_WEIGHTS)
             log.info("검출기 로드 중 (device=%s imgsz=%d)", config.DEVICE, config.IMGSZ)
             _anonymizer = VideoAnonymizer(device=config.DEVICE, imgsz=config.IMGSZ)
             log.info("검출기 준비 완료")
