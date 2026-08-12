@@ -25,9 +25,7 @@ from .geometry import letterbox, snap_to_stride, unletterbox
 
 log = logging.getLogger(__name__)
 
-_HERE = os.path.dirname(os.path.abspath(__file__))
-DEFAULT_REPO = os.path.abspath(os.path.join(_HERE, "..", "third_party", "YOLO-FaceV2"))
-DEFAULT_WEIGHTS = os.path.abspath(os.path.join(_HERE, "..", "weights", "yolo-facev2.pt"))
+from .paths import DEFAULT_REPO, DEFAULT_WEIGHTS, ROOT  # noqa: F401
 
 # RLock: 중첩 호출이 생겨도 데드락으로 프로세스 전체를 막지 않는다.
 _LOAD_LOCK = threading.RLock()

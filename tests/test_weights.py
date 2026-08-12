@@ -84,3 +84,41 @@ def test_weights_failure_is_classified_as_model_load_failed():
     from face_anonymizer.service import errors
     p = errors.classify(store.WeightsUnavailable("없다"))
     assert p.code == "model_load_failed"
+
+
+# ── 기본 경로 ────────────────────────────────────────────────────────────────
+#
+# 리팩토링으로 detector.py 가 core/ 로 내려가면서 `..` 가 한 단계 모자라
+# 패키지 안쪽(face_anonymizer/weights/)을 가리켰다. 서버는 기동에서 터졌고,
+# 그전에 가중치는 엉뚱한 곳에 받아져 있었다. 경로를 테스트로 못 박는다.
+
+def test_default_paths_point_at_the_repo_root():
+    import os
+
+    from face_anonymizer.core import paths
+
+    root = os.path.dirname(os.path.dirname(os.path.abspath(paths.__file__)))
+    root = os.path.dirname(root)                     # face_anonymizer/ 의 부모
+
+    assert paths.ROOT == root
+    assert paths.DEFAULT_WEIGHTS == os.path.join(root, "weights", "yolo-facev2.pt")
+    assert paths.DEFAULT_REPO == os.path.join(root, "third_party", "YOLO-FaceV2")
+    # 패키지 안쪽을 가리키면 안 된다
+    assert os.path.join("face_anonymizer", "weights") not in paths.DEFAULT_WEIGHTS
+    assert os.path.join("face_anonymizer", "third_party") not in paths.DEFAULT_REPO
+
+
+def test_paths_can_be_overridden_by_env(monkeypatch):
+    """컨테이너에서는 가중치를 볼륨에 두는 게 흔하다."""
+    import importlib
+
+    monkeypatch.setenv("FA_WEIGHTS", "/models/w.pt")
+    monkeypatch.setenv("FA_REPO_DIR", "/opt/yolo")
+    from face_anonymizer.core import paths
+    importlib.reload(paths)
+    try:
+        assert paths.DEFAULT_WEIGHTS == "/models/w.pt"
+        assert paths.DEFAULT_REPO == "/opt/yolo"
+    finally:
+        monkeypatch.undo()
+        importlib.reload(paths)

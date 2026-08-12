@@ -19,7 +19,7 @@ import urllib.request
 
 ROOT = os.path.dirname(os.path.abspath(__file__))
 REPO_DIR = os.path.join(ROOT, "third_party", "YOLO-FaceV2")
-WEIGHTS = os.path.join(ROOT, "weights", "yolo-facev2.pt")
+WEIGHTS = os.path.join(ROOT, "weights", "yolo-facev2.pt")   # paths.DEFAULT_WEIGHTS 와 같은 자리
 
 REPO_URL = "https://github.com/clibdev/YOLO-FaceV2.git"
 WEIGHTS_URL = "https://github.com/clibdev/YOLO-FaceV2/releases/latest/download/yolo-facev2.pt"

@@ -50,7 +50,7 @@ def get_anonymizer():
     global _anonymizer
     with _anon_lock:
         if _anonymizer is None:
-            from ..core.detector import DEFAULT_WEIGHTS
+            from ..core.paths import DEFAULT_WEIGHTS
             from ..core.pipeline import VideoAnonymizer
             from ..storage import weights as weights_store
 
