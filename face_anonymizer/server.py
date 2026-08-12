@@ -36,6 +36,7 @@
     FA_METHOD mosaic · FA_CONF 0.25 · FA_BATCH_SIZE 32 · FA_PAD 0.15
     FA_MOSAIC_SCALE 0.06 · FA_LINGER 5 · FA_INTERP 1 · FA_KEEP_AUDIO 1
     FA_CRF 23 · FA_BITRATE_RATIO 1.0
+    FA_OUTPUT_HEIGHT 720 (0=원본 유지) · FA_TARGET_BITRATE 3500k · FA_MAX_BITRATE
     (imgsz 는 FA_IMGSZ 를 검출기와 공유한다)
     FA_QUEUE_MAX       대기열 개수 상한    (기본: 0 = 무제한)
     FA_BATCH_MAX       한 번에 넣을 개수   (기본: 0 = 무제한)
@@ -77,8 +78,12 @@ from .anonymize import METHODS
 from .pipeline import (
     DEFAULT_BITRATE_RATIO,
     DEFAULT_CRF,
+    DEFAULT_HEIGHT,
+    DEFAULT_MAX_BITRATE,
+    DEFAULT_TARGET_BITRATE,
     VideoOpenError,
     VideoWriteError,
+    parse_bitrate,
 )
 from .webui import INDEX_HTML
 
@@ -144,6 +149,11 @@ JOB_DEFAULTS = {
     "keep_audio": _bool_env("FA_KEEP_AUDIO", True),
     "crf": DEFAULT_CRF,
     "bitrate_ratio": DEFAULT_BITRATE_RATIO,
+    # 납품 스펙. 값만 바꾸면 되도록 열어 둔다 — 기준이 바뀔 때 코드를 고치게
+    # 하면 안 된다. height=0 이면 원본 유지, bitrate="" 면 예전 CRF 방식.
+    "height": DEFAULT_HEIGHT,
+    "bitrate": DEFAULT_TARGET_BITRATE,
+    "max_bitrate": DEFAULT_MAX_BITRATE,
 }
 
 # 추론 직렬화. max_workers=1 이 이 서버의 동시성 정책 전부다.
@@ -757,6 +767,18 @@ def resolve_params(given):
         raise errors.INVALID_INPUT(
             f"conf 는 0~1 사이여야 한다 (받은 값 {params['conf']})", field="conf")
     params["imgsz"] = max(320, min(int(params["imgsz"]), 2048))
+    h = int(params["height"] or 0)
+    if h and not 144 <= h <= 4320:
+        raise errors.INVALID_INPUT(
+            f"height 는 0(원본 유지) 이거나 144~4320 이어야 한다 (받은 값 {h})",
+            field="height")
+    params["height"] = h
+    for k in ("bitrate", "max_bitrate"):
+        v = params[k]
+        if v not in ("", None) and parse_bitrate(v) is None:
+            raise errors.INVALID_INPUT(
+                f"{k} 를 읽을 수 없다: {v!r} (예: 3500k · 3.5M · 3500000)",
+                field=k)
     return params
 
 

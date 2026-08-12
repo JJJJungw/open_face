@@ -100,6 +100,21 @@ DEFAULT_BITRATE_RATIO = float(os.environ.get("FA_BITRATE_RATIO", "1.0"))
 # 계수는 각 코덱이 H.264 대비 같은 화질을 몇 분의 일 비트로 내는지다(BD-rate
 # 기준 통설: AV1·HEVC 는 H.264 의 절반 안팎). 정확한 값일 필요는 없다 —
 # 상한이 화질을 깎지 않을 만큼만 넉넉하면 된다.
+# 납품 스펙. 둘 다 환경 변수로 열어 둔다 — 기준이 바뀔 때 코드를 고치는 게
+# 아니라 값을 바꾸는 것으로 끝나야 한다.
+#
+#   FA_OUTPUT_HEIGHT   짧은 변 기준 상한 (0 이면 원본 유지)
+#   FA_TARGET_BITRATE  목표 비트레이트 ("3500k" / "3500000" / "" 이면 안 씀)
+#   FA_MAX_BITRATE     순간 최대 (비면 목표의 1.15배)
+#
+# 목표 비트레이트를 주면 **CRF 와 원본 비례 상한은 쓰지 않는다.** 둘은 반대
+# 방향의 정책이다 — CRF 는 화질을 정해 두고 용량이 따라오게 하고, 목표
+# 비트레이트는 용량을 정해 두고 화질이 따라오게 한다. 같이 걸면 서로 싸운다.
+DEFAULT_HEIGHT = int(os.environ.get("FA_OUTPUT_HEIGHT", "720") or 0)
+DEFAULT_TARGET_BITRATE = os.environ.get("FA_TARGET_BITRATE", "3500k")
+DEFAULT_MAX_BITRATE = os.environ.get("FA_MAX_BITRATE", "")
+MAXRATE_HEADROOM = 1.15
+
 CODEC_EFFICIENCY = {
     "av1": 2.0, "libaom-av1": 2.0, "libsvtav1": 2.0,
     "hevc": 1.8, "h265": 1.8, "vp9": 1.8,
@@ -332,6 +347,55 @@ def pick_encoder(timeout=60):
     return None
 
 
+def parse_bitrate(value):
+    """'3500k' · '3.5M' · 3500000 · '' -> bps 또는 None."""
+    if value is None or value == "":
+        return None
+    if isinstance(value, (int, float)):
+        return int(value) or None
+    v = str(value).strip().lower().replace("bps", "").replace("bit/s", "")
+    mult = 1
+    if v.endswith("k"):
+        v, mult = v[:-1], 1_000
+    elif v.endswith("m"):
+        v, mult = v[:-1], 1_000_000
+    try:
+        return int(float(v) * mult) or None
+    except ValueError:
+        return None
+
+
+def video_size(path, timeout=FFMPEG_TIMEOUT):
+    """(가로, 세로). 알 수 없으면 (0, 0)."""
+    p = _run(["ffprobe", "-v", "error", "-select_streams", "v:0",
+              "-show_entries", "stream=width,height", "-of", "csv=p=0",
+              path], timeout)
+    if p is None or p.returncode != 0:
+        return 0, 0
+    try:
+        w, h = (int(x) for x in p.stdout.strip().split(",")[:2])
+        return w, h
+    except ValueError:
+        return 0, 0
+
+
+def scale_filter(width, height, target):
+    """짧은 변이 ``target`` 을 넘을 때만 줄이는 -vf 값. 아니면 None.
+
+    **짧은 변 기준**이다. 세로 영상에 높이를 그대로 맞추면 1080x1920 이
+    405x720 이 되어 원본보다 훨씬 작아진다. 짧은 변으로 재면 720x1280 이 되어
+    가로 영상의 1280x720 과 같은 급이 된다.
+
+    확대는 하지 않는다 — 없던 화질이 생기지 않고 용량만 는다. H.264 4:2:0 은
+    치수가 짝수여야 해서 나머지 한 변은 -2 로 맡긴다.
+    """
+    if not target or not width or not height:
+        return None
+    if min(width, height) <= target:
+        return None
+    return f"scale=-2:{target}" if width >= height else f"scale={target}:-2"
+
+
 def video_codec(path, timeout=FFMPEG_TIMEOUT):
     """비디오 코덱 이름(소문자). 알 수 없으면 빈 문자열."""
     p = _run(["ffprobe", "-v", "error", "-select_streams", "v:0",
@@ -409,7 +473,9 @@ def video_frame_count(path, timeout=FFMPEG_TIMEOUT):
 
 def finalize_output(noaudio, original, output, keep_audio=True,
                     expected_frames=None, crf=DEFAULT_CRF,
-                    bitrate_ratio=DEFAULT_BITRATE_RATIO, timeout=FFMPEG_TIMEOUT):
+                    bitrate_ratio=DEFAULT_BITRATE_RATIO, height=DEFAULT_HEIGHT,
+                    bitrate=DEFAULT_TARGET_BITRATE,
+                    max_bitrate=DEFAULT_MAX_BITRATE, timeout=FFMPEG_TIMEOUT):
     """중간 산출물을 최종 결과물로 만든다 — H.264 재인코딩 + 오디오 합성 + 검증.
 
     네 가지를 못 박는다.
@@ -464,13 +530,30 @@ def finalize_output(noaudio, original, output, keep_audio=True,
         cmd += ["-map", "0:v:0", "-an"]
     # -shortest 없음(위 1번). +faststart 는 moov 를 앞으로 옮겨 부분 다운로드
     # 상태에서도 재생이 시작되게 한다.
-    cmd += ["-c:v", encoder, qflag, str(crf), *extra, "-pix_fmt", "yuv420p"]
-    cap = bitrate_cap(original, bitrate_ratio, timeout)
-    if cap:
-        cmd += ["-maxrate", str(cap), "-bufsize", str(cap * 2)]
-        log.info("비트레이트 상한 %.2f Mbps (원본 %.2f Mbps · %s)",
-                 cap / 1e6, (video_bitrate(original, timeout) or 0) / 1e6,
-                 video_codec(original, timeout) or "?")
+    # 납품 해상도. 검출·렌더는 원본 해상도에서 끝났고 여기서만 줄인다 —
+    # 먼저 줄이면 작은 얼굴 검출률이 그대로 떨어진다.
+    vf = scale_filter(*video_size(noaudio, timeout), height)
+    if vf:
+        cmd += ["-vf", vf]
+        log.info("출력 해상도: %s", vf)
+
+    cmd += ["-c:v", encoder, *extra, "-pix_fmt", "yuv420p"]
+
+    target = parse_bitrate(bitrate)
+    if target:
+        # 용량을 정해 두는 정책. CRF 도 원본 비례 상한도 걸지 않는다.
+        top = parse_bitrate(max_bitrate) or int(target * MAXRATE_HEADROOM)
+        cmd += ["-b:v", str(target), "-maxrate", str(top),
+                "-bufsize", str(top * 2)]
+        log.info("목표 비트레이트 %.2f Mbps (최대 %.2f)", target / 1e6, top / 1e6)
+    else:
+        cmd += [qflag, str(crf)]
+        cap = bitrate_cap(original, bitrate_ratio, timeout)
+        if cap:
+            cmd += ["-maxrate", str(cap), "-bufsize", str(cap * 2)]
+            log.info("비트레이트 상한 %.2f Mbps (원본 %.2f Mbps · %s)",
+                     cap / 1e6, (video_bitrate(original, timeout) or 0) / 1e6,
+                     video_codec(original, timeout) or "?")
     cmd += ["-movflags", "+faststart", out_tmp]
 
     p = _run(cmd, timeout)
@@ -594,7 +677,9 @@ class VideoAnonymizer:
                 conf=0.25, iou=0.45, pad=0.15, mosaic_scale=0.06, linger=5,
                 interp=True, batch_size=1, keep_audio=True, progress=None,
                 allow_partial=False, min_detection_rate=None, crf=DEFAULT_CRF,
-                bitrate_ratio=DEFAULT_BITRATE_RATIO, rotate=0):
+                bitrate_ratio=DEFAULT_BITRATE_RATIO, height=DEFAULT_HEIGHT,
+                bitrate=DEFAULT_TARGET_BITRATE, max_bitrate=DEFAULT_MAX_BITRATE,
+                rotate=0):
         """영상 한 편을 익명화하고 Result 를 돌려준다.
 
         progress : callable(stage, done, total) | None
@@ -623,7 +708,8 @@ class VideoAnonymizer:
                 mosaic_scale=mosaic_scale, linger=linger, interp=interp,
                 batch_size=batch_size, keep_audio=keep_audio, progress=progress,
                 allow_partial=allow_partial, min_detection_rate=min_detection_rate,
-                crf=crf, bitrate_ratio=bitrate_ratio, rotate=rotate,
+                crf=crf, bitrate_ratio=bitrate_ratio, height=height,
+                bitrate=bitrate, max_bitrate=max_bitrate, rotate=rotate,
                 t_start=t_start))
         finally:
             shutil.rmtree(tmpdir, ignore_errors=True)
@@ -638,6 +724,8 @@ class VideoAnonymizer:
             info_kw["progress"], info_kw["allow_partial"],
             info_kw["min_detection_rate"], info_kw["crf"],
             info_kw["bitrate_ratio"], info_kw["rotate"], info_kw["t_start"])
+        height = info_kw["height"]
+        bitrate, max_bitrate = info_kw["bitrate"], info_kw["max_bitrate"]
 
         # OpenCV 는 ffmpeg 본체보다 코덱 지원이 좁다. AV1 은 파일을 열기는 열면서
         # 한 프레임도 못 뽑는다. 읽을 수 있는 형태로 만들어 놓고 시작한다.
@@ -715,7 +803,8 @@ class VideoAnonymizer:
         t0 = time.perf_counter()
         status = finalize_output(noaudio, input_path, output_path, keep_audio,
                                  expected_frames=rendered, crf=crf,
-                                 bitrate_ratio=bitrate_ratio)
+                                 bitrate_ratio=bitrate_ratio, height=height,
+                                 bitrate=bitrate, max_bitrate=max_bitrate)
         t_audio = time.perf_counter() - t0
 
         timing = Timing(ingest=t_ingest, detect=t_detect, track=t_track,

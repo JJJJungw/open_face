@@ -86,12 +86,19 @@ def region_is_obscured(frame, box, threshold=2000.0):
 
 
 def read_frames(path):
+    """디코딩한 프레임 목록.
+
+    ``f.copy()`` 가 꼭 필요하다. OpenCV 의 read() 가 내부 버퍼를 돌려주는
+    경우가 있어서, 이 목록을 들고 있는 동안 다른 인코딩/디코딩이 일어나면
+    앞서 읽은 프레임이 조용히 바뀐다. 실제로 두 출력을 비교하는 테스트에서
+    '배치 크기가 결과를 바꾼다' 는 가짜 실패로 나타났다.
+    """
     cap = cv2.VideoCapture(path)
     out = []
     while True:
         ok, f = cap.read()
         if not ok:
             break
-        out.append(f)
+        out.append(f.copy())
     cap.release()
     return out

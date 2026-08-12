@@ -248,3 +248,28 @@ def test_unknown_codec_falls_back_to_plain_ratio(monkeypatch):
     monkeypatch.setattr(P, "video_bitrate", lambda p, t=None: 1_000_000)
     monkeypatch.setattr(P, "video_codec", lambda p, t=None: "weirdcodec")
     assert P.bitrate_cap("x.mp4", 1.0) == 1_000_000
+
+
+# ── 납품 스펙(해상도 · 비트레이트) ──────────────────────────────────────────
+#
+# 값만 바꿔서 대응할 수 있어야 한다. 기준이 바뀔 때 코드를 고치게 하면 안 된다.
+
+@pytest.mark.parametrize("value,expect", [
+    ("3500k", 3_500_000), ("3.5M", 3_500_000), ("3500000", 3_500_000),
+    (3_500_000, 3_500_000), ("", None), (None, None), (0, None),
+    ("abc", None),
+])
+def test_parse_bitrate_accepts_the_usual_spellings(value, expect):
+    assert P.parse_bitrate(value) == expect
+
+
+@pytest.mark.parametrize("w,h,target,expect", [
+    (1920, 1080, 720, "scale=-2:720"),     # 가로 1080p -> 720p
+    (1280, 720, 720, None),                # 이미 720p — 건드리지 않는다
+    (640, 360, 720, None),                 # 더 작다 — 확대하지 않는다
+    (1080, 1920, 720, "scale=720:-2"),     # 세로: 짧은 변 기준
+    (1920, 1080, 0, None),                 # 0 이면 원본 유지
+    (0, 0, 720, None),                     # 크기를 모르면 손대지 않는다
+])
+def test_scale_filter_uses_the_short_side_and_never_upscales(w, h, target, expect):
+    assert P.scale_filter(w, h, target) == expect
