@@ -44,6 +44,7 @@
 | [003](issues/003-retry-without-backoff.md) | 재시도에 간격이 없어 3회가 순식간에 소진된다 | **해결됨** |
 | [004](issues/004-cancel-blind-spot.md) | S3 전송 중에는 취소가 먹지 않는다 | **해결됨** |
 | [005](issues/005-progress-api-cost.md) | 진척률 API 가 폴더 수만큼 S3 를 호출한다 | 미해결 |
+| [006](issues/006-list-window-hides-work.md) | 목록이 100건에서 잘려 화면 전체가 "유휴" 로 보인다 | **해결됨** |
 
 ## 이미 고친 것들
 

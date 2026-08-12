@@ -20,6 +20,10 @@
     --shadow:0 1px 2px rgba(15,23,42,.05), 0 1px 3px rgba(15,23,42,.04);
   }
   *{box-sizing:border-box}
+  /* 브라우저 기본값 [hidden]{display:none} 은 우선순위가 0 이라 .card{display:flex}
+     한 줄에 진다. 화면 전환이 hidden 으로 되어 있어서, 이게 없으면 '작업' 을
+     눌러도 파일 브라우저가 그대로 남는다. */
+  [hidden]{display:none !important}
   html,body{height:100%}
   body{margin:0;background:var(--bg);color:var(--fg);
        font:13.5px/1.55 -apple-system,BlinkMacSystemFont,"Segoe UI",Roboto,
@@ -157,6 +161,10 @@
   .tag.err::before{background:var(--critical)}
   .tag.plain::before{display:none}
   .empty{text-align:center;color:var(--faint);padding:38px 16px;font-size:12.5px}
+  .pager{display:flex;align-items:center;justify-content:center;gap:12px;
+         padding:14px 16px;border-top:1px solid var(--line);
+         color:var(--dim);font-size:12.5px}
+  .pager button[disabled]{opacity:.4;cursor:default}
   .bar .n{font-size:12.5px;color:var(--dim);margin-left:auto;white-space:nowrap}
   .bar .n b{color:var(--fg)}
 
@@ -271,11 +279,12 @@
       <a onclick="go2('browser')" id="tab-browser">파일 브라우저</a>
       <a onclick="go2('jobs')" id="tab-jobs">작업<span class="c" id="c-jobs"></span></a>
       <div class="grp">작업 상태</div>
-      <a onclick="setFilter('')" id="nav-all">전체<span class="c"></span></a>
+      <a onclick="setFilter('active')" id="nav-active" class="on">진행중<span class="c"></span></a>
       <a onclick="setFilter('running')" id="nav-running">수행중<span class="c"></span></a>
       <a onclick="setFilter('queued')" id="nav-queued">대기<span class="c"></span></a>
       <a onclick="setFilter('done')" id="nav-done">완료<span class="c"></span></a>
       <a onclick="setFilter('failed')" id="nav-failed">실패<span class="c"></span></a>
+      <a onclick="setFilter('')" id="nav-all">전체 기록<span class="c"></span></a>
     </nav>
     <div class="hud">
       <div class="hd">
@@ -361,9 +370,13 @@
 <script>
 const $ = s => document.querySelector(s);
 const go = $('#go');
-let timer = null, filter = '';
+// 기본 목록은 '진행중'(수행중 + 대기) 이다. 끝난 것을 같이 섞으면 수백 건짜리
+// 배치에서 지금 할 일이 완료 기록에 파묻힌다 — 완료는 완료 탭에서 본다.
+let timer = null, filter = 'active', page = 0, pageSize = 100;
 
 function fmt(s) {
+  // 값이 없으면 'NaN:NaN' 이 아니라 '—' 이어야 한다. 옛 기록에는 빠진 항목이 있다.
+  if (!Number.isFinite(s)) return '—';
   s = Math.max(0, Math.round(s));
   const h = Math.floor(s / 3600), m = Math.floor(s % 3600 / 60), x = s % 60;
   return h ? `${h}:${String(m).padStart(2,'0')}:${String(x).padStart(2,'0')}`
@@ -565,7 +578,9 @@ function paramObject() {
 }
 $('#q').addEventListener('input', renderBrowser);
 
-const FILTER_TEXT = { running:'수행중', queued:'대기', done:'완료', failed:'실패' };
+const FILTER_TEXT = { active:'진행중', running:'수행중', queued:'대기',
+                      done:'완료', failed:'실패' };
+const NAV_KEYS = ['active', 'running', 'queued', 'done', 'failed', ''];
 const VIEW_TITLE = { overview:'현황', browser:'파일 브라우저', jobs:'작업' };
 let view = 'browser', lastOverview = 0;
 
@@ -643,22 +658,32 @@ function renderOps(m) {
 }
 
 
-function navCounts(jobs) {
-  const n = { '': jobs.length };
-  for (const k of ['running', 'queued', 'done', 'failed'])
-    n[k] = jobs.filter(j => j.status === k).length;
-  for (const k of ['', 'running', 'queued', 'done', 'failed'])
-    document.querySelector('#nav-' + (k || 'all') + ' .c').textContent = n[k] || '';
-  $('#c-jobs').textContent = jobs.length || '';
+// 숫자는 목록이 아니라 /api/status 의 집계에서 읽는다. 목록은 100건에서
+// 잘리므로 거기서 세면 300건짜리 배치에서 전부 틀린다(docs/issues/006).
+function counts(st) { return (st && st.counts) || {}; }
+
+function navCount(st, key) {
+  const c = counts(st);
+  return key === '' ? (c.total || 0) : (c[key] || 0);
+}
+
+function navCounts(st) {
+  for (const k of NAV_KEYS)
+    document.querySelector('#nav-' + (k || 'all') + ' .c').textContent
+      = navCount(st, k) || '';
+  $('#c-jobs').textContent = navCount(st, '') || '';
 }
 
 function setFilter(f) {
   filter = f;
+  page = 0;                      // 탭을 바꾸면 첫 페이지부터
   if (view === 'overview') return go2('jobs');
-  for (const k of ['','running','queued','done','failed'])
+  for (const k of NAV_KEYS)
     document.getElementById('nav-' + (k || 'all')).classList.toggle('on', k === f);
   poll();
 }
+
+function goPage(p) { page = Math.max(0, p); poll(); }
 
 // ── KPI · 상태 박스 · 작업 목록 ────────────────────────────────────────────
 const RAD = 24, CIRC = 2 * Math.PI * RAD;
@@ -671,16 +696,18 @@ function ring(pct) {
     </svg><span class="pct">${pct}%</span></div>`;
 }
 
-function avgSeconds(jobs) {
-  const d = jobs.filter(j => j.status === 'done' && j.result).slice(0, 5);
-  return d.length ? d.reduce((a, j) => a + j.result.seconds, 0) / d.length : null;
+// 완료 평균도 서버가 센다. 목록 안의 완료 카드를 뒤지면 목록이 잘렸을 때
+// 같이 사라져 '기록 없음' 이 된다.
+function avgSeconds(st) {
+  const r = (st && st.recent) || {};
+  return r.avg_seconds || null;
 }
 
 // 작업 한 건에 걸리는 시간. 완료 기록이 있으면 그 평균이 제일 정확하고,
 // 없으면 지금 도는 작업의 진행률로 되짚는다. 첫 배치에서는 완료가 하나도
 // 없으니 평균만 보면 끝날 때까지 '계산 중' 이다 — 그게 이 화면의 버그였다.
-function jobSeconds(jobs, running) {
-  const avg = avgSeconds(jobs);
+function jobSeconds(st, running) {
+  const avg = avgSeconds(st);
   if (avg) return avg;
   if (running && running.overall >= 5 && running.job_elapsed > 0)
     return running.job_elapsed * 100 / running.overall;
@@ -688,17 +715,17 @@ function jobSeconds(jobs, running) {
 }
 
 function kpis(jobs, st) {
-  const running = jobs.find(j => j.status === 'running');
-  const queued = jobs.filter(j => j.status === 'queued');
-  const done = jobs.filter(j => j.status === 'done');
-  const failed = jobs.filter(j => j.status === 'failed');
-  const avg = avgSeconds(jobs);
-  const per = jobSeconds(jobs, running);
-  const remain = (running ? 1 : 0) + queued.length;
+  const c = counts(st);
+  // 수행중은 목록이 아니라 상태에서 받는다 — '완료' 탭을 눌러도 사라지면 안 된다.
+  const running = (st && st.running) || jobs.find(j => j.status === 'running');
+  const queued = c.queued || 0, done = c.done || 0, failed = c.failed || 0;
+  const avg = avgSeconds(st);
+  const per = jobSeconds(st, running);
+  const remain = (running ? 1 : 0) + queued;
   // 수행중 작업은 '이 작업이 끝나기까지'(job_eta), 대기 작업은 한 건 소요 x 건수.
   const etaAll = running && per != null
-    ? (running.job_eta || 0) + queued.length * per : null;
-  const rf = done.length && done[0].result ? done[0].result.realtime_factor : null;
+    ? (running.job_eta || 0) + queued * per : null;
+  const rf = ((st && st.recent) || {}).realtime_factor || null;
 
   $('#kpis').innerHTML = `
     <div class="tile hero">
@@ -708,13 +735,13 @@ function kpis(jobs, st) {
     </div>
     <div class="tile">
       <div class="lb">수행중 · 대기</div>
-      <div class="v">${running ? 1 : 0}<small>/</small>${queued.length}</div>
+      <div class="v">${running ? 1 : 0}<small>/</small>${queued}</div>
       <div class="sub">${running ? running.name : '유휴'}</div>
     </div>
     <div class="tile">
       <div class="lb">완료</div>
-      <div class="v">${done.length}${failed.length
-        ? `<small style="color:var(--critical)"> · 실패 ${failed.length}</small>` : ''}</div>
+      <div class="v">${done}${failed
+        ? `<small style="color:var(--critical)"> · 실패 ${failed}</small>` : ''}</div>
       <div class="sub">${avg ? `평균 ${fmt(avg)}`
         : (per ? `추정 ${fmt(per)}` : '기록 없음')}</div>
     </div>
@@ -736,10 +763,11 @@ function hud(jobs, st) {
     dot.className = 'dot err'; title.textContent = '준비 중';
     body.innerHTML = `<div class="idle">${st.model_error || '모델을 올리는 중'}</div>`; return;
   }
-  const running = jobs.find(j => j.status === 'running');
-  const queued = jobs.filter(j => j.status === 'queued');
-  const remain = (running ? 1 : 0) + queued.length;
-  const avg = avgSeconds(jobs);
+  const c = counts(st);
+  const running = st.running || jobs.find(j => j.status === 'running');
+  const queued = c.queued || 0;
+  const remain = (running ? 1 : 0) + queued;
+  const avg = avgSeconds(st);
 
   dot.className = 'dot ' + (running ? 'run' : 'ok');
   title.textContent = running ? `수행중 · 남은 ${remain}건`
@@ -747,13 +775,13 @@ function hud(jobs, st) {
   if (!running) {
     body.innerHTML = `<div class="idle">${remain ? '곧 시작합니다' : '처리할 작업이 없습니다'}</div>
       <div class="hgrid">
-        <div><span>대기</span><b>${queued.length}건</b></div>
+        <div><span>대기</span><b>${queued}건</b></div>
         <div><span>디스크</span><b>${st.free_mb != null
           ? (st.free_mb/1024).toFixed(1) + ' GB' : '—'}</b></div>
       </div>`;
     return;
   }
-  const stage = running.stage === 'detect' ? '검출' : running.stage === 'render' ? '렌더' : '준비';
+  const stage = STAGE_TEXT[running.stage] || '준비';
   body.innerHTML = `
     <div class="ring">${ring(running.overall)}
       <div class="who">
@@ -767,7 +795,7 @@ function hud(jobs, st) {
       </div></div>
     <div class="hgrid">
       <div><span>이 작업</span><b>${fmt(running.eta)}</b></div>
-      <div><span>전체</span><b>${avg ? fmt(running.eta + queued.length*avg) : '—'}</b></div>
+      <div><span>전체</span><b>${avg ? fmt(running.eta + queued*avg) : '—'}</b></div>
     </div>`;
 }
 
@@ -824,21 +852,23 @@ function card(j) {
       <div class="kv">${rows.map(([k, v]) =>
         `<div><span>${k}</span><b title="${v}">${v}</b></div>`).join('')}</div>`;
   } else {
-    const r = j.result, t = r.timing;
+    // 옛 버전이 쓴 job.json 에는 없는 항목이 있을 수 있다. 카드 하나가
+    // 던지면 목록 전체가 안 그려지므로 기본값을 깔고 간다.
+    const r = j.result || {}, t = r.timing || {}, v = r.video || {};
     const warns = (r.warnings || []).length
       ? `<div class="warn"><b>확인 필요</b>${
           r.warnings.map(w => WARN_TEXT[w] || w).join('<br>')}</div>` : '';
     body = `<div class="bar2"><i style="width:100%"></i></div>${warns}
       <div class="stats">
         <div><span>처리 시간</span><b>${fmt(r.seconds)}</b></div>
-        <div><span>속도</span><b>${r.fps} f/s</b></div>
-        <div><span>실시간 대비</span><b>${r.realtime_factor}×</b></div>
-        <div><span>프레임</span><b>${r.frames}</b></div>
-        <div><span>검출</span><b>${r.raw_boxes}</b></div>
-        <div><span>보간</span><b>${r.filled_boxes}</b></div>
+        <div><span>속도</span><b>${r.fps ?? '—'} f/s</b></div>
+        <div><span>실시간 대비</span><b>${r.realtime_factor ?? '—'}×</b></div>
+        <div><span>프레임</span><b>${r.frames ?? '—'}</b></div>
+        <div><span>검출</span><b>${r.raw_boxes ?? '—'}</b></div>
+        <div><span>보간</span><b>${r.filled_boxes ?? '—'}</b></div>
       </div>
       <div class="meta" style="margin-top:8px">검출 ${fmt(t.detect)} · 추적 ${fmt(t.track)}
-        · 렌더 ${fmt(t.render)} · ${r.video.width}×${r.video.height} · ${r.method}</div>
+        · 렌더 ${fmt(t.render)} · ${v.width}×${v.height} · ${r.method || '—'}</div>
       <div class="row">
         <a class="dl" href="/api/jobs/${j.id}/download">내려받기</a>
       </div>`;
@@ -853,6 +883,35 @@ function card(j) {
       <span class="tag ${tagcls}">${label}</span></div>${body}</div>`;
 }
 
+// 카드 한 장이 던져도 목록 전체가 사라지면 안 된다. 더 나쁜 것은 그 예외가
+// poll() 을 뚫고 나가 **폴링이 멈추는** 것이다 — 화면이 그 시점에 얼어붙는다.
+function safeCard(j) {
+  try {
+    return card(j);
+  } catch (e) {
+    console.error('카드를 그리지 못했습니다', j && j.id, e);
+    return `<div class="job" id="job-${j.id}">
+      <div class="jhead"><div class="jname">${j.name || j.id}</div>
+        <span class="tag err">표시 오류</span></div>
+      <div class="meta">이 작업의 기록을 화면에 옮기지 못했습니다 —
+        <a href="/api/jobs/${j.id}">원본 보기</a></div></div>`;
+  }
+}
+
+// 페이지 막대. 총 건수는 목록이 아니라 집계에서 온다 — 목록은 한 페이지만 안다.
+function pager(total) {
+  const pages = Math.max(1, Math.ceil(total / pageSize));
+  if (pages <= 1) return '';
+  const from = page * pageSize + 1, to = Math.min(total, (page + 1) * pageSize);
+  return `<div class="pager">
+    <button class="ghost" ${page === 0 ? 'disabled' : ''}
+            onclick="goPage(${page - 1})">이전</button>
+    <span>${from}–${to} / ${total}건 · ${page + 1} / ${pages} 쪽</span>
+    <button class="ghost" ${page >= pages - 1 ? 'disabled' : ''}
+            onclick="goPage(${page + 1})">다음</button>
+  </div>`;
+}
+
 async function del(id) { await fetch('/api/jobs/' + id, { method:'DELETE' }); poll(); }
 async function cancel(id) {
   const r = await fetch(`/api/jobs/${id}/cancel`, { method:'POST' });
@@ -861,25 +920,43 @@ async function cancel(id) {
 }
 
 async function poll() {
+  // 거르는 일은 서버가 한다. 잘라 받은 다음 여기서 거르면, 완료가 100건 창
+  // 밖에 있을 때 '완료' 탭이 비어 보인다(docs/issues/006).
+  //
+  // 어느 필터로 요청했는지 붙잡아 둔다. 탭을 누르면 이전 폴링이 아직 날아오는
+  // 중이라, 그게 나중에 도착해 방금 고른 탭 위에 옛 목록을 덮어쓴다.
+  const asked = filter, askedPage = page;
+  const q = [asked ? 'status=' + asked : '',
+             askedPage ? 'offset=' + askedPage * pageSize : ''].filter(Boolean).join('&');
   const [jobs, st] = await Promise.all([
-    fetch('/api/jobs').then(r => r.json()).catch(() => null),
+    fetch('/api/jobs' + (q ? '?' + q : '')).then(r => r.json()).catch(() => null),
     fetch('/api/status').then(r => r.json()).catch(() => null),
   ]);
+  // 그 사이 탭이나 쪽이 바뀌었다 — 새 폴링이 그린다
+  if (asked !== filter || askedPage !== page) return;
   hud(jobs || [], st);
   if (!jobs) return;
   kpis(jobs, st);
-  navCounts(jobs);
-  const shown = filter ? jobs.filter(j => j.status === filter) : jobs;
-  $('#jobcnt').textContent = `${shown.length}건`;
+  navCounts(st);
+  const c = counts(st);
+  if (st && st.list_limit) pageSize = st.list_limit;
+  const total = navCount(st, filter);
+  // 큐가 빠지면서 총 건수가 줄면 지금 쪽이 빈 쪽이 된다. 뒤로 물러난다.
+  const lastPage = Math.max(0, Math.ceil(total / pageSize) - 1);
+  if (page > lastPage) return goPage(lastPage);
+  $('#jobcnt').textContent = `${total}건`;
   const chip = $('#jobfilter');
-  chip.hidden = !filter;
-  if (filter) chip.innerHTML =
-    `${FILTER_TEXT[filter]}만 <b onclick="setFilter('')" title="필터 해제">&times;</b>`;
-  $('#jobs').innerHTML = shown.length ? shown.map(card).join('')
-    : `<div class="empty">${filter ? `${FILTER_TEXT[filter]} 상태인 작업이 없습니다`
-                                   : '작업이 없습니다'}</div>`;
+  chip.hidden = !filter || filter === 'active';
+  if (!chip.hidden) chip.innerHTML =
+    `${FILTER_TEXT[filter]}만 <b onclick="setFilter('active')" title="진행중으로">&times;</b>`;
+  $('#jobs').innerHTML = jobs.length
+    ? jobs.map(safeCard).join('') + pager(total)
+    : `<div class="empty">${filter === 'active' ? '처리할 작업이 없습니다'
+        : filter ? `${FILTER_TEXT[filter]} 상태인 작업이 없습니다` : '작업이 없습니다'}</div>`;
   if (view === 'overview' && Date.now() - lastOverview > 10000) loadOverview();
-  const busy = jobs.some(j => j.status === 'running' || j.status === 'queued');
+  // 목록을 걸러 보고 있어도 큐가 돌면 빠르게 폴링해야 한다.
+  const busy = (c.running || 0) + (c.queued || 0) > 0
+    || jobs.some(j => j.status === 'running' || j.status === 'queued');
   clearTimeout(timer);
   timer = setTimeout(poll, busy ? 700 : 5000);
 }
@@ -905,7 +982,7 @@ fetch('/api/defaults').then(r => r.json()).then(d => {
     `(기본 ${d.method} · conf ${d.conf} · ${d.imgsz} · batch ${d.batch_size})`;
 }).catch(() => { $('#dsum').textContent = '(서버 기본값을 쓰지 못함)'; });
 
-setFilter('');
+setFilter('active');
 go2('browser');
 loadObjects();
 </script>

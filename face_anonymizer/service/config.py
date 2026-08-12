@@ -21,7 +21,7 @@
     FA_RETRY_DELAYS    재시도 간격 목록    (기본: 5,30,60 — 95초 창)
     FA_DEFER_SEC       보류 재확인 간격    (기본: 60)
     FA_DEFER_MAX_SEC   보류 상한           (기본: 1800, 넘으면 실패)
-    FA_LIST_LIMIT      목록 기본 개수      (기본: 100)
+    FA_LIST_LIMIT      한 페이지 카드 수   (기본: 100)
     FA_MAX_ATTEMPTS    일시적 오류 재시도  (기본: 4 = 처음 1회 + 재시도 3회)
 
 처리 파라미터 기본값 (JOB_DEFAULTS)
@@ -67,6 +67,10 @@ BATCH_MAX = int(os.environ.get("FA_BATCH_MAX", 0))          # 0 = 무제한
 # 실패했을 때, 입력과 사유가 남아 있어야 원인을 볼 수 있다.
 FAILED_TTL = int(os.environ.get("FA_FAILED_TTL_MIN", 0)) * 60
 MIN_FREE_MB = int(os.environ.get("FA_MIN_FREE_MB", 2048))   # 0 = 검사 안 함
+# 한 페이지에 몇 건을 그릴까. 목록은 페이지로 넘긴다(docs/issues/006).
+# 실측으로 100건을 그리는 데 9.5ms — 폴링 예산(0.7초)의 1% 다. 300건이 4%,
+# 1000건이 26%, 3000건이면 75% 라 화면이 눈에 띄게 버벅인다. 상한을 없애는 대신
+# 페이지를 나누면 폴더가 몇천 건이어도 한 페이지 값만 낸다.
 LIST_LIMIT = int(os.environ.get("FA_LIST_LIMIT", 100))
 # 처음 1회 + 재시도 3회. RETRY_DELAYS 와 짝이다.
 MAX_ATTEMPTS = int(os.environ.get("FA_MAX_ATTEMPTS", 4))

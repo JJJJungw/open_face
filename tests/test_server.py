@@ -366,6 +366,107 @@ def test_list_is_bounded_and_filterable(client, make_video):
     assert client.get("/api/jobs?status=failed").json() == []
 
 
+def fill_queue(n=None, running=1, done=0):
+    """큐를 목록 상한보다 길게 채운다. 만들어진 순 = 처리될 순.
+
+    건수를 상한에 매어 두는 것이 중요하다. 숫자를 박아 두면 상한을 올리는 순간
+    테스트가 '상한을 넘긴 상황' 을 더 이상 보지 않게 된다 — 바로 그 상황에서만
+    나는 버그다.
+    """
+    n = n if n is not None else config.LIST_LIMIT + 20
+    now = time.time()
+    for i in range(n):
+        j = jobsmod.Job(id=f"j{i:03d}", name=f"K_{i:05d}.mp4", params={},
+                        workdir="", created=now + i)
+        if i < done:
+            j.status, j.finished = "done", now + i
+            j.result = {"seconds": 10.0, "realtime_factor": 2.0}
+        elif i < done + running:
+            j.status = "running"
+        jobsmod.JOBS[j.id] = j
+    return now
+
+
+def test_long_queue_still_shows_what_is_running(client):
+    """목록이 상한에서 잘려도 수행중은 잘려 나가지 않는다(docs/issues/006).
+
+    워커는 오래된 것부터 처리하는데 목록을 만든 순 최신순으로 자르면, 상한보다
+    큰 배치에서 지금 도는 작업이 창 밖으로 밀려난다. 화면은 그걸 '유휴' 로
+    읽었고, 완료·실패도 같이 사라졌다.
+    """
+    n = fill_count = config.LIST_LIMIT + 20
+    fill_queue(n=n, running=1, done=3)
+
+    rows = client.get("/api/jobs").json()
+    assert len(rows) == config.LIST_LIMIT < fill_count
+    # 맨 위가 수행중, 그 뒤는 다음 차례부터 — 뒤에서부터 보여 주면 안 된다.
+    assert rows[0]["status"] == "running", rows[0]
+    assert [r["id"] for r in rows[1:3]] == ["j004", "j005"]
+    assert rows[1]["queued_ahead"] == 0
+
+
+def test_counts_do_not_depend_on_the_list_window(client):
+    """숫자는 목록이 아니라 집계에서 나온다. 창 크기와 무관해야 한다."""
+    n = config.LIST_LIMIT + 20
+    fill_queue(n=n, running=1, done=3)
+
+    st = client.get("/api/status").json()
+    assert st["counts"]["queued"] == n - 4   # 전체 - 3(완료) - 1(수행중)
+    assert st["counts"]["running"] == 1
+    assert st["counts"]["done"] == 3
+    assert st["counts"]["total"] == n
+    assert st["counts"]["active"] == n - 3    # 수행중 + 대기 = 아직 처리할 일
+    assert st["list_limit"] == config.LIST_LIMIT   # 화면이 쪽 수를 이걸로 센다
+    # 목록에 없어도 지금 도는 작업과 최근 기록은 여기서 온다.
+    assert st["running"]["name"] == "K_00003.mp4"
+    assert st["recent"]["avg_seconds"] == 10.0
+    assert st["recent"]["realtime_factor"] == 2.0
+
+
+def test_active_filter_leaves_finished_jobs_out(client):
+    """기본 목록은 '아직 처리할 일' 이다.
+
+    끝난 것을 같이 섞으면 수백 건짜리 배치에서 지금 할 일이 완료 기록에 파묻힌다.
+    완료는 완료 탭에서 본다.
+    """
+    n = config.LIST_LIMIT + 20
+    fill_queue(n=n, running=1, done=3)
+
+    rows = client.get("/api/jobs?status=active").json()
+    assert {r["status"] for r in rows} == {"running", "queued"}
+    assert rows[0]["status"] == "running"
+
+
+def test_pages_cover_the_whole_queue_without_gaps(client):
+    """쪽을 넘겨 모으면 빠짐도 겹침도 없어야 한다."""
+    n = config.LIST_LIMIT * 2 + 7
+    fill_queue(n=n, running=1, done=0)
+
+    size = config.LIST_LIMIT
+    seen = []
+    for page in range(3):
+        rows = client.get(f"/api/jobs?status=active&offset={page * size}").json()
+        seen += [r["id"] for r in rows]
+    assert len(seen) == n == len(set(seen))          # 겹치지 않는다
+    assert seen == sorted(seen)                      # 처리될 순서 그대로다
+    # 범위를 넘긴 쪽은 빈 목록이지 오류가 아니다.
+    assert client.get(f"/api/jobs?offset={n * 2}").json() == []
+
+
+def test_status_filter_is_a_server_side_contract(client):
+    """상태로 좁히는 일은 서버가 한다.
+
+    화면이 잘린 목록을 받아서 거르면 '완료' 탭이 비어 보인다. 그쪽 수정은
+    화면에 있고(``poll()`` 이 ``?status=`` 를 붙인다), 여기서는 그 화면이
+    기대는 계약 — 좁히면 그 상태만, 끝난 것은 최근 것부터 — 을 못 박는다.
+    """
+    fill_queue(running=1, done=3)
+
+    done = client.get("/api/jobs?status=done").json()
+    assert [j["id"] for j in done] == ["j002", "j001", "j000"]   # 최근 것부터
+    assert client.get("/api/jobs?status=running").json()[0]["id"] == "j003"
+
+
 def test_queue_max_still_works_when_set(client, make_video, monkeypatch):
     monkeypatch.setattr(config, "QUEUE_MAX", 2)
     path, n, size = make_video(frames=40)

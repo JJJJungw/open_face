@@ -81,10 +81,21 @@ def index():
 
 @app.get("/api/status")
 def status():
-    """오케스트레이터용 최소 응답. 디스크를 훑지 않는다."""
+    """폴링 한 번에 필요한 전부. **디스크를 훑지 않는다.**
+
+    ``ready``/``busy``/``queued`` 는 오케스트레이터가 보는 값이고,
+    ``counts``·``running``·``recent`` 는 화면이 보는 값이다. 한 응답에 같이
+    담는 이유는 화면이 0.7초마다 폴링하기 때문이다 — 엔드포인트를 나누면
+    그만큼 왕복이 는다.
+
+    **이 값들은 목록(GET /api/jobs)과 독립이다.** 목록은 잘려도 여기 숫자는
+    전체를 센다(docs/issues/006).
+    """
     return {"ready": worker.is_ready(), "busy": worker.is_busy(),
             "queued": jobs.queue_depth(), "free_mb": jobs.free_mb(),
-            "model_error": worker.model_error}
+            "model_error": worker.model_error,
+            "counts": jobs.counts(), "running": jobs.running_snapshot(),
+            "recent": jobs.recent_stats(), "list_limit": config.LIST_LIMIT}
 
 
 @app.get("/api/metrics")
@@ -447,20 +458,55 @@ async def create_jobs(request: Request):
     return {"accepted": accepted, "rejected": rejected, "queued": jobs.queue_depth()}
 
 
+_LIST_RANK = {"running": 0, "queued": 1}
+
+
+def list_key(j):
+    """목록 정렬 기준 — **실행 순서**.
+
+    수행중이 맨 위, 그 다음이 대기(오래된 것 = 다음 차례가 위), 끝난 것은
+    최신순으로 뒤에 붙는다.
+
+    만들어진 순으로만 자르면 안 되는 이유가 있다. 워커는 오래된 것부터
+    처리하는데 목록은 최신순 100건이라, 300건짜리 배치에서는 지금 돌고 있는
+    작업이 창 밖으로 밀려난다 — 화면이 '유휴' 라고 말한다(docs/issues/006).
+    """
+    rank = _LIST_RANK.get(j.status, 2)
+    if rank == 2:                       # done·failed·cancelled — 최근 것부터
+        return (rank, -(j.finished or j.created))
+    return (rank, j.created)            # 수행중·대기 — 먼저 들어온 것부터
+
+
 @app.get("/api/jobs")
-def list_jobs(limit: int = config.LIST_LIMIT, status: str = None):
-    """작업 목록. 최신순, 기본 100건.
+def list_jobs(limit: int = config.LIST_LIMIT, offset: int = 0, status: str = None):
+    """작업 목록. 실행 순서, 한 페이지 ``limit`` 건.
+
+    **거르는 일도 페이지를 나누는 일도 서버가 한다.** 잘라 보낸 뒤 화면에서
+    거르면, 완료가 창 밖에 있을 때 '완료' 탭이 비어 보인다.
+
+    ``status`` 는 실제 상태 하나이거나 ``active`` 다. ``active`` 는
+    **수행중 + 대기**, 즉 '아직 처리할 일' 이고 화면의 기본 목록이다. 끝난 것을
+    같이 섞으면 수백 건짜리 배치에서 지금 할 일이 완료 기록에 파묻힌다.
+
+    전체 건수는 여기서 주지 않는다. 페이지를 넘기는 쪽은 ``GET /api/status`` 의
+    ``counts`` 를 쓴다 — 세는 일과 보여 주는 일은 다른 경로다(docs/issues/006).
 
     대기 순번은 한 번에 계산한다 — 작업마다 전체를 다시 훑으면 O(N^2) 이고,
     전체 수행으로 수백 건을 넣으면 목록 한 번에 수십만 번 반복하게 된다.
+    거르기 전 전체에서 매기므로 좁혀 봐도, 페이지를 넘겨도 순번은 그대로다.
     """
     rows = jobs.all_jobs()
-    if status:
-        rows = [j for j in rows if j.status == status]
     order = sorted((j for j in rows if j.status == "queued"),
                    key=lambda x: x.created)
     ahead = {j.id: i for i, j in enumerate(order)}
-    return [jobs.snapshot(j, ahead.get(j.id, 0)) for j in rows[:max(0, limit)]]
+    if status == "active":
+        rows = [j for j in rows if j.status in ("running", "queued")]
+    elif status:
+        rows = [j for j in rows if j.status == status]
+    rows.sort(key=list_key)
+    start = max(0, offset)
+    return [jobs.snapshot(j, ahead.get(j.id, 0))
+            for j in rows[start:start + max(0, limit)]]
 
 
 @app.get("/api/jobs/{jid}")

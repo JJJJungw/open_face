@@ -346,6 +346,64 @@ def queue_depth():
         return sum(1 for j in JOBS.values() if j.status == "queued")
 
 
+STATUSES = ("queued", "running", "done", "failed", "cancelled")
+
+
+def counts():
+    """상태별 건수. **세는 일과 보여 주는 일을 분리한다.**
+
+    목록은 화면에 담을 만큼만 잘라서 준다(``FA_LIST_LIMIT``). 큐가 그보다 길면
+    잘린 창 안에 대기만 남고 수행중·완료는 창 밖으로 밀려난다. 그 창에서
+    숫자까지 세면 화면이 "유휴" 라고 말한다(docs/issues/006). 집계를 여기서
+    따로 하면 창을 어떻게 잡든 숫자는 맞는다.
+
+    메모리(``JOBS``)만 본다. 폴링이 1초에 한 번 넘게 도는 자리라 디스크를
+    훑으면 안 된다. TTL 이 지나 메모리에서 빠진 작업은 화면의 관심 밖이다.
+    """
+    with LOCK:
+        rows = list(JOBS.values())
+    out = {k: 0 for k in STATUSES}
+    for j in rows:
+        out[j.status] = out.get(j.status, 0) + 1
+    out["total"] = len(rows)
+    # 화면의 기본 목록은 '아직 처리할 일' 이다. 페이지 수를 여기서 뽑는다.
+    out["active"] = out["running"] + out["queued"]
+    return out
+
+
+def running_snapshot():
+    """지금 도는 작업 한 건. 없으면 ``None``.
+
+    진행 상황 표시는 목록 필터와 무관해야 한다 — '완료' 탭을 눌렀다고 돌고
+    있는 작업이 사라지면 안 된다. 그래서 목록에서 찾지 않고 여기서 준다.
+    """
+    with LOCK:
+        j = next((x for x in JOBS.values() if x.status == "running"), None)
+    return snapshot(j) if j is not None else None      # 락 밖에서 — 재진입 금지
+
+
+def recent_stats(limit=5):
+    """최근 완료 ``limit`` 건의 평균 처리 시간과 실시간 대비. 없으면 ``{}``.
+
+    화면이 목록 안의 완료 카드를 뒤져서 계산하던 값이다. 목록이 잘리면 같이
+    사라져 '기록 없음' 이 됐다(docs/issues/006).
+    """
+    with LOCK:
+        rows = [j for j in JOBS.values()
+                if j.status == "done" and isinstance(j.result, dict)
+                and j.result.get("seconds")]
+    rows.sort(key=lambda x: -(x.finished or 0))
+    rows = rows[:max(1, limit)]
+    if not rows:
+        return {}
+    secs = [j.result["seconds"] for j in rows]
+    rf = [j.result["realtime_factor"] for j in rows
+          if j.result.get("realtime_factor")]
+    out = {"avg_seconds": round(sum(secs) / len(secs), 1), "samples": len(secs)}
+    if rf:
+        out["realtime_factor"] = round(sum(rf) / len(rf), 2)
+    return out
+
 
 def queued_ahead_of(job):
     """앞에 몇 건 대기 중인가. **메모리만** 본다.
