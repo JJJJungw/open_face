@@ -349,6 +349,108 @@ def pick_encoder(timeout=60):
     return None
 
 
+class FramePipe:
+    """프레임을 ffmpeg 표준입력으로 바로 흘려보낸다.
+
+    **인코딩을 한 번만 한다.** 예전 구조는 OpenCV 가 `mp4v` 로 중간 파일을 쓰고,
+    그 파일을 다시 읽어 H.264 로 또 인코딩했다 — 같은 영상을 두 번 인코딩하고,
+    그 사이에 수백 MB 를 디스크에 썼다 읽었다(docs/issues/010).
+
+    여기서는 렌더가 만든 프레임을 그대로 ffmpeg 에 밀어 넣고, ffmpeg 가 **최종
+    사양(해상도·비트레이트·H.264)으로 한 번에** 쓴다. 뒤에 남는 일은 오디오
+    먹싱뿐이고 그건 `-c:v copy` 라 재인코딩이 아니다.
+
+    쓸 수 없으면(ffmpeg 없음·인코더 없음) ``open()`` 이 None 을 돌려준다.
+    호출자는 예전 경로(cv2.VideoWriter)로 물러난다 — 성능 개선이 기능을 못 쓰게
+    만들면 안 된다.
+    """
+
+    def __init__(self, proc, path):
+        self.proc = proc
+        self.path = path
+        self.frames = 0
+        self.broken = None
+
+    @classmethod
+    def open(cls, path, width, height, fps, *, height_target=None,
+             bitrate=None, max_bitrate=None, crf=None):
+        if not shutil.which("ffmpeg"):
+            return None
+        enc = pick_encoder()
+        if enc is None:
+            return None
+        encoder, qflag, extra = enc
+
+        cmd = ["ffmpeg", "-y", "-v", "error",
+               "-f", "rawvideo", "-pix_fmt", "bgr24",
+               "-s", f"{int(width)}x{int(height)}",
+               "-r", f"{fps or 30}", "-i", "-"]
+        vf = scale_filter(width, height, height_target)
+        if vf:
+            cmd += ["-vf", vf]
+        cmd += ["-c:v", encoder, *extra, "-pix_fmt", "yuv420p"]
+        target = parse_bitrate(bitrate)
+        if target:
+            top = parse_bitrate(max_bitrate) or int(target * MAXRATE_HEADROOM)
+            cmd += ["-b:v", str(target), "-maxrate", str(top),
+                    "-bufsize", str(top * 2)]
+        elif crf is not None:
+            cmd += [qflag, str(crf)]
+        cmd += ["-movflags", "+faststart", path]
+
+        try:
+            proc = subprocess.Popen(cmd, stdin=subprocess.PIPE,
+                                    stdout=subprocess.DEVNULL,
+                                    stderr=subprocess.PIPE)
+        except OSError as e:
+            log.warning("ffmpeg 파이프를 열지 못했다 (%s) — 예전 경로로 간다", e)
+            return None
+        log.info("렌더 → ffmpeg 직결 (%s%s)", encoder, f", {vf}" if vf else "")
+        return cls(proc, path)
+
+    def write(self, frame):
+        """실패해도 여기서 던지지 않는다 — close() 가 한 번에 판정한다.
+
+        ffmpeg 가 죽으면 파이프가 닫혀 BrokenPipe 가 나는데, 그때 stderr 를 읽어야
+        원인을 알 수 있다. 쓰기 지점마다 예외를 처리하면 그 원인이 사라진다.
+        """
+        if self.broken is not None:
+            return
+        try:
+            self.proc.stdin.write(frame.tobytes())
+            self.frames += 1
+        except (BrokenPipeError, OSError) as e:
+            self.broken = e
+
+    def close(self):
+        """정상 종료면 True. 실패하면 사유를 로그에 남기고 False."""
+        # stdin 을 닫아 EOF 를 알린다. communicate() 를 쓰면 이미 닫힌 stdin 을
+        # 다시 flush 하려다 ValueError 가 난다 — 직접 닫고 직접 기다린다.
+        try:
+            if self.proc.stdin and not self.proc.stdin.closed:
+                self.proc.stdin.close()
+        except OSError:
+            pass
+        err = b""
+        try:
+            if self.proc.stderr:
+                err = self.proc.stderr.read() or b""
+            self.proc.wait(timeout=FFMPEG_TIMEOUT)
+        except subprocess.TimeoutExpired:
+            self.proc.kill()
+            self.proc.wait()
+            log.error("ffmpeg 파이프가 응답하지 않는다")
+            return False
+        finally:
+            if self.proc.stderr:
+                self.proc.stderr.close()
+        if self.proc.returncode != 0 or self.broken is not None:
+            log.error("ffmpeg 파이프 실패 (rc=%s): %s", self.proc.returncode,
+                      (err or b"").decode("utf-8", "replace")[-300:])
+            return False
+        return os.path.exists(self.path) and os.path.getsize(self.path) > 0
+
+
 def parse_bitrate(value):
     """'3500k' · '3.5M' · 3500000 · '' -> bps 또는 None."""
     if value is None or value == "":
@@ -477,7 +579,8 @@ def finalize_output(noaudio, original, output, keep_audio=True,
                     expected_frames=None, crf=DEFAULT_CRF,
                     bitrate_ratio=DEFAULT_BITRATE_RATIO, height=DEFAULT_HEIGHT,
                     bitrate=DEFAULT_TARGET_BITRATE,
-                    max_bitrate=DEFAULT_MAX_BITRATE, timeout=FFMPEG_TIMEOUT):
+                    max_bitrate=DEFAULT_MAX_BITRATE, timeout=FFMPEG_TIMEOUT,
+                    video_ready=False):
     """중간 산출물을 최종 결과물로 만든다 — H.264 재인코딩 + 오디오 합성 + 검증.
 
     네 가지를 못 박는다.
@@ -517,6 +620,12 @@ def finalize_output(noaudio, original, output, keep_audio=True,
             status = "ffprobe-failed"
         elif not audio:
             status = "no-audio"
+
+    # 렌더가 이미 최종 사양(H.264·해상도·비트레이트)으로 써 놓았으면 **다시
+    # 인코딩하지 않는다.** 예전에는 mp4v 중간 파일을 만들고 여기서 H.264 로 다시
+    # 떴다 — 같은 영상을 두 번 인코딩하는 구조였다(docs/issues/010).
+    if video_ready:
+        return _mux_only(noaudio, original, output, status, expected_frames, timeout)
 
     enc = pick_encoder()
     if enc is None:
@@ -581,6 +690,47 @@ def finalize_output(noaudio, original, output, keep_audio=True,
 
     shutil.move(out_tmp, output)
     os.remove(noaudio)
+    return status
+
+
+def _mux_only(noaudio, original, output, status, expected_frames,
+              timeout=FFMPEG_TIMEOUT):
+    """영상은 그대로 복사하고 오디오만 붙인다 — **재인코딩 없음.**
+
+    렌더가 ffmpeg 로 바로 써서 이미 최종 사양이면, 여기서 할 일은 오디오를 얹는
+    것뿐이다. `-c:v copy` 는 비트스트림을 그대로 옮기므로 화질 손실도 없고 시간도
+    거의 안 든다(먹싱은 I/O 다).
+
+    검증은 그대로 한다. 복사라도 컨테이너를 다시 쓰는 일이라, 프레임 수가 어긋나면
+    결과물을 버리고 무음본을 쓴다.
+    """
+    root, ext = os.path.splitext(noaudio)
+    out_tmp = root + ".final" + (ext or ".mp4")
+    cmd = ["ffmpeg", "-y", "-v", "error", "-i", noaudio]
+    if status == "ok":
+        cmd += ["-i", original, "-map", "0:v:0", "-map", "1:a:0", "-c:a", "aac"]
+    else:
+        cmd += ["-map", "0:v:0", "-an"]
+    cmd += ["-c:v", "copy", "-movflags", "+faststart", out_tmp]
+
+    p = _run(cmd, timeout)
+    if p is None or p.returncode != 0 or not os.path.exists(out_tmp):
+        _unlink(out_tmp)
+        log.warning("오디오 합성 실패 — 무음본을 그대로 쓴다")
+        shutil.move(noaudio, output)
+        return "ffmpeg-failed: mux" if p is not None else "ffmpeg-timeout"
+
+    if expected_frames is not None:
+        got, _dur = video_frame_count(out_tmp, timeout)
+        if got is not None and got != expected_frames:
+            _unlink(out_tmp)
+            log.warning("결과물이 %d/%d 프레임 — 버리고 무음본을 쓴다",
+                        got, expected_frames)
+            shutil.move(noaudio, output)
+            return f"frame-loss: {got}/{expected_frames}"
+
+    shutil.move(out_tmp, output)
+    _unlink(noaudio)
     return status
 
 
@@ -797,9 +947,15 @@ class VideoAnonymizer:
         ext = os.path.splitext(output_path)[1] or ".mp4"
         noaudio = os.path.join(tmpdir, "noaudio" + ext)
         t0 = time.perf_counter()
+        # 렌더에서 최종 사양으로 바로 쓴다 — 중간 mp4v 파일과 두 번째 인코딩이
+        # 통째로 사라진다(docs/issues/010). 파이프를 못 열면 알아서 물러난다.
         rendered = self._render(decode_path, noaudio, info, frame_dets,
                                 method, pad, mosaic_scale, total, report,
-                                rotation=rotate)
+                                rotation=rotate,
+                                final={"height_target": height,
+                                       "bitrate": bitrate,
+                                       "max_bitrate": max_bitrate,
+                                       "crf": crf})
         t_render = time.perf_counter() - t0
         log.info("      %d frames — %.1fs (%.1f fps)", rendered, t_render,
                  rendered / t_render if t_render else 0)
@@ -808,7 +964,8 @@ class VideoAnonymizer:
         status = finalize_output(noaudio, input_path, output_path, keep_audio,
                                  expected_frames=rendered, crf=crf,
                                  bitrate_ratio=bitrate_ratio, height=height,
-                                 bitrate=bitrate, max_bitrate=max_bitrate)
+                                 bitrate=bitrate, max_bitrate=max_bitrate,
+                                 video_ready=getattr(self, "last_render_piped", False))
         t_audio = time.perf_counter() - t0
 
         timing = Timing(ingest=t_ingest, detect=t_detect, track=t_track,
@@ -878,21 +1035,31 @@ class VideoAnonymizer:
         return per_frame, raw_boxes, detected_frames, idx
 
     def _render(self, path, out_path, info, frame_dets, method, pad,
-                mosaic_scale, expected, report, rotation=0):
-        """2차 패스 — 박스를 얹어 다시 쓴다."""
+                mosaic_scale, expected, report, rotation=0, final=None):
+        """2차 패스 — 박스를 얹어 다시 쓴다.
+
+        ``final`` 이 오면 ffmpeg 로 직결해 **최종 사양으로 한 번에** 쓴다. 파이프를
+        못 열면 예전 경로(mp4v 중간 파일)로 물러난다. 어느 쪽으로 갔는지는
+        ``self.last_render_piped`` 로 알린다 — 뒤에서 재인코딩할지가 갈린다.
+        """
         cap, auto_rot = open_capture(path)
         if not cap.isOpened():
             cap.release()
             raise VideoOpenError(f"cannot reopen video: {path}")
         rotation = (auto_rot + rotation) % 360
-        writer = cv2.VideoWriter(out_path, cv2.VideoWriter_fourcc(*"mp4v"),
-                                 info.fps, (info.width, info.height))
-        if not writer.isOpened():
-            cap.release()
-            writer.release()
-            raise VideoWriteError(
-                f"인코더를 열지 못했습니다 ({info.width}x{info.height} "
-                f"@{info.fps}). opencv 빌드에 mp4v 코덱이 없을 수 있습니다.")
+
+        writer = FramePipe.open(out_path, info.width, info.height, info.fps,
+                                **(final or {})) if final else None
+        self.last_render_piped = writer is not None
+        if writer is None:
+            writer = cv2.VideoWriter(out_path, cv2.VideoWriter_fourcc(*"mp4v"),
+                                     info.fps, (info.width, info.height))
+            if not writer.isOpened():
+                cap.release()
+                writer.release()
+                raise VideoWriteError(
+                    f"인코더를 열지 못했습니다 ({info.width}x{info.height} "
+                    f"@{info.fps}). opencv 빌드에 mp4v 코덱이 없을 수 있습니다.")
 
         kw = {"scale": mosaic_scale} if method == "mosaic" else {}
         i = 0
@@ -920,7 +1087,14 @@ class VideoAnonymizer:
                 i += 1
         finally:
             cap.release()
-            writer.release()
+            if isinstance(writer, FramePipe):
+                ok_close = writer.close()
+                if not ok_close:
+                    raise VideoWriteError(
+                        "ffmpeg 로 직접 쓰다 실패했습니다 — 로그의 ffmpeg 오류를 "
+                        "확인해 주세요.")
+            else:
+                writer.release()
         report("render", i)
 
         if i != expected:

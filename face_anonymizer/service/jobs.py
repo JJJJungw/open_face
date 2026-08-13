@@ -20,6 +20,7 @@ import threading
 import time
 from dataclasses import asdict, dataclass, field, fields
 
+from .. import timefmt
 from . import config
 
 log = logging.getLogger(__name__)
@@ -53,6 +54,9 @@ class Job:
     # 이 시각 전에는 꺼내지 않는다. 재시도 백오프와 보류가 같이 쓴다.
     not_before: float = 0.0
     waiting: str = ""             # "" | retry | defer — 왜 기다리는가
+    # 폴더 하나를 통으로 넣으면 그 묶음의 이름이 여기 붙는다. 사람이 묻는 단위가
+    # 파일이 아니라 폴더인 경우가 많다 — "kbs 언제 시작해서 언제 끝났어?"
+    batch: str = ""
     deferred_since: float = 0.0   # 보류가 시작된 시각 (상한 판정용)
     stage_t0: float = 0.0
 
@@ -165,7 +169,12 @@ def snapshot(j, queued_ahead=0):
         "job_elapsed": round(job_elapsed), "error": j.error, "result": j.result,
         "attempts": j.attempts, "max_attempts": config.MAX_ATTEMPTS,
         "s3_key": j.s3_key, "s3_output": j.s3_output,
-        "queued_ahead": queued_ahead,
+        "queued_ahead": queued_ahead, "batch": j.batch,
+        # 언제 시작해서 언제 끝났나. 화면이 계산하지 않고 서버가 정해 준 문장을
+        # 그대로 쓴다 — 로그와 화면이 다른 시각을 말하면 대조가 안 된다.
+        "started_at": timefmt.iso(j.started),
+        "finished_at": timefmt.iso(j.finished),
+        "span": timefmt.span(j.started, j.finished),
     }
 
 
@@ -447,6 +456,46 @@ def cancel_all():
     for j in rows:
         save_job(j)          # 디스크 쓰기는 락 밖에서 — 폴링을 붙잡지 않는다
     return queued, running
+
+
+def batches(rows=None):
+    """폴더(배치)별 시작·종료·진척. **사람이 묻는 단위로 묶어 준다.**
+
+    파일 하나하나의 시각은 카드에 있지만, "kbs 폴더 언제 시작해서 언제 끝났나" 는
+    거기서 읽어 낼 수 없다. 시작은 그 묶음에서 **제일 먼저 시작한 작업**, 종료는
+    **제일 늦게 끝난 작업**이다. 아직 안 끝난 게 하나라도 있으면 종료는 비운다 —
+    "끝났다" 를 절반만 맞게 말하면 안 된다.
+    """
+    rows = rows if rows is not None else all_jobs()
+    out = {}
+    for j in rows:
+        if not j.batch:
+            continue
+        b = out.setdefault(j.batch, {
+            "batch": j.batch, "total": 0, "done": 0, "failed": 0,
+            "cancelled": 0, "running": 0, "queued": 0,
+            "started": 0.0, "finished": 0.0, "seconds": 0.0})
+        b["total"] += 1
+        if j.status in b:
+            b[j.status] += 1
+        if j.started and (not b["started"] or j.started < b["started"]):
+            b["started"] = j.started
+        if j.finished and j.finished > b["finished"]:
+            b["finished"] = j.finished
+        if isinstance(j.result, dict):
+            b["seconds"] += j.result.get("seconds") or 0.0
+
+    for b in out.values():
+        left = b["total"] - b["done"] - b["failed"] - b["cancelled"]
+        b["remain"] = left
+        b["percent"] = round(100 * (b["total"] - left) / b["total"]) if b["total"] else 0
+        if left:                      # 하나라도 안 끝났으면 종료 시각은 없다
+            b["finished"] = 0.0
+        b["elapsed"] = (b["finished"] - b["started"]) if (b["finished"] and b["started"]) else 0.0
+        b["started_at"] = timefmt.iso(b["started"])
+        b["finished_at"] = timefmt.iso(b["finished"])
+        b["span"] = timefmt.span(b["started"], b["finished"])
+    return sorted(out.values(), key=lambda x: -(x["started"] or 0))
 
 
 def queued_ahead_of(job):

@@ -989,3 +989,58 @@ def test_starting_clears_the_wait_marks(client, make_video, monkeypatch):
 
     s = client.get(f"/api/jobs/{jid}").json()
     assert s["waiting"] == "" and s["wait_left"] == 0
+
+
+# ── 시각 기록 ────────────────────────────────────────────────────────────────
+
+def test_job_carries_human_readable_times(client, make_video):
+    """각 파일이 언제 시작해서 언제 끝났는지를 서버가 문장으로 준다.
+
+    화면이 계산하면 로그와 화면이 다른 시각을 말할 수 있다. 표기를 한곳에서
+    정하고 양쪽이 같은 문장을 쓴다.
+    """
+    path, n, size = make_video(frames=4)
+    client.attach(size)
+    jid = job_id(submit(client, path))
+    snap = wait(client, jid, timeout=60)
+
+    assert snap["status"] == "done"
+    assert snap["started_at"] and snap["started_at"].endswith("+09:00")
+    assert snap["finished_at"] and "~" in snap["span"]
+
+
+def test_folder_submit_groups_jobs_into_a_batch(client, monkeypatch):
+    """폴더로 넣으면 그 묶음의 시작·종료를 따로 볼 수 있어야 한다.
+
+    "kbs 언제 시작해서 언제 끝났어?" 는 파일 카드 297장에서 읽어 낼 수 없다.
+    """
+    now = time.time()
+    for i in range(3):
+        j = jobsmod.Job(id=f"kb{i}", name=f"K_{i:05d}.mp4", params={},
+                        workdir="", batch="kbs")
+        j.status, j.started, j.finished = "done", now + i, now + i + 40
+        j.result = {"seconds": 40.0}
+        jobsmod.JOBS[j.id] = j
+    # 아직 안 끝난 게 하나라도 있으면 '종료' 를 말하지 않는다
+    pending = jobsmod.Job(id="kb9", name="K_00009.mp4", params={},
+                          workdir="", batch="kbs")
+    jobsmod.JOBS[pending.id] = pending
+
+    rows = client.get("/api/batches").json()["batches"]
+    assert len(rows) == 1
+    b = rows[0]
+    assert b["batch"] == "kbs" and b["total"] == 4 and b["done"] == 3
+    assert b["finished_at"] is None and "진행 중" in b["span"]
+
+    del jobsmod.JOBS["kb9"]
+    b = client.get("/api/batches").json()["batches"][0]
+    assert b["finished_at"] and b["percent"] == 100 and "~" in b["span"]
+
+
+def test_picked_files_do_not_get_a_batch_label(client):
+    """파일을 골라 넣은 것까지 묶으면 '폴더 12분' 이 실제 폴더 처리와 달라진다."""
+    from face_anonymizer.service.server import batch_of
+
+    assert batch_of("v1/input/kbs/a.mp4", ["v1/input/kbs/"]) == "kbs"
+    assert batch_of("v1/input/kbs/a.mp4", []) == ""
+    assert batch_of("v1/input/mbc/a.mp4", ["v1/input/kbs/"]) == ""

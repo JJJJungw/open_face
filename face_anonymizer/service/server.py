@@ -444,7 +444,8 @@ async def create_jobs(request: Request):
                     raise errors.INVALID_KEY(str(key))
                 check_s3_key(key)
                 name = os.path.basename(key)
-                _job, snap = worker.enqueue(name, dict(params), s3_key=key)
+                _job, snap = worker.enqueue(name, dict(params), s3_key=key,
+                                            batch=batch_of(key, prefixes))
                 accepted.append({"id": snap["id"], "name": name, "s3_key": key})
             except errors.ProblemError as e:
                 rejected.append({"s3_key": key, "error": e.body()})
@@ -479,6 +480,24 @@ def list_key(j):
     if rank == 2:                       # done·failed·cancelled — 최근 것부터
         return (rank, -(j.finished or j.created))
     return (rank, j.created)            # 수행중·대기 — 먼저 들어온 것부터
+
+
+def batch_of(key, prefixes):
+    """이 키가 어느 묶음에 속하나. 폴더로 제출한 것만 묶음 이름을 갖는다.
+
+    파일을 골라 넣은 것까지 묶으면 "kbs 폴더 12분" 같은 문장이 실제 폴더 처리와
+    달라진다. 묶음은 **폴더를 통으로 넣었을 때만** 만든다.
+    """
+    for p in prefixes or ():
+        if key.startswith(p):
+            return p.rstrip("/").split("/")[-1] or p
+    return ""
+
+
+@app.get("/api/batches")
+def list_batches():
+    """폴더별 시작·종료·진척. 사람이 묻는 단위가 파일이 아니라 폴더다."""
+    return {"batches": jobs.batches()}
 
 
 @app.get("/api/jobs")

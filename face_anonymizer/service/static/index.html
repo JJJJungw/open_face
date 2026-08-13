@@ -343,6 +343,11 @@
             <div id="opsbody" class="pad"></div>
           </section>
         </div>
+        <!-- 폴더 단위 시작·종료. 파일 카드에서는 읽어 낼 수 없는 값이다. -->
+        <section class="card" id="card-batches" hidden style="margin-top:14px">
+          <h2>폴더별 처리 시각</h2>
+          <div id="batches"></div>
+        </section>
       </section>
 
       <!-- 파일 브라우저 · 작업 -->
@@ -635,12 +640,34 @@ function go2(v) {
 
 async function loadOverview() {
   lastOverview = Date.now();
-  const [m, p] = await Promise.all([
+  const [m, p, b] = await Promise.all([
     fetch('/api/metrics').then(r => r.json()).catch(() => null),
     fetch('/api/s3/progress').then(r => r.ok ? r.json() : null).catch(() => null),
+    fetch('/api/batches').then(r => r.ok ? r.json() : null).catch(() => null),
   ]);
   renderProgress(p);
   renderOps(m);
+  renderBatches(b);
+}
+
+// 폴더 단위로 언제 시작해서 언제 끝났나. 사람이 묻는 단위가 파일이 아니라
+// 폴더인 경우가 많다 — "kbs 언제 시작해서 언제 끝났어?"
+function renderBatches(b) {
+  const rows = (b && b.batches) || [];
+  const el = $('#batches');
+  if (!el) return;
+  $('#card-batches').hidden = !rows.length;
+  if (!rows.length) return;
+  el.innerHTML = rows.map(r => `
+    <div class="job ${r.remain ? '' : 'ok'}">
+      <div class="jhead"><div class="jname">${r.batch}</div>
+        <span class="tag ${r.remain ? 'run' : 'done'}">${
+          r.remain ? `진행중 ${r.percent}%` : '완료'}</span></div>
+      <div class="bar2"><i style="width:${r.percent}%"></i></div>
+      <div class="meta">${r.span}</div>
+      <div class="meta">전체 ${r.total}건 · 완료 ${r.done}${
+        r.failed ? ` · 실패 ${r.failed}` : ''}${r.remain ? ` · 남음 ${r.remain}` : ''}</div>
+    </div>`).join('');
 }
 
 function renderProgress(p) {
@@ -944,6 +971,7 @@ function card(j) {
     body = `<div class="bar2"><i style="width:${j.overall}%"></i></div>
       <div class="meta">${stage} ${j.percent}% · ${j.fps.toFixed(0)} f/s ·
         남은 시간 ${fmt(j.eta)}</div>
+      <div class="meta">${j.span || ''}</div>
       <div class="row"><button class="ghost" onclick="cancel('${j.id}')">취소</button></div>`;
   } else if (j.status === 'queued') {
     const retry = j.attempts ? ` · 재시도 ${j.attempts}/${j.max_attempts}` : '';
@@ -993,7 +1021,8 @@ function card(j) {
         <div><span>검출</span><b>${r.raw_boxes ?? '—'}</b></div>
         <div><span>보간</span><b>${r.filled_boxes ?? '—'}</b></div>
       </div>
-      <div class="meta" style="margin-top:8px">검출 ${fmt(t.detect)} · 추적 ${fmt(t.track)}
+      <div class="meta" style="margin-top:8px">${j.span || '—'}</div>
+      <div class="meta" style="margin-top:4px">검출 ${fmt(t.detect)} · 추적 ${fmt(t.track)}
         · 렌더 ${fmt(t.render)} · ${v.width}×${v.height} · ${r.method || '—'}</div>
       <div class="row">
         <a class="dl" href="/api/jobs/${j.id}/download">내려받기</a>

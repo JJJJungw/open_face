@@ -28,6 +28,7 @@ except ImportError:                   # pragma: no cover
 
 from ..storage import naming
 from ..storage import s3 as s3mod
+from .. import timefmt
 from . import config, errors, jobs
 
 log = logging.getLogger(__name__)
@@ -254,6 +255,8 @@ def run(job_id):
     with jobs.LOCK:
         j.status, j.stage_t0 = "running", time.time()
         j.started = time.time()
+        log.info("▶ 시작  %s%s  [%s]", j.name,
+                 f"  ({j.batch})" if j.batch else "", timefmt.stamp(j.started))
         j.attempts += 1
         j.not_before, j.waiting, j.deferred_since = 0.0, "", 0.0
         params, workdir, name = dict(j.params), j.workdir, j.name
@@ -316,6 +319,9 @@ def run(job_id):
                 j.s3_output = key
         with jobs.LOCK:
             j.status, j.output, j.finished = "done", res.output, time.time()
+            log.info("■ 완료  %s%s  %s", j.name,
+                     f"  ({j.batch})" if j.batch else "",
+                     timefmt.span(j.started, j.finished))
             j.result = {
                 "frames": res.frames, "raw_boxes": res.raw_boxes,
                 "filled_boxes": res.filled_boxes, "method": res.method,
@@ -381,7 +387,7 @@ def new_job_id():
     return uuid.uuid4().hex[:12]
 
 
-def enqueue(name, params, s3_key="", jid=None, workdir=None):
+def enqueue(name, params, s3_key="", jid=None, workdir=None, batch=""):
     """작업을 등록하고 워커에 넘긴다. 대기열 상한도 여기서 본다.
 
     ``jid`` 와 ``workdir`` 은 함께 온다 — 업로드 경로는 파일을 받아야 해서
@@ -391,7 +397,8 @@ def enqueue(name, params, s3_key="", jid=None, workdir=None):
     jid = jid or new_job_id()
     workdir = workdir or os.path.join(config.JOBS_DIR, jid)
     os.makedirs(workdir, exist_ok=True)
-    job = jobs.Job(id=jid, name=name, workdir=workdir, s3_key=s3_key, params=params)
+    job = jobs.Job(id=jid, name=name, workdir=workdir, s3_key=s3_key,
+                   params=params, batch=batch)
     with jobs.LOCK:
         # 대기열 확인과 등록이 같은 락 안에 있어야 동시 요청이 상한을 넘지 않는다.
         if config.QUEUE_MAX and sum(1 for o in jobs.JOBS.values()
