@@ -57,12 +57,16 @@ def _timeout(write=False):
                          write=READ_TIMEOUT if write else None)
 
 
-def fetch(url, dest, callback=None):
+def fetch(url, dest, callback=None, on_total=None):
     """서명된 GET 으로 ``dest`` 에 받는다. 받은 바이트 수를 돌려준다.
 
     **스트리밍으로 받는다.** 영상은 수백 MB 라 메모리에 통째로 올리면 워커가
     죽는다. ``callback(chunk_bytes)`` 로 진행을 흘려보내면 호출자가 하트비트나
     취소에 쓴다 — s3.py 의 전송 콜백과 같은 모양이다(docs/issues/004).
+
+    ``on_total(bytes|None)`` 은 전체 크기를 **한 번** 알려 준다. 없으면 호출자가
+    "몇 MB 받았다" 까지만 알고 몇 %인지는 모른다. Content-Length 를 안 주는
+    서버가 있어서 None 이 올 수 있다 — 그 경우 진행률 대신 단계 이름만 뜬다.
     """
     httpx = _httpx()
     os.makedirs(os.path.dirname(os.path.abspath(dest)) or ".", exist_ok=True)
@@ -71,6 +75,11 @@ def fetch(url, dest, callback=None):
             if r.status_code >= 400:
                 raise TransferError(f"내려받기 실패 HTTP {r.status_code}",
                                     transient=r.status_code in TRANSIENT_STATUS)
+            if on_total is not None:
+                try:
+                    on_total(int(r.headers.get("content-length") or 0) or None)
+                except (TypeError, ValueError):
+                    on_total(None)
             seen = 0
             with open(dest, "wb") as f:
                 for chunk in r.iter_bytes(CHUNK):

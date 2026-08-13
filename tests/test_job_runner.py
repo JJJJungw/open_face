@@ -340,3 +340,91 @@ def test_only_oom_is_retried_other_errors_stay_permanent(bucket):
     """메모리 말고 다른 이유로 터진 것을 배치 줄여 다시 해 봐야 소용없다."""
     assert job_runner.is_oom(RuntimeError("CUDA out of memory")) is True
     assert job_runner.is_oom(ValueError("모르는 익명화 방식입니다")) is False
+
+
+# ---------------------------------------------------------------------------
+# 진행률 — 화면이 그릴 수 있는 값 중 **우리만 아는 것**
+
+
+def _beat():
+    got = []
+    b = job_runner._Beat(got.append, 60)
+    # 하트비트 간격은 1초 아래로 못 내려간다 — 프레임마다 큐로 보내면 초당
+    # 수십 건이 된다. 테스트에서는 그 눌림을 풀어 매 호출을 본다.
+    b.every = 0.0
+    return b, got
+
+
+def test_percent_never_goes_backwards_even_when_a_stage_is_skipped():
+    """**되감기는 진행바는 고장으로 읽힌다.**
+
+    h264 원본이면 전사 단계가 통째로 없고, 짧은 클립이면 검출 콜백이 몇 번 안
+    불린다. 단계별 퍼센트를 그대로 내보내면 그때마다 100% → 0% 로 떨어진다.
+    조금 부정확한 진행률은 읽히지만, 뒤로 가는 진행률은 못 읽는다.
+    """
+    b, got = _beat()
+    seen = []
+    for stage, done, total in [("download", 5, 10), ("detect", 1, 100),
+                               ("detect", 90, 100), ("render", 1, 100),
+                               ("detect", 5, 100),        # 늦게 도착한 콜백
+                               ("upload", 1, 1)]:
+        b(("x", done, stage), stage, done, total)
+        seen.append(b.percent)
+    assert seen == sorted(seen)
+    assert seen[-1] == 100.0            # 다 끝나면 꽉 찬다
+    assert got                           # every_s=0 이라 매번 보냈다
+
+
+def test_eta_is_withheld_while_the_estimate_is_still_noise():
+    """5% 아래에서는 추정이 요동친다 — "남은 시간 47분" 이 뜨고 곧 3분이 된다.
+
+    모르는 구간에서는 **안 보내는 편이 낫다.** 화면은 None 을 받으면 '계산 중'
+    을 띄우면 되지만, 틀린 숫자를 받으면 그대로 띄운다.
+    """
+    b, _ = _beat()
+    b(("x", 1), "download", 1, 100)              # 0.08%
+    assert b.snapshot()["eta_s"] is None
+    b(("x", 50), "detect", 50, 100)              # 45%
+    assert b.snapshot()["eta_s"] is not None
+
+
+def test_progress_carries_a_sentence_for_the_screen():
+    """화면에 `detect` 를 그대로 띄울 수는 없다. 문장까지 우리가 만들어 준다."""
+    b, _ = _beat()
+    b(("x", 1), "detect", 1, 10)
+    assert b.snapshot()["stage_label"] == "얼굴 찾는 중"
+    assert b.snapshot()["stage"] == "detect"      # 기계가 볼 코드도 같이
+
+
+def test_stall_watchdog_still_fires_with_the_new_signature():
+    """진행률을 얹느라 정체 감시가 죽으면, 멎은 잡이 리스 만료까지 매달린다."""
+    b, _ = _beat()
+    b(("x", 1), "detect", 1, 10)
+    b.last_move -= (job_runner.STALL_S + 1)
+    with pytest.raises(job_runner.JobError) as e:
+        b(("x", 1), "detect", 1, 10)
+    assert e.value.stage == "stall" and e.value.transient is True
+
+
+def test_failure_carries_a_face_the_screen_can_show():
+    """`str(e)` 만 보내면 화면에 우리 내부 문구가 뜬다.
+
+    코드는 기계가, 제목·힌트는 사람이 읽는다. service/errors.py 와 같은 분담이되
+    그쪽을 임포트하지 않는다 — fastapi 를 컨테이너에 끌고 오게 된다.
+    """
+    p = job_runner.JobError("presign 만료", transient=True,
+                            stage="download").as_dict()
+    assert p["code"] == "download" and p["retryable"] is True
+    assert p["title"] and p["hint"]              # 사람이 읽을 두 줄
+    assert p["detail"] == "presign 만료"          # 원문도 잃지 않는다
+
+    q = job_runner.JobError("뭔가", transient=False, stage="process").as_dict()
+    assert q["retryable"] is False
+
+
+def test_download_percent_needs_the_total_but_survives_without_it():
+    """Content-Length 를 안 주는 서버가 있다. 그때도 단계 이름은 떠야 한다."""
+    b, _ = _beat()
+    b(1, "download", 1, 0)                       # total 을 모른다
+    s = b.snapshot()
+    assert s["percent"] == 0.0 and s["stage_label"] == "원본 받는 중"

@@ -159,9 +159,19 @@ def deidentify_one(job):
     started = time.time()
     journal.job_started(job, started)
 
-    def beat(progress_s):
+    def beat(progress):
+        """리스 연장 **겸 진행 보고.**
+
+        원래 목적은 "나 살아 있다" 하나였다. 여기에 진행률을 얹는 이유는,
+        **화면이 그릴 수 있는 값 중 우리만 아는 것이 이것뿐**이기 때문이다.
+        목록도 순번도 남은 건수도 저쪽이 안다. 이걸 안 실어 보내면 화면은
+        스피너까지밖에 못 그린다.
+        """
         send(config.HEARTBEAT_TASK, video_id=vid, token=token,
-             progress_s=progress_s)
+             progress_s=progress["elapsed_s"], percent=progress["percent"],
+             stage=progress["stage"], stage_label=progress["stage_label"],
+             eta_s=progress["eta_s"])
+        journal.job_progress(job, progress)
 
     try:
         if _anonymizer is None:
@@ -169,8 +179,12 @@ def deidentify_one(job):
         result = run_job(job, on_heartbeat=beat, anonymizer=_anonymizer)
     except JobError as e:
         journal.job_failed(job, e.stage, e.transient, str(e), started)
+        # error 는 옛 모양 그대로 두고 problem 을 **덧붙인다.** 저쪽이 이미
+        # error 를 읽고 있을 수 있으므로 빼지 않는다. 화면은 problem 을 쓴다 —
+        # 거기에만 사람이 읽을 제목과 다음에 할 일이 들어 있다.
         send(config.COMPLETE_TASK, video_id=vid, token=token, ok=False,
-             error=str(e), transient=e.transient, stage=e.stage)
+             error=str(e), transient=e.transient, stage=e.stage,
+             problem=e.as_dict())
         return
     except Exception as e:                          # noqa: BLE001 — 조용히 죽으면 안 된다
         # 여기까지 온 것은 우리가 분류하지 못한 오류다. 일시로 본다 — 영구로
@@ -179,7 +193,9 @@ def deidentify_one(job):
         journal.job_failed(job, "unknown", True, f"{type(e).__name__}: {e}",
                            started)
         send(config.COMPLETE_TASK, video_id=vid, token=token, ok=False,
-             error=f"{type(e).__name__}: {e}", transient=True, stage="unknown")
+             error=f"{type(e).__name__}: {e}", transient=True, stage="unknown",
+             problem=JobError(f"{type(e).__name__}: {e}", transient=True,
+                              stage="unknown").as_dict())
         return
 
     # 검수 딱지는 **성공과 함께** 간다. 실패로 보내면 저쪽이 재시도하는데, 다시

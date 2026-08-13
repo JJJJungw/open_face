@@ -86,9 +86,14 @@ def test_task_never_raises_so_celery_does_not_retry(sent, monkeypatch):
 
 
 def test_heartbeat_carries_video_and_token(sent, monkeypatch):
-    """하트비트는 리스 연장 신호다. 자기 토큰일 때만 연장되므로 같이 보낸다."""
+    """하트비트는 리스 연장 신호다. 자기 토큰일 때만 연장되므로 같이 보낸다.
+
+    진행률도 같이 간다 — **화면이 그릴 수 있는 값 중 우리만 아는 것이 이것뿐**
+    이라서다. 목록도 순번도 남은 건수도 잡을 준 쪽이 안다.
+    """
     def fake_run(job, on_heartbeat=None, **kw):
-        on_heartbeat(60.0)
+        on_heartbeat({"elapsed_s": 60.0, "percent": 42.0, "stage": "detect",
+                      "stage_label": "얼굴 찾는 중", "eta_s": 83})
         return {"elapsed_s": 1.0, "targets": []}
     monkeypatch.setattr(job_runner, "run_job", fake_run)
 
@@ -99,6 +104,8 @@ def test_heartbeat_carries_video_and_token(sent, monkeypatch):
     kw, queue = beats[0]
     assert kw["video_id"] == "vid-1" and kw["token"] == "tok-1"
     assert queue == mc.CALLBACK_QUEUE
+    assert kw["percent"] == 42.0 and kw["stage"] == "detect"
+    assert kw["stage_label"] == "얼굴 찾는 중" and kw["eta_s"] == 83
 
 
 def test_registered_under_the_name_the_producer_sends():

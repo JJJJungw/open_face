@@ -147,6 +147,62 @@ class JobError(RuntimeError):
         self.transient = transient
         self.stage = stage
 
+    def as_dict(self):
+        """화면에 그대로 띄울 수 있는 모양.
+
+        ``str(e)`` 만 보내면 UI 에 "presign 만료" 같은 **우리 내부 문구**가 뜬다.
+        코드는 기계가, 제목·힌트는 사람이 읽는다 — service/errors.py 가 HTTP 쪽에
+        하는 일과 같은 분담이다. 그쪽을 임포트하지 않는 이유는 fastapi 를 끌고
+        오기 때문이다. 이 컨테이너에는 웹 프레임워크가 들어가지 않는다.
+        """
+        f = STAGE_FACE.get(self.stage or "", STAGE_FACE["unknown"])
+        return {"code": self.stage or "unknown", "title": f[0], "hint": f[1],
+                "detail": str(self), "retryable": bool(self.transient)}
+
+
+# 실패 단계 → 사람이 읽을 제목과 다음에 할 일. 화면이 이걸 그대로 띄운다.
+STAGE_FACE = {
+    "payload": ("잡 내용이 비어 있습니다", "보낸 쪽에서 targets 를 확인해 주세요"),
+    "download": ("원본을 내려받지 못했습니다",
+                 "서명 URL 이 만료됐을 수 있습니다. 다시 발급하면 됩니다"),
+    "weights": ("모델 가중치를 받지 못했습니다", "잠시 뒤 자동으로 다시 시도합니다"),
+    "model": ("검출기를 올리지 못했습니다", "잠시 뒤 자동으로 다시 시도합니다"),
+    "process": ("영상을 처리하지 못했습니다",
+                "같은 파일로 다시 해도 결과가 같습니다. 원본을 확인해 주세요"),
+    "stall": ("처리가 도중에 멎었습니다", "잠시 뒤 자동으로 다시 시도합니다"),
+    "upload": ("결과를 올리지 못했습니다",
+               "서명 URL 이 만료됐을 수 있습니다. 다시 발급하면 됩니다"),
+    "unknown": ("알 수 없는 오류입니다", "잠시 뒤 자동으로 다시 시도합니다"),
+}
+
+# ---------------------------------------------------------------------------
+# 진행률 — **이 값은 우리만 안다.**
+#
+# 목록도 순번도 남은 건수도 잡을 준 쪽이 안다. 우리만 아는 것은 딱 하나,
+# "지금 손에 든 이 영상이 어디쯤 가고 있나" 다. 그래서 하트비트에 실어 보낸다.
+# 안 실어 보내면 화면은 스피너까지밖에 못 그린다.
+#
+# **단계별 퍼센트를 그대로 주면 안 된다.** 검출 100% → 렌더 0% 로 떨어지는데,
+# 보는 사람에게는 그냥 되감긴 것으로 보인다. 그래서 단계마다 전체에서 차지하는
+# 몫을 주고 **한 줄로 이어 붙인다.**
+#
+# 몫은 L40S 실측(인제스트 12.6 · 검출 13.6 · 렌더 13.0 · 최종 0.8초)에서 왔다.
+# 인스턴스가 바뀌면 비율도 조금 바뀌지만, 진행률은 **줄지만 않으면** 쓸 만하다.
+STAGE_SPAN = (                      # (단계, 시작 지점, 차지하는 몫)
+    ("download",  0.00, 0.08),
+    ("transcode", 0.08, 0.22),
+    ("detect",    0.30, 0.30),
+    ("track",     0.60, 0.02),
+    ("render",    0.62, 0.30),
+    ("upload",    0.92, 0.08),
+)
+_SPAN = {name: (base, width) for name, base, width in STAGE_SPAN}
+
+# 화면에 띄울 단계 이름. 코드 이름을 그대로 보여 주면 사용자가 읽을 말이 아니다.
+STAGE_LABEL = {"download": "원본 받는 중", "transcode": "읽을 수 있게 변환 중",
+               "detect": "얼굴 찾는 중", "track": "추적 잇는 중",
+               "render": "가리는 중", "upload": "결과 올리는 중"}
+
 
 class _Beat:
     """하트비트와 정체 감시를 한 곳에서 본다.
@@ -168,19 +224,54 @@ class _Beat:
         self.last_beat = self.t0
         self.last_move = self.t0
         self.mark = None
+        self.stage = None
+        self.percent = 0.0          # 절대 되돌아가지 않는다 (아래 참고)
 
-    def __call__(self, position):
-        """``position`` 은 아무 단조 증가 값이면 된다(프레임 수·바이트 수)."""
+    def __call__(self, position, stage=None, done=None, total=None):
+        """``position`` 은 아무 단조 증가 값이면 된다(프레임 수·바이트 수).
+
+        ``stage``/``done``/``total`` 은 화면용이다. 없어도 정체 감시는 돈다.
+        """
         now = time.monotonic()
         if position != self.mark:
             self.mark, self.last_move = position, now
         elif now - self.last_move > STALL_S:
             raise JobError(f"진행이 {int(STALL_S)}초 동안 멎었습니다",
                            transient=True, stage="stall")
+        if stage:
+            self.stage = stage
+            self._advance(stage, done, total)
         if now - self.last_beat >= self.every:
             self.last_beat = now
             if self.on_heartbeat is not None:
-                self.on_heartbeat(round(now - self.t0, 1))
+                self.on_heartbeat(self.snapshot())
+
+    def _advance(self, stage, done, total):
+        """전체 진행률을 갱신한다. **줄어들지 않는다.**
+
+        단계가 건너뛰어질 수 있다 — h264 원본이면 전사가 통째로 없다. 그때
+        진행률이 뒤로 가면 화면이 되감긴 것처럼 보이므로, 새 값이 더 작으면
+        버린다. 앞으로만 가는 진행률은 조금 부정확해도 읽히지만, 뒤로 가는
+        진행률은 고장으로 읽힌다.
+        """
+        base, width = _SPAN.get(stage, (self.percent, 0.0))
+        frac = 0.0
+        if total:
+            frac = min(1.0, max(0.0, float(done or 0) / float(total)))
+        self.percent = max(self.percent, round((base + width * frac) * 100, 1))
+
+    def snapshot(self):
+        """하트비트에 실을 것. 화면이 이걸로 진행바와 한 줄 설명을 그린다."""
+        elapsed = round(time.monotonic() - self.t0, 1)
+        eta = None
+        # 5% 아래에서는 추정이 요동쳐서 "남은 시간 47분" 같은 값이 나온다.
+        # 모르는 구간에서는 아예 안 보내는 편이 낫다.
+        if self.percent >= 5:
+            eta = round(elapsed * (100 - self.percent) / self.percent)
+        return {"elapsed_s": elapsed, "percent": self.percent,
+                "stage": self.stage,
+                "stage_label": STAGE_LABEL.get(self.stage or ""),
+                "eta_s": eta}
 
 
 def target_params(t):
@@ -314,13 +405,14 @@ def run_job(job, *, on_heartbeat=None, anonymizer=None):
     with tempfile.TemporaryDirectory(prefix="fa-job-") as tmp:
         src = os.path.join(tmp, "input.mp4")
         try:
-            seen = [0]
+            seen, size = [0], [0]
 
             def on_chunk(n):
                 seen[0] += n
-                beat(seen[0])
+                beat(seen[0], "download", seen[0], size[0])
 
-            transfer.fetch(job["input_url"], src, callback=on_chunk)
+            transfer.fetch(job["input_url"], src, callback=on_chunk,
+                           on_total=lambda n: size.__setitem__(0, n or 0))
         except transfer.TransferError as e:
             raise JobError(str(e), transient=e.transient, stage="download") from e
 
@@ -340,7 +432,7 @@ def run_job(job, *, on_heartbeat=None, anonymizer=None):
             out = os.path.join(tmp, f"{t.get('label') or 'out'}.mp4")
             try:
                 res = run_target(anonymizer, src, out, t,
-                                 progress=lambda s, d, n: beat((s, d)),
+                                 progress=lambda s, d, n: beat((s, d), s, d, n),
                                  note=shrunk.append)
             except JobError:
                 raise                               # 정체 감시가 던진 것 — 그대로
@@ -350,7 +442,8 @@ def run_job(job, *, on_heartbeat=None, anonymizer=None):
                                transient=False, stage="process") from e
             done.append((t, getattr(res, "output", out), res))
 
-        for t, path, _res in done:
+        for i, (t, path, _res) in enumerate(done):
+            beat(("upload", i), "upload", i, len(done))
             try:
                 transfer.put(t["put_url"], path,
                              t.get("content_type", "video/mp4"))

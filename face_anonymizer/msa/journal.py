@@ -203,6 +203,19 @@ def job_finished(job, result, started, finished):
                 worker_avg_s=STATS.avg, worker_done=STATS.done)
 
 
+def job_progress(job, progress):
+    """하트비트마다 한 줄. **어디까지 갔다가 멎었는지**가 여기 남는다.
+
+    완료 줄만 남기면 죽은 잡은 아무 흔적이 없다 — 저쪽 리스가 회수해서 다시
+    돌리고 나면 "왜 처음에 실패했나" 를 물을 근거가 사라진다. 60초에 한 줄이라
+    양은 문제가 되지 않는다.
+    """
+    events.emit("job.progress", job=job.get("video_id"), name=name_of(job),
+                batch=batch_of(job), percent=progress.get("percent"),
+                stage=progress.get("stage"), eta_s=progress.get("eta_s"),
+                elapsed_s=progress.get("elapsed_s"))
+
+
 def job_failed(job, stage, transient, detail, started=None):
     """실패도 시각과 함께. **얼마나 돌다 실패했는지**가 원인을 좁힌다 —
     3초 만이면 입력을 못 받은 것이고, 40초면 처리 중에 넘어진 것이다."""
