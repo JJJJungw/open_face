@@ -116,3 +116,15 @@ def test_long_job_contract_is_set():
     assert c.result_backend is None and c.task_ignore_result is True
     # pickle 을 허용하면 브로커를 통해 임의 객체가 실행된다.
     assert list(c.accept_content) == ["json"]
+
+
+def test_visibility_timeout_is_longer_than_any_job():
+    """Redis 에는 ack 가 없다 — acks_late 를 이 시간으로 흉내 낸다.
+
+    한 건 처리 시간보다 짧으면 **멀쩡히 돌고 있는 작업이 중복 배달된다.** 720p
+    한 편이 분 단위이므로 분 단위 값을 넣으면 안 된다. 기본값(1시간)에 조용히
+    기대지 않고 명시한다 — 이 숫자가 "죽었을 때 얼마나 빨리 되살아나나" 다.
+    """
+    opts = shell.app.conf.broker_transport_options
+    assert opts["visibility_timeout"] == mc.VISIBILITY_TIMEOUT
+    assert mc.VISIBILITY_TIMEOUT >= 600

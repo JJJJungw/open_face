@@ -34,6 +34,19 @@ COMPLETE_TASK = os.environ.get("FA_MSA_COMPLETE_TASK",
 # 그때는 컨테이너를 늘리는 게 맞다(KEDA 가 큐 깊이로 그렇게 한다).
 CONCURRENCY = int(os.environ.get("FA_MSA_CONCURRENCY", 1))
 
+# 브로커가 "이 메시지는 아직 처리 중" 으로 봐 주는 시간. **넘기면 다른 워커에게
+# 다시 배달된다.**
+#
+# Redis 브로커에는 ack 라는 개념이 없다. acks_late 를 켜도 kombu 가 이 시간으로
+# 흉내 낼 뿐이라, 컨테이너가 통째로 죽었을 때 메시지가 되살아나는 시점이 곧
+# 이 값이다(kombu 기본 3600초). 반대로 이 값이 **한 건 처리 시간보다 짧으면**
+# 멀쩡히 돌고 있는 작업이 중복 배달된다 — GPU 를 두 배로 쓴다.
+#
+# 그래서 길게 둔다. 진짜 회수는 저쪽 리스 만료 스윕(5분)이 하고, 늦게 도착한
+# 우리 보고는 펜싱 토큰이 거른다. 기본값에 기대지 않고 여기 적어 두는 이유는,
+# 이 숫자가 "죽었을 때 얼마나 빨리 되살아나나" 를 정하는 값이기 때문이다.
+VISIBILITY_TIMEOUT = int(os.environ.get("FA_MSA_VISIBILITY_TIMEOUT", 3600))
+
 # 기동할 때 모델을 미리 올릴까. 첫 잡이 로딩 수십 초를 뒤집어쓰지 않게 한다.
 PRELOAD = (os.environ.get("FA_MSA_PRELOAD", "1").strip().lower()
            not in ("0", "false", "no", "off"))

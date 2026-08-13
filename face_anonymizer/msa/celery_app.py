@@ -48,6 +48,9 @@ app.conf.update(
     task_acks_late=True,
     task_reject_on_worker_lost=True,
     worker_prefetch_multiplier=1,
+    # Redis 에는 ack 가 없다 — acks_late 를 이 시간으로 흉내 낸다. 한 건 처리
+    # 시간보다 짧으면 멀쩡히 도는 작업이 중복 배달된다(config 주석 참고).
+    broker_transport_options={"visibility_timeout": config.VISIBILITY_TIMEOUT},
     # 우리가 되돌려 보내는 메시지도 자기 큐로 간다.
     task_routes={
         config.TASK_NAME: {"queue": config.QUEUE},
