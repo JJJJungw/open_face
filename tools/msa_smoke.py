@@ -284,6 +284,69 @@ def main():
         # 로그는 지우지 않는다. 실패했을 때 있는 것이 그것뿐이다.
 
 
+# 이름과 실제가 어긋나는 자리가 하나 있다. 파이프라인의 `audio` 는 오디오만 재는
+# 게 아니라 finalize_output() **전체** 다 — H.264 재인코딩 + 스케일 + 오디오 합성 +
+# 검증. 여기서 "오디오 합성" 이라고 적으면 병목을 오디오로 오인해 엉뚱한 데를
+# 파게 된다. 필드 이름은 job.json 호환 때문에 그대로 두고 표시만 바로잡는다.
+STAGE_NAME = {"ingest": "인제스트(디코딩·전사)",
+              "detect": "검출(GPU)",
+              "track": "추적·보간",
+              "render": "모자이크·중간파일 쓰기",
+              "audio": "최종 H.264 인코딩·먹싱"}
+
+# 어디가 병목인지에 따라 할 일이 정반대다. 이 표가 그 판단을 대신해 준다.
+VERDICT = {
+    "detect": ("진짜 GPU 한계입니다. 한 편을 빠르게 만들기는 어렵고, "
+               "워커 수로 처리량을 늘리는 게 맞습니다.\n"
+               "     그래도 볼 것: batch_size 를 올려 GPU 를 더 채울 수 있는지"
+               "(nvidia-smi 사용률이 100% 가 아니면 여지가 있습니다), "
+               "imgsz 를 낮춰도 검출률이 유지되는지."),
+    "audio": ("**오디오가 아니라 최종 H.264 인코딩입니다.** NVENC 를 쓰고 있는지 "
+              "먼저 보세요 — 로그의 '인코더 선택' 줄이나 FA_ENCODER=h264_nvenc.\n"
+              "     libx264 로 떨어져 있으면 CPU 로 인코딩 중이고, 여기서만 몇 배가 "
+              "나옵니다. 그러면 필요한 워커 수가 그만큼 줍니다."),
+    "render": ("모자이크 적용과 중간 파일 쓰기가 병목입니다. OpenCV VideoWriter 가 "
+               "mp4v 로 쓰는 구간이라 디스크와 CPU 를 봅니다.\n"
+               "     컨테이너의 임시 디렉터리가 느린 볼륨이면 여기서 시간이 샙니다."),
+    "ingest": ("디코딩·전사가 병목입니다. 원본이 AV1·HEVC 라 CPU 로 풀고 있을 수 "
+               "있습니다.\n"
+               "     하드웨어 디코딩(-hwaccel cuda)을 켜면 크게 줄어듭니다."),
+    "track": "추적이 병목인 건 이례적입니다. 검출 박스가 비정상적으로 많을 수 있습니다.",
+}
+
+
+def stage_report(done):
+    """49.6초가 **어디서** 쓰였나. 이게 워커를 몇 대 붙일지를 정한다."""
+    tot = {}
+    n = 0
+    for r in done:
+        t = ((r.get("targets") or [{}])[0]).get("timing") or {}
+        if not t:
+            continue
+        n += 1
+        for k, v in t.items():
+            tot[k] = tot.get(k, 0.0) + v
+    if not n:
+        return
+    total = tot.get("total") or sum(v for k, v in tot.items() if k != "total")
+    print("-" * 62)
+    print("  단계별 시간 (평균)")
+    rows = [(k, v / n) for k, v in tot.items() if k != "total"]
+    rows.sort(key=lambda kv: -kv[1])
+    for k, avg in rows:
+        share = 100 * (tot[k] / total) if total else 0
+        bar = "█" * max(0, round(share / 4))
+        print(f"    {STAGE_NAME.get(k, k):<20} {avg:7.1f}s  {share:5.1f}%  {bar}")
+    if rows:
+        top, avg = rows[0]
+        share = 100 * (tot[top] / total) if total else 0
+        print()
+        print(f"  → 병목은 **{STAGE_NAME.get(top, top)}** 입니다 ({share:.0f}%).")
+        verdict = VERDICT.get(top)
+        if verdict:
+            print(f"     {verdict}")
+
+
 def report_out(rows, wall, a, outdir):
     print("\n" + "=" * 62)
     done = [r for r in rows if r.get("ok") and r.get("accepted")]
@@ -298,11 +361,16 @@ def report_out(rows, wall, a, outdir):
             print(f"  ✔ {r['video_id']}  {r.get('elapsed_s')}s  "
                   f"프레임 {t.get('frames')}  검출된 프레임 {t.get('detected_frames')}  "
                   f"실시간 대비 {t.get('realtime_factor')}x")
+            if r.get("review_needed"):
+                for item in r.get("review") or []:
+                    print(f"    ⚠ 검수 필요 [{item.get('code')}] {item.get('message')}")
         else:
             print(f"  ✘ {r['video_id']}  [{r.get('stage')}] "
                   f"transient={r.get('transient')}  {r.get('error')}")
     if stale:
         print(f"  ⓘ 펜싱: 남의 토큰으로 온 보고 {len(stale)}건 → 버려짐 (정상)")
+
+    stage_report(done)
 
     if done:
         secs = [r["elapsed_s"] for r in done]

@@ -110,6 +110,27 @@ def review_of(warnings):
     return out
 
 
+STAGES = ("ingest", "detect", "track", "render", "audio", "total")
+
+
+def timing_of(result):
+    """파이프라인 단계별 시간(초). 없으면 빈 dict.
+
+    **``audio`` 는 이름과 다르다.** 오디오만이 아니라 ``finalize_output()`` 전체를
+    잰다 — H.264 재인코딩 + 스케일 + 오디오 합성 + 프레임 수 검증. 이 값이 크다고
+    오디오를 파면 엉뚱한 데를 뒤지게 된다. 필드 이름은 job.json 호환 때문에 그대로
+    두고, 읽는 쪽(tools/msa_smoke.py)이 제대로 된 이름으로 표시한다.
+
+    소수점 첫째 자리로 반올림하지 않는다 — 짧은 클립에서는 단계 시간이 전부
+    0.0 이 되어 어디가 느린지 안 보인다.
+    """
+    t = getattr(result, "timing", None)
+    if t is None:
+        return {}
+    return {s: round(getattr(t, s, 0.0) or 0.0, 3) for s in STAGES
+            if hasattr(t, s)}
+
+
 def notices_of(warnings):
     return [{"code": c, "detail": str(w), "message": NOTICE[c]}
             for w in warnings or ()
@@ -299,6 +320,11 @@ def run_job(job, *, on_heartbeat=None, anonymizer=None):
                      "detected_frames": getattr(r, "detected_frames", None),
                      "detection_rate": round(getattr(r, "detection_rate", 0) or 0, 4),
                      "realtime_factor": round(getattr(r, "realtime_factor", 0) or 0, 2),
+                     # 단계별 시간이 없으면 "느리다" 까지만 알고 **어디가** 느린지
+                     # 모른다. 검출이 대부분이면 GPU 를 늘리는 수밖에 없고,
+                     # 렌더·인제스트가 대부분이면 GPU 가 놀고 있다는 뜻이라 대응이
+                     # 정반대다. 워커를 몇 대 붙일지가 이 한 줄로 갈린다.
+                     "timing": timing_of(r),
                      "warnings": list(getattr(r, "warnings", ()))}
                     for t, _p, r in done],
     }

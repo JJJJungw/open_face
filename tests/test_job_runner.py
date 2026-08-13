@@ -237,3 +237,21 @@ def test_only_human_worthy_warnings_become_review():
 
     notices = job_runner.notices_of(["audio: ffmpeg-timeout", "decode-unverified"])
     assert {i["code"] for i in notices} == {"audio", "decode-unverified"}
+
+
+def test_stage_timing_travels_with_the_result(bucket):
+    """'느리다' 까지만 알면 아무 결정도 못 한다 — **어디가** 느린지가 필요하다.
+
+    검출이 대부분이면 GPU 를 늘리는 수밖에 없고, 렌더·인제스트가 대부분이면 GPU 가
+    놀고 있다는 뜻이라 대응이 정반대다. 워커를 몇 대 붙일지가 이 값으로 갈린다.
+    """
+    out = job_runner.run_job(make_job(bucket), anonymizer=anon(bucket))
+
+    t = out["targets"][0]["timing"]
+    assert {"ingest", "detect", "track", "render", "audio", "total"} <= set(t)
+    assert t["total"] > 0
+    # 짧은 클립에서 소수점 첫째 자리로 반올림하면 단계가 전부 0.0 이 되어
+    # 어디가 느린지 안 보인다.
+    assert all(isinstance(v, float) for v in t.values())
+    assert sum(t[k] for k in ("ingest", "detect", "track", "render", "audio")) \
+        <= t["total"] + 0.5
