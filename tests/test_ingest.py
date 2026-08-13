@@ -153,3 +153,46 @@ def test_transcode_works_without_a_progress_callback(tmp_path, make_video):
     dst = str(tmp_path / "quiet_out.mp4")
     assert ingest.transcode(src, dst) == dst
     assert os.path.getsize(dst) > 0
+
+
+# ── 입력 하드웨어 디코딩 ─────────────────────────────────────────────────────
+
+def test_hwaccel_keeps_frames_on_gpu_only_for_nvenc(monkeypatch):
+    """NVENC 로 나갈 때만 프레임을 GPU 에 둔다.
+
+    CPU 인코더인데 ``-hwaccel_output_format cuda`` 를 붙이면 인코더가 GPU 프레임을
+    못 받아 전사가 통째로 실패한다. 빨리 하려다 못 하게 만드는 전형적인 자리다.
+    """
+    monkeypatch.setattr(ingest, "_hwaccel", True)
+    assert ingest.hwaccel_args("h264_nvenc") == [
+        "-hwaccel", "cuda", "-hwaccel_output_format", "cuda"]
+    assert ingest.hwaccel_args("libx264") == ["-hwaccel", "cuda"]
+
+
+def test_hwaccel_can_be_turned_off(monkeypatch):
+    monkeypatch.setattr(ingest, "_hwaccel", True)
+    monkeypatch.setenv("FA_HWACCEL", "0")
+    assert ingest.hwaccel_args("h264_nvenc") == []
+
+
+def test_gpu_decode_failure_falls_back_to_cpu(monkeypatch, tmp_path):
+    """이 파일에서만 GPU 디코딩이 안 될 수 있다. 그때 작업이 죽으면 안 된다."""
+    monkeypatch.setattr(ingest, "_hwaccel", True)
+    monkeypatch.setattr(ingest, "pick_encoder", lambda: ("h264_nvenc", "-cq", ()))
+    monkeypatch.setattr(ingest, "expected_frames", lambda p: 10)
+    dst = tmp_path / "out.mp4"
+    seen = []
+
+    def fake_run(cmd, total, progress, timeout):
+        seen.append(cmd)
+        if "-hwaccel" in cmd:
+            return 1, "cuda decode failed"      # 첫 시도는 GPU — 실패시킨다
+        dst.write_bytes(b"x" * 10)              # 두 번째는 CPU — 성공
+        return 0, ""
+
+    monkeypatch.setattr(ingest, "_run_with_progress", fake_run)
+    monkeypatch.setattr(ingest, "opencv_can_decode", lambda p: True)
+    ingest.transcode("in.mp4", str(dst))
+
+    assert len(seen) == 2
+    assert "-hwaccel" in seen[0] and "-hwaccel" not in seen[1]

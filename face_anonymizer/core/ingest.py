@@ -126,6 +126,48 @@ def _run_with_progress(cmd, total, progress, timeout):
     return proc.returncode, err
 
 
+_hwaccel = None
+
+
+def hwaccel_args(encoder):
+    """입력 디코딩을 GPU 로 넘기는 인자. 못 쓰면 빈 목록.
+
+    **전사는 디코딩과 인코딩 둘 다 한다.** 출력은 진작 NVENC 로 가고 있었는데
+    입력은 CPU 로 풀고 있었다 — AV1 원본에서 이 구간이 한 편의 3분의 1이었다
+    (docs/issues/010).
+
+    인코더가 NVENC 면 ``-hwaccel_output_format cuda`` 까지 붙여 **프레임을 GPU 에
+    둔 채로** 인코딩한다(PCIe 왕복이 없다). CPU 인코더면 프레임을 내려받아야
+    하므로 그 옵션은 빼야 한다 — 붙이면 필터/인코더가 못 받는다.
+
+    되는지는 목록이 아니라 **실제로 한 번 돌려서** 판정한다. 빌드에 이름이 있어도
+    드라이버·GPU 세대에 따라 실행 시점에 실패한다(pick_encoder 와 같은 이유).
+    """
+    global _hwaccel
+    if os.environ.get("FA_HWACCEL", "1").strip().lower() in ("0", "false", "no"):
+        return []
+    if _hwaccel is None:
+        p = _probe(["ffmpeg", "-v", "error", "-hwaccel", "cuda",
+                    "-f", "lavfi", "-i", "testsrc=duration=0.1:size=64x64:rate=10",
+                    "-f", "null", "-"])
+        _hwaccel = bool(p)
+        log.info("입력 하드웨어 디코딩: %s", "cuda" if _hwaccel else "없음 (CPU)")
+    if not _hwaccel:
+        return []
+    args = ["-hwaccel", "cuda"]
+    if "nvenc" in (encoder or ""):
+        args += ["-hwaccel_output_format", "cuda"]
+    return args
+
+
+def _probe(cmd, timeout=30):
+    try:
+        p = subprocess.run(cmd, capture_output=True, text=True, timeout=timeout)
+    except (OSError, subprocess.SubprocessError):
+        return False
+    return p.returncode == 0
+
+
 def transcode(src, dst, crf=INGEST_CRF, timeout=None, progress=None):
     """ffmpeg 로 H.264 로 옮겨 담는다 (영상만).
 
@@ -136,16 +178,27 @@ def transcode(src, dst, crf=INGEST_CRF, timeout=None, progress=None):
     if enc is None:
         raise TranscodeError("쓸 수 있는 H.264 인코더가 없습니다")
     encoder, qflag, extra = enc
-    cmd = ["ffmpeg", "-y", "-v", "error", "-i", src,
-           "-map", "0:v:0", "-an",
-           "-c:v", encoder, qflag, str(crf), *extra,
-           "-pix_fmt", "yuv420p", dst]
-    res = _run_with_progress(cmd, expected_frames(src), progress,
-                             timeout or FFMPEG_TIMEOUT)
-    if res is None:
-        raise TranscodeError("ffmpeg 가 제한 시간 안에 끝나지 않았습니다")
-    rc, err = res
-    if rc != 0 or not os.path.exists(dst) or os.path.getsize(dst) == 0:
+    total = expected_frames(src)
+    hw = hwaccel_args(encoder)
+    # GPU 디코딩이 이 파일에서만 실패할 수 있다(코덱 조합·프로파일). 그때는 CPU 로
+    # 한 번 더 해 본다 — 빠르게 하려다 못 하게 만들면 안 된다.
+    for args in ([hw, []] if hw else [[]]):
+        cmd = ["ffmpeg", "-y", "-v", "error", *args, "-i", src,
+               "-map", "0:v:0", "-an",
+               "-c:v", encoder, qflag, str(crf), *extra,
+               "-pix_fmt", "yuv420p", dst]
+        res = _run_with_progress(cmd, total, progress,
+                                 timeout or FFMPEG_TIMEOUT)
+        if res is None:
+            raise TranscodeError("ffmpeg 가 제한 시간 안에 끝나지 않았습니다")
+        rc, err = res
+        ok = rc == 0 and os.path.exists(dst) and os.path.getsize(dst) > 0
+        if ok:
+            break
+        if args:
+            log.warning("GPU 디코딩으로 전사 실패 — CPU 로 다시 한다: %s",
+                        (err or "")[-200:].strip())
+    if not ok:
         raise TranscodeError(f"ffmpeg 가 실패했습니다 (종료 코드 {rc}): {(err or '')[-200:].strip()}")
     if not opencv_can_decode(dst):
         raise TranscodeError("변환한 파일도 읽지 못했습니다")
