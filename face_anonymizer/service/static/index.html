@@ -957,7 +957,7 @@ function ring(pct) {
       <circle class="trk" cx="29" cy="29" r="${RAD}"></circle>
       <circle class="fil" cx="29" cy="29" r="${RAD}"
               stroke-dasharray="${CIRC*pct/100} ${CIRC}"></circle>
-    </svg><span class="pct">${pct}%</span></div>`;
+    </svg><span class="pct">${Math.round(pct)}%</span></div>`;
 }
 
 // 완료 평균도 서버가 센다. 목록 안의 완료 카드를 뒤지면 목록이 잘렸을 때
@@ -970,6 +970,9 @@ function avgSeconds(st) {
 // 작업 한 건에 걸리는 시간. 완료 기록이 있으면 그 평균이 제일 정확하고,
 // 없으면 지금 도는 작업의 진행률로 되짚는다. 첫 배치에서는 완료가 하나도
 // 없으니 평균만 보면 끝날 때까지 '계산 중' 이다 — 그게 이 화면의 버그였다.
+//
+// overall 은 이제 전 단계를 한 자로 잰다(progress.py). 예전처럼 검출·렌더만
+// 세면 전사에 쓴 시간이 분자에만 들어가서 남은 시간이 몇 배로 부풀었다.
 function jobSeconds(st, running) {
   const avg = avgSeconds(st);
   if (avg) return avg;
@@ -997,7 +1000,7 @@ function kpis(jobs, st) {
 
   if (filter === 'running') {
     t = running ? [
-      tile('진행률', `${running.overall}<small>%</small>`,
+      tile('진행률', `${Math.round(running.overall)}<small>%</small>`,
            `${STAGE_TEXT[running.stage] || '준비'} ${running.percent}%`, 'hero'),
       tile('이 작업 남은 시간', fmt(running.job_eta),
            `경과 ${fmt(running.job_elapsed)}`),
@@ -1093,7 +1096,7 @@ function renderQueue(st) {
         <div class="lb">처리중</div>
         <div class="v" title="${run ? run.name : ''}">${run ? run.name : '유휴'}</div>
         <div class="sub">${run
-          ? `${STAGE_TEXT[run.stage] || '준비'} ${run.overall}% · 남은 ${fmt(run.eta)}`
+          ? `${STAGE_TEXT[run.stage] || '준비'} ${Math.round(run.overall)}% · 남은 ${fmt(run.eta)}`
           : '큐에서 꺼낼 작업이 없습니다'}</div>
       </div>
       <div class="arw">▶</div>

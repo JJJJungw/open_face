@@ -52,7 +52,7 @@ import os
 import tempfile
 import time
 
-from . import params
+from . import params, progress
 
 log = logging.getLogger(__name__)
 
@@ -175,33 +175,13 @@ STAGE_FACE = {
     "unknown": ("알 수 없는 오류입니다", "잠시 뒤 자동으로 다시 시도합니다"),
 }
 
-# ---------------------------------------------------------------------------
 # 진행률 — **이 값은 우리만 안다.**
 #
 # 목록도 순번도 남은 건수도 잡을 준 쪽이 안다. 우리만 아는 것은 딱 하나,
 # "지금 손에 든 이 영상이 어디쯤 가고 있나" 다. 그래서 하트비트에 실어 보낸다.
 # 안 실어 보내면 화면은 스피너까지밖에 못 그린다.
 #
-# **단계별 퍼센트를 그대로 주면 안 된다.** 검출 100% → 렌더 0% 로 떨어지는데,
-# 보는 사람에게는 그냥 되감긴 것으로 보인다. 그래서 단계마다 전체에서 차지하는
-# 몫을 주고 **한 줄로 이어 붙인다.**
-#
-# 몫은 L40S 실측(인제스트 12.6 · 검출 13.6 · 렌더 13.0 · 최종 0.8초)에서 왔다.
-# 인스턴스가 바뀌면 비율도 조금 바뀌지만, 진행률은 **줄지만 않으면** 쓸 만하다.
-STAGE_SPAN = (                      # (단계, 시작 지점, 차지하는 몫)
-    ("download",  0.00, 0.08),
-    ("transcode", 0.08, 0.22),
-    ("detect",    0.30, 0.30),
-    ("track",     0.60, 0.02),
-    ("render",    0.62, 0.30),
-    ("upload",    0.92, 0.08),
-)
-_SPAN = {name: (base, width) for name, base, width in STAGE_SPAN}
-
-# 화면에 띄울 단계 이름. 코드 이름을 그대로 보여 주면 사용자가 읽을 말이 아니다.
-STAGE_LABEL = {"download": "원본 받는 중", "transcode": "읽을 수 있게 변환 중",
-               "detect": "얼굴 찾는 중", "track": "추적 잇는 중",
-               "render": "가리는 중", "upload": "결과 올리는 중"}
+# 계산은 progress 모듈에 있다 — api 화면과 **같은 자를 쓴다.**
 
 
 class _Beat:
@@ -254,24 +234,15 @@ class _Beat:
         버린다. 앞으로만 가는 진행률은 조금 부정확해도 읽히지만, 뒤로 가는
         진행률은 고장으로 읽힌다.
         """
-        base, width = _SPAN.get(stage, (self.percent, 0.0))
-        frac = 0.0
-        if total:
-            frac = min(1.0, max(0.0, float(done or 0) / float(total)))
-        self.percent = max(self.percent, round((base + width * frac) * 100, 1))
+        self.percent = progress.overall(stage, done, total, floor=self.percent)
 
     def snapshot(self):
         """하트비트에 실을 것. 화면이 이걸로 진행바와 한 줄 설명을 그린다."""
         elapsed = round(time.monotonic() - self.t0, 1)
-        eta = None
-        # 5% 아래에서는 추정이 요동쳐서 "남은 시간 47분" 같은 값이 나온다.
-        # 모르는 구간에서는 아예 안 보내는 편이 낫다.
-        if self.percent >= 5:
-            eta = round(elapsed * (100 - self.percent) / self.percent)
         return {"elapsed_s": elapsed, "percent": self.percent,
                 "stage": self.stage,
-                "stage_label": STAGE_LABEL.get(self.stage or ""),
-                "eta_s": eta}
+                "stage_label": progress.label(self.stage),
+                "eta_s": progress.eta(elapsed, self.percent)}
 
 
 def target_params(t):

@@ -1163,3 +1163,79 @@ def test_more_button_uses_a_time_cursor_not_an_offset(client, tmp_path,
     ids = {r["ts"] for r in nxt["events"]}
     assert first["events"][0]["ts"] not in ids      # 겹치지 않는다
     assert nxt["has_more"] is False
+
+
+# ---------------------------------------------------------------------------
+# 남은 시간 — 실제로 20분이 떴던 자리
+
+
+def _running(stage, done, total, started_ago, overall=0.0):
+    from face_anonymizer.service import jobs
+    import time
+    j = jobs.Job(id="x", name="a.mp4", params={}, workdir="/tmp",
+                 status="running", stage=stage, done=done, total=total,
+                 started=time.time() - started_ago, overall=overall)
+    return jobs.snapshot(j), j
+
+
+def test_remaining_time_does_not_explode_right_after_a_long_transcode():
+    """40초짜리 영상에 **20분**이 떴던 자리다.
+
+    남은 시간은 "지금까지 걸린 시간 x (100-진행률)/진행률" 로 되짚는데, 걸린
+    시간은 **작업 시작부터** 재고 진행률은 **검출·렌더만** 세던 것이 원인이었다.
+    전사에 25초를 쓰고 검출이 막 2% 를 채우면 25 x 98/2 = 1225초가 된다.
+    두 값이 같은 구간을 재야 한다.
+    """
+    snap, _j = _running("detect", 2, 100, started_ago=25)
+    assert snap["job_eta"] < 180, f"25초 돌고 남은 시간이 {snap['job_eta']}초"
+
+
+def test_progress_covers_every_stage_on_one_gauge():
+    """전사가 끝나고 검출이 시작될 때 게이지가 0 으로 떨어지면 안 된다."""
+    end_of_transcode, _ = _running("transcode", 100, 100, started_ago=25)
+    start_of_detect, _ = _running("detect", 0, 100, started_ago=25,
+                                  overall=end_of_transcode["overall"])
+    assert start_of_detect["overall"] >= end_of_transcode["overall"]
+
+
+def test_progress_never_goes_backwards_when_a_stage_is_skipped():
+    """h264 원본이면 전사가 통째로 없다. 그래도 뒤로 가지 않는다."""
+    from face_anonymizer.service import jobs
+    import time
+    j = jobs.Job(id="x", name="a.mp4", params={}, workdir="/tmp",
+                 status="running", started=time.time() - 10)
+    seen = []
+    for stage, done, total in [("detect", 50, 100), ("render", 1, 100),
+                               ("detect", 90, 100),      # 늦게 온 콜백
+                               ("upload", 1, 1)]:
+        j.stage, j.done, j.total = stage, done, total
+        seen.append(jobs.snapshot(j)["overall"])
+    assert seen == sorted(seen), seen
+
+
+def test_a_retry_puts_the_gauge_back_to_zero():
+    """다시 시작한 작업이 60% 부터 출발하면 안 된다 — 바닥값이 남아서 생긴다."""
+    from face_anonymizer.service import jobs
+    j = jobs.Job(id="x", name="a.mp4", params={}, workdir="/tmp",
+                 status="running", stage="render", done=50, total=100)
+    jobs.snapshot(j)
+    assert j.overall > 50
+    j.stage, j.done, j.total, j.overall = "", 0, 0, 0.0     # worker 의 재시도 경로
+    j.status = "queued"
+    assert jobs.snapshot(j)["overall"] == 0.0
+
+
+def test_the_two_faces_measure_progress_with_the_same_ruler():
+    """api 화면과 msa 하트비트가 같은 영상을 놓고 다른 숫자를 말하면 안 된다."""
+    from face_anonymizer import job_runner, progress
+    from face_anonymizer.service import jobs
+    import time
+
+    beat = job_runner._Beat(None, 60)
+    beat(("x", 40), "detect", 40, 100)
+
+    j = jobs.Job(id="x", name="a.mp4", params={}, workdir="/tmp",
+                 status="running", stage="detect", done=40, total=100,
+                 started=time.time() - 10)
+    assert jobs.snapshot(j)["overall"] == beat.percent
+    assert beat.percent == progress.overall("detect", 40, 100)

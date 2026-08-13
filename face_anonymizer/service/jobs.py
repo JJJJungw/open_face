@@ -20,7 +20,7 @@ import threading
 import time
 from dataclasses import asdict, dataclass, field, fields
 
-from .. import timefmt
+from .. import progress, timefmt
 from . import config
 
 log = logging.getLogger(__name__)
@@ -59,6 +59,10 @@ class Job:
     batch: str = ""
     deferred_since: float = 0.0   # 보류가 시작된 시각 (상한 판정용)
     stage_t0: float = 0.0
+    # 전체 진행률(0~100). **되감기지 않게** 지금까지의 최고치를 들고 다닌다.
+    # 단계가 통째로 없을 수 있어서(h264 원본이면 전사가 없다) 계산값만으로는
+    # 뒤로 갈 수 있는데, 뒤로 가는 진행바는 사용자가 고장으로 읽는다.
+    overall: float = 0.0
 
 
 def state_path(jid):
@@ -137,25 +141,28 @@ def snapshot(j, queued_ahead=0):
     elapsed = time.time() - j.stage_t0 if j.stage_t0 else 0.0
     fps = j.done / elapsed if elapsed > 0 else 0.0
     eta = (j.total - j.done) / fps if fps > 0 and j.done < j.total else 0.0
-    # 검출과 렌더가 각각 영상 전체를 한 번씩 훑으므로 절반씩 배분한다.
-    # 전사(transcode)는 그 앞 단계라 자기 게이지를 따로 채운다 — 검출이
-    # 시작되면 0 부터 다시 오른다.
-    if j.stage in ("download", "transcode", "upload"):
-        # 검출·렌더와 훑는 대상이 달라 한 게이지에 합치면 어느 쪽 진행도
-        # 안 읽힌다. 각자 채우고, 검출이 시작되면 0 부터 다시 오른다.
-        overall = pct
-    else:
-        overall = pct // 2 + (50 if j.stage == "render" else 0)
-    if j.status == "done":
-        overall = 100
 
-    # 이 작업 하나가 끝나기까지 남은 시간. eta 는 **현재 단계**만 보므로
-    # 검출 중이면 렌더가 통째로 빠져 절반으로 나온다. 대기열 전체 예상을
-    # 세우려면 작업 한 건의 총 소요가 필요해서 진행률로 되짚는다.
+    # 전체 진행률. **모든 단계를 한 자 위에 올린다**(progress.STAGE_SPAN).
+    #
+    # 예전에는 검출·렌더에만 50%씩 주고 전사·전송은 자기 게이지를 따로 채웠다.
+    # 게이지가 0 부터 다시 오르는 것도 문제지만 진짜 사고는 **남은 시간**에서
+    # 났다. 남은 시간은 "지금까지 걸린 시간 × (100-진행률)/진행률" 로 되짚는데,
+    # 걸린 시간은 작업 시작부터 재고 진행률은 검출·렌더만 세니 기준이 어긋난다.
+    # 전사에 25초를 쓰고 검출이 2% 를 채운 순간 25×98/2 = 1225초 — 40초짜리
+    # 영상에 **20분**이 떴다. 실제로 그렇게 떴다.
+    #
+    # j.overall 을 들고 다니며 되감기를 막는다. 단계가 통째로 없을 수 있고
+    # (h264 원본이면 전사가 없다) 저장·복원 사이에 값이 뒤집힐 수도 있다.
+    overall = progress.overall(j.stage, j.done, j.total, floor=j.overall or 0.0)
+    if j.status == "done":
+        overall = 100.0
+    j.overall = overall
+
+    # 이 작업 하나가 끝나기까지 남은 시간. 위 진행률이 전 단계를 덮으므로
+    # 이제 분자(작업 시작부터)와 분모(진행률)의 기준이 맞는다.
     job_elapsed = time.time() - j.started if j.started else 0.0
-    job_eta = (job_elapsed * (100 - overall) / overall
-               if j.status == "running" and overall > 0
-               and j.stage in ("detect", "render") else 0.0)
+    job_eta = (progress.eta(job_elapsed, overall) or 0.0) \
+        if j.status == "running" else 0.0
 
     # 왜 안 도는지 화면이 말할 수 있어야 한다. not_before 가 미래인 queued 는
     # 그냥 '대기' 가 아니라 '재시도 대기' 나 '보류' 다.
@@ -319,7 +326,7 @@ def recover_orphans():
         elif j.status == "queued":
             # 시도 횟수는 올리지 않는다. 재시작은 이 작업이 실패한 것이 아니다 —
             # 여기서 세면 배포를 몇 번 하는 것만으로 재시도가 소진된다.
-            j.stage, j.done, j.total = "", 0, 0
+            j.stage, j.done, j.total, j.overall = "", 0, 0, 0.0
             with LOCK:
                 JOBS[j.id] = j
             save_job(j)

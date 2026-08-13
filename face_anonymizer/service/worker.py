@@ -198,7 +198,10 @@ def fail_or_retry(j, exc, permanent):
     with jobs.LOCK:
         j.error = info
         if retryable:
+            # 진행률도 처음으로. 안 되돌리면 다시 시작한 작업이 화면에서
+            # 60% 부터 출발한다 — 되감기를 막는 바닥값이 그대로 남아서다.
             j.status, j.done, j.total, j.stage = "queued", 0, 0, ""
+            j.overall = 0.0
         else:
             j.status, j.finished = "failed", time.time()
     jobs.save_job(j)

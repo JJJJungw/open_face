@@ -381,10 +381,12 @@ def test_eta_is_withheld_while_the_estimate_is_still_noise():
     모르는 구간에서는 **안 보내는 편이 낫다.** 화면은 None 을 받으면 '계산 중'
     을 띄우면 되지만, 틀린 숫자를 받으면 그대로 띄운다.
     """
+    import time as _t
     b, _ = _beat()
     b(("x", 1), "download", 1, 100)              # 0.08%
     assert b.snapshot()["eta_s"] is None
     b(("x", 50), "detect", 50, 100)              # 45%
+    _t.sleep(0.15)                               # 걸린 시간이 0 이면 되짚을 게 없다
     assert b.snapshot()["eta_s"] is not None
 
 
