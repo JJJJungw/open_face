@@ -52,6 +52,8 @@ import os
 import tempfile
 import time
 
+from . import params
+
 log = logging.getLogger(__name__)
 
 # 진행 보고가 이만큼 멎으면 환경 문제로 보고 일시 실패로 끊는다.
@@ -188,9 +190,14 @@ def target_params(t):
     (720p / 3500~4000 kbps). 둘 다 받아 준다 — 어휘를 하나로 강제하면 붙이는
     쪽이 자기 파이프라인을 고쳐야 한다.
     """
-    p = {}
-    for k in ("method", "conf", "imgsz", "batch_size", "keep_audio",
-              "bitrate", "max_bitrate", "crf"):
+    # **잡이 말하지 않은 것은 서비스 기본값으로 채운다.**
+    #
+    # 전에는 안 채웠다. 그러면 파이프라인 시그니처 기본값(batch_size=1,
+    # imgsz=960)으로 떨어지는데, 그건 "안전한 최소값" 이지 우리가 튜닝한 값이
+    # 아니다. L40S 에서 GPU 를 20% 만 쓰고 한 편에 49.5초를 썼다
+    # (docs/issues/009). 잡 페이로드는 **다르게 하고 싶은 것만** 적는 자리다.
+    p = {k: v for k, v in params.DEFAULTS.items() if k in params.JOB_OVERRIDABLE}
+    for k in params.JOB_OVERRIDABLE:
         if t.get(k) is not None:
             p[k] = t[k]
 
@@ -201,9 +208,71 @@ def target_params(t):
 
     # 화질 정책은 둘 중 하나만 걸어야 한다(docs/issues 의 AV1 상한 사고). 타깃이
     # crf 로 말했으면 우리 기본 타깃 비트레이트를 비워서 CRF 쪽으로 넘긴다.
-    if "crf" in p and "bitrate" not in p:
+    #
+    # 판정은 **잡이 무엇을 말했는지**(t)로 한다. 기본값을 채운 뒤(p)로 보면
+    # 둘 다 늘 들어 있어서 이 분기가 영영 안 걸린다.
+    if t.get("crf") is not None and t.get("bitrate") is None:
         p["bitrate"] = p["max_bitrate"] = ""
     return p
+
+
+def is_oom(exc):
+    """CUDA 메모리 부족인가. torch 를 임포트하지 않고 판정한다.
+
+    ``torch.cuda.OutOfMemoryError`` 로 잡으면 torch 가 없는 환경(테스트·CPU
+    전용)에서 이 모듈이 통째로 못 뜬다. 메시지로 보는 것이 지저분해 보여도,
+    여기서 torch 를 끌고 오는 대가보다 싸다.
+    """
+    if type(exc).__name__ in ("OutOfMemoryError", "CudaOutOfMemoryError"):
+        return True
+    s = str(exc).lower()
+    return "out of memory" in s or "cuda oom" in s
+
+
+def run_target(anonymizer, src, out, target, *, progress=None, note=None):
+    """타깃 하나를 처리한다. **메모리가 부족하면 배치를 줄여 다시 해 본다.**
+
+    운영 인스턴스는 개발기보다 작다. 개발기가 45GB 짜리라 batch 32 가 여유롭다고
+    그 값을 기본으로 박아 두면, 인스턴스를 줄이는 순간 CUDA OOM 이 난다. 그리고
+    OOM 은 파이프라인 예외라 **영구 실패로 분류돼 큐 전체가 재시도 없이 죽는다.**
+
+    메모리 부족은 이 영상의 문제가 아니라 **환경의 문제**다. 그래서 실패로 던지기
+    전에 배치를 절반씩 줄여 가며 다시 해 본다. 1까지 내려가도 안 되면 그때는
+    일시 실패다 — 더 작은 배치로 다시 시도할 여지가 남아 있지 않고, 다른(더 큰)
+    워커에서는 될 수 있기 때문이다.
+    """
+    p = target_params(target)
+    batch = int(p.get("batch_size") or 1)
+    first = None
+    while True:
+        p["batch_size"] = batch
+        try:
+            return anonymizer.process(src, out, progress=progress, **p)
+        except JobError:
+            raise
+        except Exception as e:                      # noqa: BLE001
+            if not is_oom(e):
+                raise
+            first = first or e
+            if batch <= params.BATCH_MIN:
+                raise JobError(
+                    f"GPU 메모리가 부족합니다 (batch {batch} 까지 낮췄습니다). "
+                    f"더 큰 워커에서는 될 수 있습니다: {e}",
+                    transient=True, stage="oom") from first
+            batch = max(params.BATCH_MIN, batch // 2)
+            log.warning("GPU 메모리 부족 — 배치를 %d 로 낮춰 다시 시도한다", batch)
+            if note is not None:
+                note(batch)
+            _free_cuda()
+
+
+def _free_cuda():
+    """다시 시도하기 전에 캐시를 비운다. torch 가 없으면 아무것도 안 한다."""
+    try:
+        import torch
+        torch.cuda.empty_cache()
+    except Exception:                               # noqa: BLE001
+        pass
 
 
 def _weights_ready(job):
@@ -266,12 +335,13 @@ def run_job(job, *, on_heartbeat=None, anonymizer=None):
 
         # **인코딩이 전부 끝난 뒤에 올린다.** 중간에 실패했는데 반쪽 산출이 이미
         # 올라가 있으면, 재시도가 성공할 때까지 버킷에 잘못된 결과가 남는다.
-        done = []
+        done, shrunk = [], []
         for t in targets:
             out = os.path.join(tmp, f"{t.get('label') or 'out'}.mp4")
             try:
-                res = anonymizer.process(src, out, progress=lambda s, d, n: beat((s, d)),
-                                         **target_params(t))
+                res = run_target(anonymizer, src, out, t,
+                                 progress=lambda s, d, n: beat((s, d)),
+                                 note=shrunk.append)
             except JobError:
                 raise                               # 정체 감시가 던진 것 — 그대로
             except Exception as e:                  # noqa: BLE001
@@ -302,6 +372,12 @@ def run_job(job, *, on_heartbeat=None, anonymizer=None):
             if item["detail"] not in seen:
                 seen.add(item["detail"])
                 notices.append(item)
+    if shrunk:
+        # 조용히 줄이면 "왜 이 인스턴스에서만 느리지" 가 원인 불명으로 남는다.
+        notices.append({"code": "batch-reduced",
+                        "detail": f"batch_size → {min(shrunk)}",
+                        "message": "GPU 메모리가 모자라 배치를 줄여 처리했습니다. "
+                                   "이 워커에는 이 영상이 버겁습니다."})
     if review:
         log.warning("검수 필요 video_id=%s: %s", job.get("video_id"),
                     " / ".join(i["code"] for i in review))

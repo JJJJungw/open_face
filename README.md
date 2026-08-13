@@ -57,16 +57,20 @@ face_anonymizer/
 ├── service/      HTTP API · 웹 UI · 운영 지표          ← 단독 운영의 얼굴
 ├── msa/          큐를 지켜보는 워커 (인바운드 포트 없음) ← MSA 의 얼굴
 ├── storage/      S3 입출력 · 서명된 URL · 이름 규칙
+├── params.py     처리 파라미터 기본값 — **두 진입점의 단일 출처**
 ├── job_runner.py 잡 페이로드 한 장 = 일 한 건
 └── cli.py        명령줄 진입점
-tests/          회귀 테스트 262개. 가중치·torch·GPU 없이 1분
-
-얼굴이 둘이고 몸은 하나다. `service/` 는 우리가 서버여서 사람이 웹으로 일을
-시키고, `msa/` 는 우리가 소비자여서 남의 큐에서 일을 꺼내 온다. 둘 다 같은
-`core/` 를 쓴다 (docs/integration/rebornstudio.md).
+tools/          손으로 돌리는 도구 (MSA 큐 왕복 검증)
+tests/          회귀 테스트 271개. 가중치·torch·GPU 없이 1분
 weights/        가중치 (setup_weights.py 가 받는다)
 third_party/    YOLO-FaceV2 리포 (체크포인트 unpickle 에 필요)
 ```
+
+**얼굴이 둘이고 몸은 하나다.** `service/` 는 우리가 서버여서 사람이 웹으로 일을
+시키고, `msa/` 는 우리가 소비자여서 남의 큐에서 일을 꺼내 온다. 둘 다 같은
+`core/` 를 쓰고, 처리 기본값도 `params.py` 한 벌을 나눠 쓴다 — 두 벌로 두었더니
+큐 경로가 조용히 다른 설정으로 돌고 있었다(docs/issues/009).
+자세한 연동 방식은 `docs/integration/rebornstudio.md`.
 
 의존은 **한 방향**이다. `service` 와 `storage` 는 `core` 를 쓰지만 `core` 는
 둘을 모른다. 덕분에 코어만 떼어 배치 워커로 쓸 수 있고, 테스트가 가짜 검출기로

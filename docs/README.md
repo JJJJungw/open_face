@@ -47,6 +47,7 @@
 | [006](issues/006-list-window-hides-work.md) | 목록이 100건에서 잘려 화면 전체가 "유휴" 로 보인다 | **해결됨** |
 | [007](issues/007-cancel-all-and-queue-screen.md) | 잘못 넣은 배치를 한 번에 멈출 수 없다 | **해결됨** |
 | [008](issues/008-silent-zero-detection.md) | 얼굴을 하나도 못 찾아도 "비식별화 완료" 로 나간다 | **해결됨** |
+| [009](issues/009-queue-path-ran-untuned.md) | 큐 워커가 튜닝 안 된 기본값(batch 1)으로 돌고 있었다 | **해결됨** |
 
 ## 이미 고친 것들
 

@@ -170,18 +170,51 @@ def test_stall_watchdog_fires_and_is_transient(monkeypatch):
 
 
 def test_height_null_means_keep_resolution(bucket):
-    """저쪽 규약에서 height=null 은 '스케일 생략'이다. 키가 없는 것과 다르다."""
+    """저쪽 규약에서 height=null 은 '스케일 생략'이다. 말 안 한 것과 다르다."""
     assert job_runner.target_params({"height": None})["height"] == 0
-    assert "height" not in job_runner.target_params({"label": "x"})
+    # 말을 안 하면 납품 기준(720p)이 적용된다 — 파이프라인 시그니처 기본값이 아니라.
+    assert job_runner.target_params({"label": "x"})["height"] == 720
+
+
+def test_unspecified_fields_get_the_service_defaults_not_the_signature_ones():
+    """잡이 말하지 않은 것은 **튜닝된 기본값**으로 채운다.
+
+    안 채우면 파이프라인 시그니처 기본값(batch_size=1, imgsz=960)으로 떨어진다.
+    그건 '안전한 최소값' 이지 우리가 고른 값이 아니다 — L40S 에서 GPU 를 20% 만
+    쓰고 한 편에 49.5초를 썼다(docs/issues/009).
+    """
+    from face_anonymizer import params
+
+    p = job_runner.target_params({"label": "deid-720p"})
+    assert p["batch_size"] == params.BATCH_SIZE != 1
+    assert p["imgsz"] == params.IMGSZ != 960
+    assert p["bitrate"] == "3500k"
+
+
+def test_both_entry_points_share_one_set_of_defaults():
+    """웹 화면과 큐 워커가 같은 영상을 다르게 처리하면 안 된다.
+
+    기본값이 두 벌 있으면 언젠가 어긋난다. 실제로 어긋나 있었다.
+    """
+    pytest.importorskip("fastapi")
+    from face_anonymizer import params
+    from face_anonymizer.service import config
+
+    worker = job_runner.target_params({})
+    for k in params.JOB_OVERRIDABLE:
+        assert worker[k] == config.JOB_DEFAULTS[k], k
 
 
 def test_crf_target_turns_off_our_bitrate_policy():
     """화질 정책은 둘 중 하나만 — 타깃 비트레이트와 CRF 를 같이 걸면 안 된다."""
     p = job_runner.target_params({"crf": 24})
     assert p["crf"] == 24 and p["bitrate"] == "" and p["max_bitrate"] == ""
-    # 비트레이트로 말하면 우리 납품 기준 그대로다
+    # 비트레이트로 말하면 우리 납품 기준 그대로다. crf 기본값이 같이 실려 있어도
+    # bitrate 가 살아 있으면 파이프라인은 비트레이트 쪽 정책을 쓴다.
     p = job_runner.target_params({"bitrate": "3500k", "max_bitrate": "4000k"})
-    assert p["bitrate"] == "3500k" and "crf" not in p
+    assert p["bitrate"] == "3500k" and p["max_bitrate"] == "4000k"
+    # 아무 말도 안 하면 납품 기준(720p / 3500k)이 그대로 적용된다
+    assert job_runner.target_params({})["bitrate"] == "3500k"
 
 
 def test_transfer_classifies_status_codes():
@@ -255,3 +288,55 @@ def test_stage_timing_travels_with_the_result(bucket):
     assert all(isinstance(v, float) for v in t.values())
     assert sum(t[k] for k in ("ingest", "detect", "track", "render", "audio")) \
         <= t["total"] + 0.5
+
+
+# ── 작은 인스턴스 대비 ────────────────────────────────────────────────────────
+
+class _OOMOnce:
+    """batch 가 threshold 보다 크면 CUDA OOM 을 흉내 낸다."""
+
+    def __init__(self, threshold=4):
+        self.threshold = threshold
+        self.tried = []
+
+    def detect_batch(self, frames, imgsz=None, conf=None, iou=None):
+        n = len(frames)
+        self.tried.append(n)
+        if n > self.threshold:
+            raise RuntimeError(
+                f"CUDA out of memory. Tried to allocate 2.00 GiB (batch {n})")
+        return [[] for _ in frames]
+
+
+def test_oom_shrinks_the_batch_instead_of_failing(bucket):
+    """운영 인스턴스는 개발기보다 작다. **OOM 으로 큐가 통째로 죽으면 안 된다.**
+
+    OOM 은 파이프라인 예외라 그냥 두면 '영구 실패' 로 분류되고, 그러면 인스턴스를
+    줄이는 순간 들어오는 영상이 전부 재시도 없이 실패한다. 메모리 부족은 이 영상의
+    문제가 아니라 환경의 문제다.
+    """
+    det = _OOMOnce(threshold=4)
+    out = job_runner.run_job(
+        make_job(bucket, targets=[{"label": "deid-720p", "batch_size": 32,
+                                   "put_url": f"{bucket.base}/out.mp4"}]),
+        anonymizer=VideoAnonymizer(detector=det))
+
+    assert max(det.tried) <= 32 and min(det.tried) <= 4   # 줄여 가며 다시 했다
+    assert len(bucket.puts) == 1                          # 결국 성공했다
+    codes = [n["code"] for n in out["notices"]]
+    assert "batch-reduced" in codes                       # 조용히 줄이지 않는다
+
+
+def test_oom_at_batch_one_is_transient_not_permanent(bucket):
+    """1까지 내려도 안 되면 더 큰 워커에서는 될 수 있다 — 일시 실패다."""
+    det = _OOMOnce(threshold=0)                           # 무슨 배치든 터진다
+    with pytest.raises(job_runner.JobError) as e:
+        job_runner.run_job(make_job(bucket),
+                           anonymizer=VideoAnonymizer(detector=det))
+    assert e.value.transient is True and e.value.stage == "oom"
+
+
+def test_only_oom_is_retried_other_errors_stay_permanent(bucket):
+    """메모리 말고 다른 이유로 터진 것을 배치 줄여 다시 해 봐야 소용없다."""
+    assert job_runner.is_oom(RuntimeError("CUDA out of memory")) is True
+    assert job_runner.is_oom(ValueError("모르는 익명화 방식입니다")) is False

@@ -37,6 +37,7 @@ S3 설정은 storage/s3.py 를 참고 (FA_S3_BUCKET 등).
 
 import os
 
+from .. import params
 from ..core.pipeline import (
     DEFAULT_BITRATE_RATIO,
     DEFAULT_CRF,
@@ -48,7 +49,7 @@ from ..core.pipeline import (
 )
 
 DEVICE = os.environ.get("FA_DEVICE") or None
-IMGSZ = int(os.environ.get("FA_IMGSZ", 1280))
+IMGSZ = params.IMGSZ          # 단일 출처는 face_anonymizer/params.py
 JOBS_DIR = os.path.abspath(os.environ.get("FA_JOBS_DIR", "jobs"))
 MAX_BYTES = int(os.environ.get("FA_MAX_UPLOAD_MB", 2048)) * 1024 * 1024
 JOB_TTL = int(os.environ.get("FA_JOB_TTL_MIN", 120)) * 60
@@ -81,17 +82,6 @@ LIST_LIMIT = int(os.environ.get("FA_LIST_LIMIT", 100))
 PAGE_SIZE = int(os.environ.get("FA_PAGE_SIZE", 5))
 # 처음 1회 + 재시도 3회. RETRY_DELAYS 와 짝이다.
 MAX_ATTEMPTS = int(os.environ.get("FA_MAX_ATTEMPTS", 4))
-
-# 다시 시도해도 결과가 같은 오류들. 깨진 파일이나 잘못된 인자를 세 번 돌리는 건
-# 그냥 낭비이고, 그동안 뒤에 쌓인 정상 작업이 밀린다.
-PERMANENT_ERRORS = (VideoOpenError, VideoWriteError, ValueError, FileNotFoundError)
-STATE_FILE = "job.json"
-GPU_LOCK_FILE = ".gpu.lock"
-PROGRESS_FLUSH_SEC = 0.5      # 진행률을 디스크에 쓰는 최소 간격
-
-CHUNK = 1 << 20
-VIDEO_EXT = {".mp4", ".mov", ".mkv", ".avi", ".webm", ".m4v"}
-
 
 def _bool_env(name, default):
     v = os.environ.get(name)
@@ -140,24 +130,10 @@ DEFER_SEC = float(os.environ.get("FA_DEFER_SEC", 60))
 DEFER_MAX_SEC = float(os.environ.get("FA_DEFER_MAX_SEC", 1800))
 
 
-JOB_DEFAULTS = {
-    "method": os.environ.get("FA_METHOD", "mosaic"),
-    "conf": float(os.environ.get("FA_CONF", "0.25")),
-    "imgsz": IMGSZ,
-    "batch_size": int(os.environ.get("FA_BATCH_SIZE", "32")),
-    "pad": float(os.environ.get("FA_PAD", "0.15")),
-    "mosaic_scale": float(os.environ.get("FA_MOSAIC_SCALE", "0.06")),
-    "linger": int(os.environ.get("FA_LINGER", "5")),
-    "interp": _bool_env("FA_INTERP", True),
-    "keep_audio": _bool_env("FA_KEEP_AUDIO", True),
-    "crf": DEFAULT_CRF,
-    "bitrate_ratio": DEFAULT_BITRATE_RATIO,
-    # 납품 스펙. 값만 바꾸면 되도록 열어 둔다 — 기준이 바뀔 때 코드를 고치게
-    # 하면 안 된다. height=0 이면 원본 유지, bitrate="" 면 예전 CRF 방식.
-    "height": DEFAULT_HEIGHT,
-    "bitrate": DEFAULT_TARGET_BITRATE,
-    "max_bitrate": DEFAULT_MAX_BITRATE,
-}
+# 처리 파라미터는 **이 파일이 소유하지 않는다.** 큐 워커(msa/)도 같은 값을
+# 써야 하는데, 두 벌로 두면 언젠가 어긋난다 — 실제로 어긋나서 큐 경로가
+# batch_size=1 로 돌고 있었다(docs/issues/009).
+JOB_DEFAULTS = dict(params.DEFAULTS)
 
 
 # 다시 시도해도 결과가 같은 오류들. 깨진 파일이나 잘못된 인자를 세 번 돌리는 건

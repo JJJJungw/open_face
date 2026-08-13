@@ -126,6 +126,17 @@ def complete(video_id=None, token=None, ok=None, **kw):
 '''
 
 
+def gpu_name():
+    """nvidia-smi 한 줄. 없으면 'GPU 없음'."""
+    try:
+        out = subprocess.run(
+            ["nvidia-smi", "--query-gpu=name,memory.total", "--format=csv,noheader"],
+            capture_output=True, text=True, timeout=5)
+        return out.stdout.strip().splitlines()[0] if out.returncode == 0 else "확인 실패"
+    except (OSError, subprocess.SubprocessError, IndexError):
+        return "GPU 없음 (CPU 로 돕니다)"
+
+
 def spawn(argv, env, log):
     fh = open(log, "wb")
     p = subprocess.Popen(argv, env=env, stdout=fh, stderr=subprocess.STDOUT,
@@ -159,6 +170,9 @@ def main():
     ap.add_argument("--port", type=int, default=9301)
     ap.add_argument("--repeat", type=int, default=1, help="몇 편 넣을까(평균용)")
     ap.add_argument("--timeout", type=float, default=1800)
+    ap.add_argument("--batch-size", type=int,
+                    help="한 번에 GPU 에 올리는 프레임 수 (생략=서비스 기본값)")
+    ap.add_argument("--imgsz", type=int, help="검출 해상도 (생략=서비스 기본값)")
     ap.add_argument("--fake-detector", action="store_true",
                     help="가중치·GPU 없이 배선만 본다 (처리 시간은 의미 없음)")
     a = ap.parse_args()
@@ -199,6 +213,9 @@ def main():
         raise SystemExit(f"× 브로커에 못 붙었습니다 ({a.broker}): {e}\n"
                          f"  redis-server --daemonize yes 로 띄우고 다시 해 주세요.")
 
+    # 숫자를 어느 하드웨어에서 냈는지 같이 남긴다. 개발기와 운영기가 다르면
+    # 처리 시간도 다르고, 기종 없는 숫자는 나중에 아무 근거가 안 된다.
+    print(f"■ GPU     {gpu_name()}")
     print(f"■ 브로커  {a.broker}")
     print(f"■ 큐      {queue}   태스크 {task}")
     print(f"■ 산출    {outdir}\n")
@@ -241,12 +258,14 @@ def main():
                 "video_id": vid,
                 "token": TOKEN,
                 "input_url": f"{base}/in.mp4",
-                "targets": [{
-                    "label": "deid-720p", "height": 720,
-                    "bitrate": "3500k", "max_bitrate": "4000k",
-                    "method": "mosaic", "conf": 0.25,
-                    "put_url": f"{base}/{vid}.mp4",
-                    "content_type": "video/mp4"}],
+                # **말하지 않은 항목은 서비스 기본값이 채운다.** 여기서 전부
+                # 적어 버리면 그 경로가 검증되지 않는다(docs/issues/009).
+                "targets": [dict(
+                    {"label": "deid-720p",
+                     "put_url": f"{base}/{vid}.mp4",
+                     "content_type": "video/mp4"},
+                    **({"batch_size": a.batch_size} if a.batch_size else {}),
+                    **({"imgsz": a.imgsz} if a.imgsz else {}))],
                 "heartbeat_every_s": 10,
             }])
             print(f"④ 잡 투입 {vid} — token={TOKEN}")
@@ -405,7 +424,7 @@ def report_out(rows, wall, a, outdir):
         print(f"  한 편 평균 {avg:.1f}s   (최소 {min(secs):.1f} / 최대 {max(secs):.1f})")
         print(f"  전체 벽시계 {wall:.1f}s")
         print()
-        print(f"  → KEDA listLength 근거: 워커 1대가 시간당 약 "
+        print(f"  → 이 기종 기준 처리량: 워커 1대가 시간당 약 "
               f"{3600/avg:.0f}편을 처리합니다.")
     else:
         print("-" * 62)
