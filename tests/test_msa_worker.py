@@ -166,3 +166,27 @@ def test_weights_url_from_the_payload_reaches_the_builder(monkeypatch):
 
     shell._build({"weights_url": "https://signed/weights.pt"})
     assert seen["url"] == "https://signed/weights.pt"
+
+
+def test_msa_path_writes_its_own_journal_lines(sent, monkeypatch, tmp_path):
+    """MSA 경로도 저널을 남긴다. **줄마다 어느 얼굴로 돈 건지 표시된다.**
+
+    같은 파일에 api·msa 가 섞이므로, 나중에 "이 영상 누가 처리했나" 에 답하려면
+    그 구분이 필요하다.
+    """
+    from face_anonymizer import events
+    monkeypatch.setattr(events, "DIR", str(tmp_path / "ev"))
+    monkeypatch.setattr(job_runner, "run_job", lambda job, **kw: {
+        "elapsed_s": 40.7, "review": [], "notices": [],
+        "targets": [{"frames": 1027, "detected_frames": 768,
+                     "detection_rate": 0.7478, "timing": {"detect": 13.6}}]})
+
+    shell.deidentify_one(JOB)
+
+    rows = events.read(job="vid-1")
+    kinds = {r["event"] for r in rows}
+    assert {"job.started", "job.finished"} <= kinds
+    fin = next(r for r in rows if r["event"] == "job.finished")
+    assert fin["mode"] == "msa"                 # api 와 구분된다
+    assert fin["frames"] == 1027 and fin["detected_frames"] == 768
+    assert fin["timing"]["detect"] == 13.6

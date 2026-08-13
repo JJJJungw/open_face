@@ -507,14 +507,18 @@ def list_batches():
 
 @app.get("/api/events")
 def list_events(job: str = None, batch: str = None, event: str = None,
-                since: float = None, limit: int = 200):
+                mode: str = None, since: float = None, limit: int = 200):
     """이벤트 저널. **로그가 아니라 기록이다.**
 
     로그 문장은 읽기 좋게 계속 바뀌므로 파싱 대상이 아니다. 기계가 볼 것은
     처음부터 따로 남긴다(face_anonymizer/events.py).
     """
-    return {"events": events.read(job=job, batch=batch, event=event,
-                                  since=since, limit=limit)}
+    rows = events.read(job=job, batch=batch, event=event, since=since,
+                       limit=limit)
+    # 같은 저널에 api·msa 가 섞인다. 한쪽만 보고 싶을 때가 있다.
+    if mode:
+        rows = [r for r in rows if r.get("mode") == mode]
+    return {"events": rows, "mode": events.MODE}
 
 
 @app.get("/api/jobs")

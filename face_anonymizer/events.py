@@ -46,7 +46,32 @@ ENABLED = (os.environ.get("FA_EVENTS", "1").strip().lower()
 # 한 번에 읽어 줄 수 있는 최대. 파일이 아무리 커도 응답이 터지지 않게 한다.
 READ_MAX = int(os.environ.get("FA_EVENTS_READ_MAX", 2000))
 
+# 어느 얼굴로 돈 기록인가. 같은 저널에 둘이 섞이므로 줄마다 밝힌다.
+#   api  — 우리가 서버. 웹 화면·HTTP 로 들어온 작업
+#   msa  — 우리가 소비자. 남의 큐에서 꺼내 온 작업
+# 진입점이 자기 값으로 바꾼다(msa/celery_app.py). 안 바꾸면 api 다.
+MODE = os.environ.get("FA_MODE") or "api"
+
+# 파일 말고 **stdout 으로도** 같은 줄을 내보낼까.
+#
+# 두 얼굴의 사는 곳이 달라서 기본값이 다르다. API 는 EC2 에 계속 떠 있으니
+# 파일로 쌓아 두면 되고(`/api/events` 로 다시 읽는다), MSA 는 컨테이너다 —
+# KEDA 가 큐가 비면 0대로 줄이므로 **파일과 함께 기록이 사라진다.** 컨테이너
+# 쪽 기록은 stdout 으로 나가야 CloudWatch·Loki 가 걷어 간다. 그래서 msa
+# 진입점이 configure(stdout=True) 로 켠다.
+STDOUT = (os.environ.get("FA_EVENTS_STDOUT", "").strip().lower()
+          in ("1", "true", "yes", "on"))
+
 _lock = threading.Lock()
+
+
+def configure(mode=None, stdout=None):
+    """진입점이 자기 얼굴을 밝힌다. 환경 변수가 있으면 그쪽이 이긴다."""
+    global MODE, STDOUT
+    if mode and not os.environ.get("FA_MODE"):
+        MODE = mode
+    if stdout is not None and not os.environ.get("FA_EVENTS_STDOUT"):
+        STDOUT = bool(stdout)
 
 # 서명된 URL 은 서명이 들어 있어 기록에 남기면 안 된다. 실수로 넘겨도 걸러 낸다.
 _SECRET = ("url", "input_url", "put_url", "weights_url", "token")
@@ -63,12 +88,17 @@ def emit(event, **fields):
     if not ENABLED:
         return None
     now = time.time()
-    row = {"at": timefmt.iso(now), "ts": round(now, 3), "event": event}
+    row = {"at": timefmt.iso(now), "ts": round(now, 3), "mode": MODE,
+           "event": event}
     row.update({k: v for k, v in fields.items()
                 if v is not None and k not in _SECRET})
     try:
-        os.makedirs(DIR, exist_ok=True)
         line = json.dumps(row, ensure_ascii=False)
+        if STDOUT:
+            # 파일보다 먼저. 디스크가 차서 아래가 실패해도 이건 나가야 한다 —
+            # 컨테이너에서는 이쪽이 유일한 사본이다.
+            print(line, flush=True)
+        os.makedirs(DIR, exist_ok=True)
         with _lock:
             with open(path_for(now), "a", encoding="utf-8") as f:
                 f.write(line + "\n")

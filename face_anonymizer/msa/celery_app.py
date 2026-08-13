@@ -26,13 +26,25 @@
 """
 
 import logging
+import time
 
 from celery import Celery
-from celery.signals import worker_process_init
+from celery.signals import worker_process_init, worker_shutting_down
 
-from . import config
+from .. import events, timefmt
+from . import config, journal
 
 log = logging.getLogger(__name__)
+
+# 이 프로세스가 남기는 기록은 전부 msa 로 표시된다. 같은 저널 형식을 쓰되
+# 어느 경로로 처리된 건지 줄마다 구분된다 — 나중에 "이 파일 누가 처리했나" 에
+# 답하려면 그게 필요하다.
+#
+# stdout 을 같이 켜는 이유는 여기가 컨테이너이기 때문이다. 큐가 비면 KEDA 가
+# 이 컨테이너를 지우고, 그때 파일에 쌓아 둔 저널도 같이 사라진다.
+events.configure(mode="msa", stdout=True)
+
+_boot = time.time()
 
 app = Celery("face-anonymizer", broker=config.BROKER_URL)
 
@@ -87,11 +99,23 @@ def _preload(**_kw):
         return
     try:
         _anonymizer = _build()
-        log.info("검출기 준비 완료 — 첫 잡부터 바로 돈다")
+        journal.worker_up(config.QUEUE, config.TASK_NAME,
+                          cold_s=time.time() - _boot)
     except Exception as e:                          # noqa: BLE001
         # 여기서 죽이면 컨테이너가 부팅 루프에 빠진다. 첫 잡에서 다시 시도하고,
         # 그때도 안 되면 그 잡이 '일시 실패' 로 저쪽에 보고된다.
         log.warning("검출기 예열 실패 — 첫 잡에서 다시 시도한다: %s", e)
+
+
+@worker_shutting_down.connect
+def _bye(**kw):
+    """내려갈 때 한 줄. **이 컨테이너에 대해 남는 유일한 요약이다.**
+
+    KEDA 가 큐가 비면 지우므로 종료는 사고가 아니라 일상이다. 다만 처리 도중에
+    지워졌는지(SIGTERM 유예가 짧아서) 아니면 놀다가 지워졌는지는 구분되어야
+    한다 — 앞쪽이면 terminationGracePeriodSeconds 를 늘려야 한다는 신호다.
+    """
+    journal.worker_down(reason=kw.get("signal") or kw.get("how") or "shutdown")
 
 
 def _build(job=None):
@@ -132,6 +156,9 @@ def deidentify_one(job):
     global _anonymizer
     vid, token = job.get("video_id"), job.get("token")
 
+    started = time.time()
+    journal.job_started(job, started)
+
     def beat(progress_s):
         send(config.HEARTBEAT_TASK, video_id=vid, token=token,
              progress_s=progress_s)
@@ -141,8 +168,7 @@ def deidentify_one(job):
             _anonymizer = _build(job)
         result = run_job(job, on_heartbeat=beat, anonymizer=_anonymizer)
     except JobError as e:
-        log.warning("잡 실패 video_id=%s [%s] transient=%s: %s",
-                    vid, e.stage, e.transient, e)
+        journal.job_failed(job, e.stage, e.transient, str(e), started)
         send(config.COMPLETE_TASK, video_id=vid, token=token, ok=False,
              error=str(e), transient=e.transient, stage=e.stage)
         return
@@ -150,6 +176,8 @@ def deidentify_one(job):
         # 여기까지 온 것은 우리가 분류하지 못한 오류다. 일시로 본다 — 영구로
         # 두면 우리 버그 하나가 큐 전체를 상한까지 태운다.
         log.exception("잡 처리 중 분류되지 않은 오류 video_id=%s", vid)
+        journal.job_failed(job, "unknown", True, f"{type(e).__name__}: {e}",
+                           started)
         send(config.COMPLETE_TASK, video_id=vid, token=token, ok=False,
              error=f"{type(e).__name__}: {e}", transient=True, stage="unknown")
         return
@@ -159,11 +187,19 @@ def deidentify_one(job):
     # 응답 모양이 바뀌어도 껍데기가 죽으면 안 된다 — 여기서 KeyError 가 나면
     # 작업은 끝났는데 완료 보고가 안 가서, 저쪽은 매달린 것으로 보고 회수한다.
     review = result.get("review") or []
-    if review:
-        log.warning("검수 필요 video_id=%s: %s", vid,
-                    " / ".join(i.get("message", "") for i in review))
-    log.info("잡 완료 video_id=%s %.1fs", vid, result.get("elapsed_s"))
+    finished = time.time()
+    journal.job_finished(job, result, started, finished)
+
+    # 시각을 **우리가 문자열까지 만들어** 보낸다. epoch 만 넘기면 받는 쪽이
+    # 자기 타임존으로 찍고, 그러면 우리 로그와 저쪽 화면이 서로 다른 시각을
+    # 말한다. 납품 근거로 쓸 기록이라 그건 곤란하다.
+    #
+    # worker_avg_s 는 **남은 시간의 절반**이다. 큐 깊이는 저쪽이 알고 평균은
+    # 우리가 아니까, 곱하는 건 저쪽이 한다(journal 모듈 주석 참고).
     send(config.COMPLETE_TASK, video_id=vid, token=token, ok=True,
          elapsed_s=result.get("elapsed_s"), targets=result.get("targets") or [],
          review_needed=bool(review), review=review,
-         notices=result.get("notices") or [])
+         notices=result.get("notices") or [],
+         started_at=timefmt.iso(started), finished_at=timefmt.iso(finished),
+         span=timefmt.span(started, finished),
+         batch_id=journal.batch_of(job), worker_avg_s=journal.STATS.avg)
