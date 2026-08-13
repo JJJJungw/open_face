@@ -190,3 +190,50 @@ def test_transfer_classifies_status_codes():
     assert 429 in transfer.TRANSIENT_STATUS
     assert 503 in transfer.TRANSIENT_STATUS
     assert 404 not in transfer.TRANSIENT_STATUS
+
+
+# ── 검수 딱지 ────────────────────────────────────────────────────────────────
+
+class _NoFace:
+    """얼굴을 하나도 못 찾는 검출기. 풍경 영상과 설정 오류가 똑같이 이렇게 된다."""
+
+    def detect_batch(self, frames, imgsz=None, conf=None, iou=None):
+        return [[] for _ in frames]
+
+
+def test_zero_detections_completes_but_asks_for_review(bucket):
+    """검출 0건은 **실패가 아니다.** 다만 사람이 봐야 한다고 딱지를 붙인다.
+
+    얼굴이 없는 풍경 영상은 0 이 정당한 결과다. 그런데 가중치 손상·회전된 영상·
+    잘못된 imgsz 도 결과가 똑같이 0 이고 그때는 원본이 그대로 나간다. 코드가 둘을
+    구분할 수 없으므로 판단을 사람에게 넘기되 사실은 반드시 같이 보낸다.
+    """
+    out = job_runner.run_job(
+        make_job(bucket),
+        anonymizer=VideoAnonymizer(detector=_NoFace()))
+
+    assert out["review_needed"] is True
+    codes = [i["code"] for i in out["review"]]
+    assert "no-detections" in codes
+    assert "얼굴이 없는 영상이 맞는지" in out["review"][0]["message"]
+    # 결과물은 그대로 올라간다 — 실패가 아니므로 재시도 대상도 아니다.
+    assert len(bucket.puts) == 1
+    assert out["targets"][0]["detected_frames"] == 0
+
+
+def test_normal_result_asks_for_nothing(bucket):
+    out = job_runner.run_job(make_job(bucket), anonymizer=anon(bucket))
+    assert out["review_needed"] is False
+    assert out["review"] == []
+
+
+def test_only_human_worthy_warnings_become_review():
+    """참고용 경고까지 사람을 부르면 딱지가 의미를 잃는다."""
+    review = job_runner.review_of(["no-detections", "audio: ffmpeg-timeout",
+                                   "decode-unverified", "low-detection-rate: 0.50%"])
+    assert [i["code"] for i in review] == ["no-detections", "low-detection-rate"]
+    # 수치는 원문 그대로 남는다 — 요약만 남기면 "얼마나 낮았는데?" 에 답 못 한다.
+    assert review[1]["detail"] == "low-detection-rate: 0.50%"
+
+    notices = job_runner.notices_of(["audio: ffmpeg-timeout", "decode-unverified"])
+    assert {i["code"] for i in notices} == {"audio", "decode-unverified"}

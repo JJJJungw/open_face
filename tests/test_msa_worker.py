@@ -128,3 +128,41 @@ def test_visibility_timeout_is_longer_than_any_job():
     opts = shell.app.conf.broker_transport_options
     assert opts["visibility_timeout"] == mc.VISIBILITY_TIMEOUT
     assert mc.VISIBILITY_TIMEOUT >= 600
+
+
+def test_review_travels_with_success_not_as_failure(sent, monkeypatch):
+    """검수 딱지는 **성공과 함께** 간다.
+
+    실패로 보내면 저쪽이 재시도하는데 다시 돌려도 결과는 같다. 필요한 것은
+    재시도가 아니라 사람의 확인이다.
+    """
+    monkeypatch.setattr(job_runner, "run_job", lambda job, **kw: {
+        "elapsed_s": 9.9, "targets": [], "notices": [],
+        "review_needed": True,
+        "review": [{"code": "no-detections", "detail": "no-detections",
+                    "message": "얼굴이 하나도 검출되지 않았습니다."}]})
+
+    shell.deidentify_one(JOB)
+
+    name, kw, _q = sent[-1]
+    assert name == mc.COMPLETE_TASK
+    assert kw["ok"] is True                      # 실패가 아니다
+    assert kw["review_needed"] is True
+    assert kw["review"][0]["code"] == "no-detections"
+
+
+def test_weights_url_from_the_payload_reaches_the_builder(monkeypatch):
+    """FA_WEIGHTS_SOURCE=url 이면 가중치 URL 을 **잡이 들고 온다.**
+
+    껍데기가 검출기를 자기가 만들면서 그 URL 을 안 넘기면 그 방식이 통째로
+    못 쓰게 된다 — 스위치만 만들고 양쪽 경로를 다 돌려 보지 않아 놓쳤던 자리다.
+    """
+    seen = {}
+    from face_anonymizer.storage import weights as weights_store
+    monkeypatch.setattr(weights_store, "ensure",
+                        lambda path, url=None, **kw: seen.update(url=url) or path)
+    monkeypatch.setattr("face_anonymizer.core.pipeline.VideoAnonymizer",
+                        lambda *a, **kw: object())
+
+    shell._build({"weights_url": "https://signed/weights.pt"})
+    assert seen["url"] == "https://signed/weights.pt"

@@ -118,6 +118,10 @@ celery 가 재전달하는데 저쪽도 리스로 같은 판단을 해서 같은
 5. KEDA ScaledObject — `listName: q.deidentify`, min 0
 6. `queues.md` 에 우리 잡 스키마 등재 (§5)
 7. D1 이 `url` 로 정해지면 페이로드에 `weights_url` 추가
+8. **`review_needed` 를 저장하고 검수로 라우팅** — 비식별화가 안 된 영상이
+   '완료' 로 넘어가는 것을 막는 유일한 지점이다(§5, docs/issues/008)
+9. 잡 하나에 **타깃 하나** — 우리는 타깃마다 검출을 다시 돌려서 GPU 를 배로 쓴다
+10. `terminationGracePeriodSeconds` 를 넉넉히(600초) — 한 편이 분 단위다
 
 ## 5. 잡 스키마 (제안)
 
@@ -145,11 +149,35 @@ celery 가 재전달하는데 저쪽도 리스로 같은 판단을 해서 같은
 
 ```json
 {"elapsed_s": 41.2,
- "targets": [{"label": "deid-720p", "frames": 5828,
-              "detected_frames": 5102, "realtime_factor": 4.7}]}
+ "review_needed": false,
+ "review": [],
+ "notices": [],
+ "targets": [{"label": "deid-720p", "frames": 5828, "detected_frames": 5102,
+              "detection_rate": 0.8754, "realtime_factor": 4.7,
+              "warnings": []}]}
 ```
 
 산출 키는 저쪽이 결정론적으로 아는 값이라 되돌리지 않는다.
+
+### review — 처리는 됐지만 사람이 봐야 하는 경우 ⚠️
+
+**`ok=true` 와 함께 온다. 실패가 아니다.** 얼굴이 하나도 안 잡히면 원본이 그대로
+나가는데, 그게 풍경 영상이라 정당한 0 인지 설정이 틀려서 0 인지는 코드가 구분할
+수 없다(docs/issues/008).
+
+```json
+{"review_needed": true,
+ "review": [{"code": "no-detections",
+             "detail": "no-detections",
+             "message": "얼굴이 하나도 검출되지 않았습니다. 원본이 그대로 나갔습니다 — 얼굴이 없는 영상이 맞는지 한 번 확인해 주세요."}]}
+```
+
+`code` 는 `no-detections` · `low-detection-rate` · `decode-partial` ·
+`decode-short` 넷 중 하나다. `notices` 는 같은 모양이지만 사람을 부를 일은 아닌
+것들(`audio` · `decode-unverified`)이다.
+
+**저쪽에 필요한 것**: `review_needed` 가 참이면 `done` 으로 넘기되 검수 대기로
+표시해 주세요. 재시도는 의미가 없습니다 — 다시 돌려도 결과가 같습니다.
 
 ## 6. 실패 분류
 

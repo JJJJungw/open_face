@@ -62,6 +62,60 @@ STALL_S = float(os.environ.get("FA_STALL_S", 300))
 _DOWNLOAD_SHARE = 0.15
 
 
+# ── 검수 딱지 ────────────────────────────────────────────────────────────────
+#
+# **실패가 아니라 딱지다.** 얼굴이 없는 풍경 영상은 검출 0 이 정당한 결과이므로
+# 오류로 던지면 안 된다. 그런데 가중치 손상·회전된 영상·잘못된 imgsz·HDR 톤매핑
+# 실패도 결과가 똑같이 0 이고, 그때는 **원본이 그대로 나간다.**
+#
+# 둘을 코드가 구분할 방법은 없다. 그래서 판단을 사람에게 넘기되 **사실은 반드시
+# 같이 보낸다** — "얼굴이 하나도 안 잡혔는데, 얼굴이 없는 영상이 맞나요?"
+#
+# 이걸 안 하면 비식별화가 하나도 안 된 원본이 '비식별화 완료' 로 납품된다.
+# 화질 문제가 아니라 개인정보 사고다.
+REVIEW = {
+    "no-detections":
+        "얼굴이 하나도 검출되지 않았습니다. 원본이 그대로 나갔습니다 — "
+        "얼굴이 없는 영상이 맞는지 한 번 확인해 주세요.",
+    "low-detection-rate":
+        "얼굴이 잡힌 프레임이 매우 적습니다. 영상 회전·해상도·임계값 때문에 "
+        "놓쳤을 수 있어 한 번 봐 주시면 좋겠습니다.",
+    "decode-partial":
+        "영상을 끝까지 읽지 못했습니다. 뒷부분이 결과물에서 빠졌을 수 있습니다.",
+    "decode-short":
+        "읽어 낸 프레임이 원본에 적힌 수보다 적습니다. 결과물 길이를 확인해 "
+        "주세요.",
+}
+
+# 알아 두면 좋지만 사람을 부를 일은 아닌 것들.
+NOTICE = {
+    "decode-unverified": "프레임 수를 확인할 수 없어 완결성 검사를 건너뛰었습니다.",
+    "audio": "오디오를 원본 그대로 옮기지 못했습니다.",
+}
+
+
+def review_of(warnings):
+    """파이프라인 경고 → 검수 딱지. 사람이 봐야 하는 것만 골라 낸다.
+
+    경고 문자열은 ``low-detection-rate: 0.50%`` 처럼 뒤에 수치가 붙는다.
+    앞의 코드로 가르고 원문은 ``detail`` 에 그대로 남긴다 — 요약만 남기면
+    나중에 "얼마나 낮았는데?" 에 답할 수 없다.
+    """
+    out = []
+    for w in warnings or ():
+        code = str(w).split(":")[0].strip()
+        text = REVIEW.get(code)
+        if text:
+            out.append({"code": code, "detail": str(w), "message": text})
+    return out
+
+
+def notices_of(warnings):
+    return [{"code": c, "detail": str(w), "message": NOTICE[c]}
+            for w in warnings or ()
+            for c in [str(w).split(":")[0].strip()] if c in NOTICE]
+
+
 class JobError(RuntimeError):
     """잡 실패. ``transient`` 면 재큐잉 대상(시도 횟수 미소모)이다."""
 
@@ -213,13 +267,38 @@ def run_job(job, *, on_heartbeat=None, anonymizer=None):
                 raise JobError(str(e), transient=e.transient, stage="upload") from e
 
     elapsed = round(time.monotonic() - started, 1)
-    log.info("잡 완료: video_id=%s targets=%d %.1fs",
-             job.get("video_id"), len(done), elapsed)
+
+    # 검수 딱지는 타깃별이 아니라 **영상 단위**로 모은다. 저쪽이 판정하는 단위가
+    # video_id 이고, 같은 영상의 타깃 둘에 같은 딱지가 두 번 붙어 봐야 사람이
+    # 볼 것은 하나다.
+    review, notices, seen = [], [], set()
+    for _t, _p, r in done:
+        for item in review_of(getattr(r, "warnings", ())):
+            if item["detail"] not in seen:
+                seen.add(item["detail"])
+                review.append(item)
+        for item in notices_of(getattr(r, "warnings", ())):
+            if item["detail"] not in seen:
+                seen.add(item["detail"])
+                notices.append(item)
+    if review:
+        log.warning("검수 필요 video_id=%s: %s", job.get("video_id"),
+                    " / ".join(i["code"] for i in review))
+
+    log.info("잡 완료: video_id=%s targets=%d %.1fs%s",
+             job.get("video_id"), len(done), elapsed,
+             " (검수 필요)" if review else "")
     return {
         "elapsed_s": elapsed,
+        # 처리는 성공했지만 사람이 한 번 봐야 한다. **실패가 아니다.**
+        "review_needed": bool(review),
+        "review": review,
+        "notices": notices,
         "targets": [{"label": t.get("label"),
                      "frames": getattr(r, "frames", None),
                      "detected_frames": getattr(r, "detected_frames", None),
-                     "realtime_factor": round(getattr(r, "realtime_factor", 0) or 0, 2)}
+                     "detection_rate": round(getattr(r, "detection_rate", 0) or 0, 4),
+                     "realtime_factor": round(getattr(r, "realtime_factor", 0) or 0, 2),
+                     "warnings": list(getattr(r, "warnings", ()))}
                     for t, _p, r in done],
     }

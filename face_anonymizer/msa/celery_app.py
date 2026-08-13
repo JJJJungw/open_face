@@ -86,12 +86,18 @@ def _preload(**_kw):
         log.warning("검출기 예열 실패 — 첫 잡에서 다시 시도한다: %s", e)
 
 
-def _build():
+def _build(job=None):
+    """검출기를 만든다. 가중치 URL 은 **잡이 들고 온다**.
+
+    ``FA_WEIGHTS_SOURCE=url`` 이면 가중치를 잡 페이로드가 준다. 여기서 그걸 안
+    넘기면 그 방식이 통째로 못 쓰게 된다 — 스위치만 만들고 양쪽 경로를 다
+    돌려 보지 않아서 놓쳤던 자리다.
+    """
     from ..core.paths import DEFAULT_WEIGHTS
     from ..core.pipeline import VideoAnonymizer
     from ..storage import weights as weights_store
 
-    weights_store.ensure(DEFAULT_WEIGHTS)
+    weights_store.ensure(DEFAULT_WEIGHTS, url=(job or {}).get("weights_url"))
     return VideoAnonymizer()
 
 
@@ -124,7 +130,7 @@ def deidentify_one(job):
 
     try:
         if _anonymizer is None:
-            _anonymizer = _build()
+            _anonymizer = _build(job)
         result = run_job(job, on_heartbeat=beat, anonymizer=_anonymizer)
     except JobError as e:
         log.warning("잡 실패 video_id=%s [%s] transient=%s: %s",
@@ -140,6 +146,16 @@ def deidentify_one(job):
              error=f"{type(e).__name__}: {e}", transient=True, stage="unknown")
         return
 
-    log.info("잡 완료 video_id=%s %.1fs", vid, result["elapsed_s"])
+    # 검수 딱지는 **성공과 함께** 간다. 실패로 보내면 저쪽이 재시도하는데, 다시
+    # 돌려도 같은 결과다 — 필요한 것은 재시도가 아니라 사람의 확인이다.
+    # 응답 모양이 바뀌어도 껍데기가 죽으면 안 된다 — 여기서 KeyError 가 나면
+    # 작업은 끝났는데 완료 보고가 안 가서, 저쪽은 매달린 것으로 보고 회수한다.
+    review = result.get("review") or []
+    if review:
+        log.warning("검수 필요 video_id=%s: %s", vid,
+                    " / ".join(i.get("message", "") for i in review))
+    log.info("잡 완료 video_id=%s %.1fs", vid, result.get("elapsed_s"))
     send(config.COMPLETE_TASK, video_id=vid, token=token, ok=True,
-         elapsed_s=result["elapsed_s"], targets=result["targets"])
+         elapsed_s=result.get("elapsed_s"), targets=result.get("targets") or [],
+         review_needed=bool(review), review=review,
+         notices=result.get("notices") or [])
