@@ -325,6 +325,11 @@ def run_job(job, *, on_heartbeat=None, anonymizer=None):
                      # 렌더·인제스트가 대부분이면 GPU 가 놀고 있다는 뜻이라 대응이
                      # 정반대다. 워커를 몇 대 붙일지가 이 한 줄로 갈린다.
                      "timing": timing_of(r),
+                     # 인제스트가 오래 걸릴 때 그게 '디코딩이 느린 것' 인지
+                     # '코덱이 안 맞아 통째로 전사한 것' 인지 구분할 근거.
+                     # 대응이 전혀 다르다.
+                     "source_codec": getattr(r, "source_codec", None),
+                     "transcoded": bool(getattr(r, "transcoded", False)),
                      "warnings": list(getattr(r, "warnings", ()))}
                     for t, _p, r in done],
     }

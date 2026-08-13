@@ -337,10 +337,33 @@ def stage_report(done):
         share = 100 * (tot[k] / total) if total else 0
         bar = "█" * max(0, round(share / 4))
         print(f"    {STAGE_NAME.get(k, k):<20} {avg:7.1f}s  {share:5.1f}%  {bar}")
-    if rows:
-        top, avg = rows[0]
-        share = 100 * (tot[top] / total) if total else 0
-        print()
+    if not rows:
+        return
+
+    # GPU 를 쓰는 단계는 검출 하나뿐이다. 나머지는 전부 CPU 쪽 영상 입출력이다.
+    # **워커를 몇 대 붙일지보다 먼저 볼 숫자가 이 비율이다** — GPU 비중이 낮으면
+    # 비싼 GPU 인스턴스를 늘려 봐야 늘어난 몫만큼 놀린다.
+    gpu = tot.get("detect", 0.0)
+    gpu_share = 100 * gpu / total if total else 0
+    print()
+    print(f"  GPU {gpu_share:.0f}%  ·  CPU {100 - gpu_share:.0f}%")
+
+    top, _avg = rows[0]
+    share = 100 * (tot[top] / total) if total else 0
+    print()
+    if share < 40:
+        # 한 단계가 압도하지 않으면 그건 '병목' 이 아니라 평탄한 프로파일이다.
+        # 여기서 가장 큰 단계를 병목이라고 부르면 엉뚱한 데를 파게 된다.
+        print(f"  → **단일 병목이 없습니다.** 가장 큰 단계가 "
+              f"{STAGE_NAME.get(top, top)} 인데 {share:.0f}% 뿐입니다.")
+        if gpu_share < 50:
+            print(f"     GPU 는 {gpu_share:.0f}% 만 쓰이고 나머지는 CPU 쪽 "
+                  f"영상 입출력입니다. 워커(=GPU)를 늘리는 것은 이 프로파일에서")
+            print(f"     가장 비싼 선택입니다 — 늘린 GPU 도 같은 비율로 놉니다.")
+            print(f"     먼저 볼 것: ① 돌아가는 중의 nvidia-smi 사용률 "
+                  f"② 원본 코덱(전사가 끼면 인제스트가 통째로 늘어난다)")
+            print(f"     ③ 하드웨어 디코딩 ④ 중간 파일(mp4v) 을 거치지 않는 경로")
+    else:
         print(f"  → 병목은 **{STAGE_NAME.get(top, top)}** 입니다 ({share:.0f}%).")
         verdict = VERDICT.get(top)
         if verdict:
@@ -358,9 +381,11 @@ def report_out(rows, wall, a, outdir):
             continue                 # 펜싱에 걸린 보고는 아래에 따로 센다
         if r.get("ok"):
             t = (r.get("targets") or [{}])[0]
+            src = t.get("source_codec") or "?"
+            tag = f"  원본 {src}" + ("  ⚠전사함" if t.get("transcoded") else "")
             print(f"  ✔ {r['video_id']}  {r.get('elapsed_s')}s  "
                   f"프레임 {t.get('frames')}  검출된 프레임 {t.get('detected_frames')}  "
-                  f"실시간 대비 {t.get('realtime_factor')}x")
+                  f"실시간 대비 {t.get('realtime_factor')}x{tag}")
             if r.get("review_needed"):
                 for item in r.get("review") or []:
                     print(f"    ⚠ 검수 필요 [{item.get('code')}] {item.get('message')}")
