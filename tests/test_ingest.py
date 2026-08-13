@@ -157,16 +157,18 @@ def test_transcode_works_without_a_progress_callback(tmp_path, make_video):
 
 # ── 입력 하드웨어 디코딩 ─────────────────────────────────────────────────────
 
-def test_hwaccel_keeps_frames_on_gpu_only_for_nvenc(monkeypatch):
-    """NVENC 로 나갈 때만 프레임을 GPU 에 둔다.
+def test_hwaccel_never_keeps_frames_on_gpu(monkeypatch):
+    """**픽셀 경로를 바꾸면 안 된다.**
 
-    CPU 인코더인데 ``-hwaccel_output_format cuda`` 를 붙이면 인코더가 GPU 프레임을
-    못 받아 전사가 통째로 실패한다. 빨리 하려다 못 하게 만드는 전형적인 자리다.
+    `-hwaccel_output_format cuda` 를 붙이면 PCIe 왕복이 없어 더 빠른데, 실측에서
+    검출된 프레임이 768 → 713 으로 7% 줄었다. 색 범위 처리가 달라져 중간 파일의
+    픽셀이 미세하게 바뀌기 때문이다. 1초를 벌자고 얼굴 55프레임을 놓칠 수는 없다.
     """
     monkeypatch.setattr(ingest, "_hwaccel", True)
-    assert ingest.hwaccel_args("h264_nvenc") == [
-        "-hwaccel", "cuda", "-hwaccel_output_format", "cuda"]
-    assert ingest.hwaccel_args("libx264") == ["-hwaccel", "cuda"]
+    for enc in ("h264_nvenc", "libx264"):
+        args = ingest.hwaccel_args(enc)
+        assert args == ["-hwaccel", "cuda"]
+        assert "-hwaccel_output_format" not in args
 
 
 def test_hwaccel_can_be_turned_off(monkeypatch):

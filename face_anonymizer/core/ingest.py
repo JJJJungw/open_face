@@ -129,16 +129,21 @@ def _run_with_progress(cmd, total, progress, timeout):
 _hwaccel = None
 
 
-def hwaccel_args(encoder):
+def hwaccel_args(encoder=None):
     """입력 디코딩을 GPU 로 넘기는 인자. 못 쓰면 빈 목록.
 
     **전사는 디코딩과 인코딩 둘 다 한다.** 출력은 진작 NVENC 로 가고 있었는데
     입력은 CPU 로 풀고 있었다 — AV1 원본에서 이 구간이 한 편의 3분의 1이었다
     (docs/issues/010).
 
-    인코더가 NVENC 면 ``-hwaccel_output_format cuda`` 까지 붙여 **프레임을 GPU 에
-    둔 채로** 인코딩한다(PCIe 왕복이 없다). CPU 인코더면 프레임을 내려받아야
-    하므로 그 옵션은 빼야 한다 — 붙이면 필터/인코더가 못 받는다.
+    **``-hwaccel_output_format cuda`` 는 쓰지 않는다.** 프레임을 GPU 에 둔 채
+    NVENC 로 넘기면 PCIe 왕복이 없어 더 빠른데, 실측에서 **검출된 프레임이
+    768 → 713 으로 7% 줄었다.** 디코더가 내놓은 NV12 가 CPU 를 거쳐
+    ``-pix_fmt yuv420p`` 로 정규화되는 경로와 색 범위 처리가 달라져 중간 파일의
+    픽셀이 미세하게 바뀌고, 검출은 그 차이를 그대로 받는다.
+
+    **1초를 벌자고 얼굴 55프레임을 놓칠 수는 없다.** 비식별화에서 속도와 검출률이
+    부딪히면 검출률이 이긴다. 디코딩만 GPU 로 넘기고 픽셀 경로는 예전 그대로 둔다.
 
     되는지는 목록이 아니라 **실제로 한 번 돌려서** 판정한다. 빌드에 이름이 있어도
     드라이버·GPU 세대에 따라 실행 시점에 실패한다(pick_encoder 와 같은 이유).
@@ -154,10 +159,7 @@ def hwaccel_args(encoder):
         log.info("입력 하드웨어 디코딩: %s", "cuda" if _hwaccel else "없음 (CPU)")
     if not _hwaccel:
         return []
-    args = ["-hwaccel", "cuda"]
-    if "nvenc" in (encoder or ""):
-        args += ["-hwaccel_output_format", "cuda"]
-    return args
+    return ["-hwaccel", "cuda"]
 
 
 def _probe(cmd, timeout=30):
