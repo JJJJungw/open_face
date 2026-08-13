@@ -53,11 +53,17 @@ print(res.frames, res.raw_boxes, res.filled_boxes, res.audio)
 
 ```
 face_anonymizer/
-├── core/       영상 처리. 서버도 S3 도 없이 돈다 (fastapi·boto3 임포트 안 함)
-├── service/    HTTP API · 웹 UI · 운영 지표
-├── storage/    S3 입출력 · 데이터셋 이름 규칙
-└── cli.py      명령줄 진입점
-tests/          회귀 테스트 195개. 가중치·torch·GPU 없이 40초
+├── core/         영상 처리. 서버도 S3 도 없이 돈다 (fastapi·boto3 임포트 안 함)
+├── service/      HTTP API · 웹 UI · 운영 지표          ← 단독 운영의 얼굴
+├── msa/          큐를 지켜보는 워커 (인바운드 포트 없음) ← MSA 의 얼굴
+├── storage/      S3 입출력 · 서명된 URL · 이름 규칙
+├── job_runner.py 잡 페이로드 한 장 = 일 한 건
+└── cli.py        명령줄 진입점
+tests/          회귀 테스트 262개. 가중치·torch·GPU 없이 1분
+
+얼굴이 둘이고 몸은 하나다. `service/` 는 우리가 서버여서 사람이 웹으로 일을
+시키고, `msa/` 는 우리가 소비자여서 남의 큐에서 일을 꺼내 온다. 둘 다 같은
+`core/` 를 쓴다 (docs/integration/rebornstudio.md).
 weights/        가중치 (setup_weights.py 가 받는다)
 third_party/    YOLO-FaceV2 리포 (체크포인트 unpickle 에 필요)
 ```
