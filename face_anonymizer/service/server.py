@@ -507,18 +507,32 @@ def list_batches():
 
 @app.get("/api/events")
 def list_events(job: str = None, batch: str = None, event: str = None,
-                mode: str = None, since: float = None, limit: int = 200):
+                mode: str = None, since: float = None, before: float = None,
+                q: str = None, limit: int = 200, text: bool = True):
     """이벤트 저널. **로그가 아니라 기록이다.**
 
     로그 문장은 읽기 좋게 계속 바뀌므로 파싱 대상이 아니다. 기계가 볼 것은
     처음부터 따로 남긴다(face_anonymizer/events.py).
+
+    ``text=true`` 면 화면이 바로 그릴 수 있게 라벨·문장·색조를 붙여 준다.
+    **문장을 서버가 만드는 이유**는 로그 파일과 화면이 다른 말을 하면 안 되기
+    때문이다. 기계로 읽을 거면 ``text=false`` 로 원본 줄만 받는다.
+
+    ``before`` 는 '더 보기' 커서다. 받은 마지막 줄의 ``ts`` 를 넣으면 그 아래로
+    이어진다. offset 을 쓰지 않는 이유는 읽는 사이에도 줄이 계속 쌓여서 기준이
+    밀리기 때문이다 — 같은 줄을 두 번 보거나 통째로 건너뛴다.
     """
-    rows = events.read(job=job, batch=batch, event=event, since=since,
-                       limit=limit)
-    # 같은 저널에 api·msa 가 섞인다. 한쪽만 보고 싶을 때가 있다.
-    if mode:
-        rows = [r for r in rows if r.get("mode") == mode]
-    return {"events": rows, "mode": events.MODE}
+    # 한 줄 더 읽어 본다. 그게 있으면 뒤가 남았다는 뜻이다 — 전체를 세지 않고도
+    # '더 보기' 를 띄울지 정할 수 있다. 저널은 계속 자라서 총 건수가 의미 없다.
+    want = max(1, min(int(limit or 200), events.READ_MAX))
+    rows = events.read(job=job, batch=batch, event=event, mode=mode,
+                       since=since, before=before, q=q, limit=want + 1)
+    more = len(rows) > want
+    rows = rows[:want]
+    return {"events": [events.decorate(r) for r in rows] if text else rows,
+            "has_more": more,
+            "cursor": rows[-1].get("ts") if rows else None,
+            "mode": events.MODE}
 
 
 @app.get("/api/jobs")

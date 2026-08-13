@@ -119,13 +119,19 @@ def files(limit_days=7):
     return [os.path.join(DIR, n) for n in names[:limit_days]]
 
 
-def read(job=None, batch=None, event=None, since=None, limit=200):
+def read(job=None, batch=None, event=None, since=None, limit=200,
+         mode=None, before=None, q=None):
     """저널을 뒤에서부터 읽어 조건에 맞는 것만. 최신 순.
 
     파일을 통째로 파싱하지 않는다 — 뒤에서부터 필요한 만큼만 읽는다. 하루치가
     수만 줄이 되어도 응답이 일정하다.
+
+    ``before`` 는 '더 보기' 용이다. 받은 마지막 줄의 ``ts`` 를 그대로 넣으면 그
+    아래부터 이어 읽는다. ``offset`` 을 쓰지 않는 이유는, 읽는 사이에도 줄이
+    계속 쌓여서 offset 기준이 밀리기 때문이다 — 같은 줄을 두 번 보거나 건너뛴다.
     """
     limit = max(1, min(int(limit or 200), READ_MAX))
+    needle = (q or "").strip().lower()
     out = []
     for path in files():
         try:
@@ -147,9 +153,102 @@ def read(job=None, batch=None, event=None, since=None, limit=200):
                 continue
             if event and not str(row.get("event", "")).startswith(event):
                 continue
+            if mode and row.get("mode") != mode:
+                continue
             if since and (row.get("ts") or 0) < float(since):
+                continue
+            if before and (row.get("ts") or 0) >= float(before):
+                continue
+            if needle and needle not in " ".join(
+                    str(row.get(k) or "") for k in ("name", "batch", "job")).lower():
                 continue
             out.append(row)
             if len(out) >= limit:
                 return out
+    return out
+
+
+# ---------------------------------------------------------------------------
+# 읽는 쪽 — 줄 하나를 사람이 읽을 한 문장으로.
+#
+# **문장을 서버가 만든다.** 화면이 만들면 로그 파일과 화면이 다른 말을 하게 되고,
+# 나중에 다른 화면이 하나 더 붙으면 같은 계산을 또 짜야 한다. 저널에 넣는 것은
+# 수치뿐이고(위쪽 규칙), 그 수치를 문장으로 바꾸는 일은 여기 한 곳에서만 한다.
+
+EVENT_LABEL = {
+    "job.queued": "대기 등록", "job.started": "시작", "job.finished": "완료",
+    "job.failed": "실패", "job.retry": "재시도", "job.cancelled": "취소",
+    "job.progress": "진행", "worker.ready": "워커 준비",
+    "worker.stopped": "워커 종료", "server.started": "서버 기동",
+}
+
+# 화면이 색을 고르는 근거. 이름을 색으로 두지 않은 것은, 색은 화면 사정이고
+# 여기서 정하는 것은 '어떤 종류의 소식인가' 이기 때문이다.
+EVENT_TONE = {
+    "job.finished": "ok", "job.failed": "bad", "job.cancelled": "muted",
+    "job.retry": "warn", "job.started": "run", "job.progress": "run",
+    "job.queued": "muted", "worker.ready": "muted", "worker.stopped": "muted",
+}
+
+
+def _pct(v):
+    return f"{float(v) * 100:.1f}%" if isinstance(v, (int, float)) else None
+
+
+def describe(row):
+    """줄 하나 → 짧은 한 문장. 모르는 사건이면 빈 문자열."""
+    e = row.get("event") or ""
+    bits = []
+    if e == "job.finished":
+        if row.get("seconds") is not None:
+            bits.append(f"{row['seconds']}초")
+        elif row.get("elapsed_s") is not None:
+            bits.append(f"{row['elapsed_s']}초")
+        if row.get("frames"):
+            bits.append(f"{row['frames']}프레임")
+        rate = _pct(row.get("detection_rate"))
+        if rate:
+            bits.append(f"검출 {rate}")
+        if row.get("review_needed"):
+            bits.append("⚠ 검수 필요")
+        if row.get("transcoded"):
+            bits.append(f"{row.get('source_codec') or '원본'} 전사")
+    elif e == "job.failed":
+        bits.append(f"[{row.get('stage') or '?'}]")
+        bits.append("일시적" if row.get("transient") else "영구")
+        if row.get("detail"):
+            bits.append(str(row["detail"])[:120])
+    elif e == "job.retry":
+        bits.append(f"{row.get('attempts') or '?'}회째")
+        if row.get("detail"):
+            bits.append(str(row["detail"])[:120])
+    elif e == "job.progress":
+        if row.get("percent") is not None:
+            bits.append(f"{row['percent']}%")
+        if row.get("stage"):
+            bits.append(str(row["stage"]))
+        if row.get("eta_s") is not None:
+            bits.append(f"남은 {row['eta_s']}초")
+    elif e == "job.started":
+        if row.get("attempts"):
+            bits.append(f"{row['attempts']}회째 시도")
+    elif e == "worker.ready":
+        if row.get("cold_s") is not None:
+            bits.append(f"기동 {row['cold_s']}초")
+        if row.get("queue"):
+            bits.append(str(row["queue"]))
+    elif e == "worker.stopped":
+        bits.append(f"성공 {row.get('done', 0)} · 실패 {row.get('failed', 0)}")
+        if row.get("avg_elapsed_s"):
+            bits.append(f"평균 {row['avg_elapsed_s']}초")
+    return " · ".join(b for b in bits if b)
+
+
+def decorate(row):
+    """화면이 바로 그릴 수 있게 라벨·문장·색조를 붙인 사본."""
+    out = dict(row)
+    out["label"] = EVENT_LABEL.get(row.get("event") or "", row.get("event") or "")
+    out["text"] = describe(row)
+    out["tone"] = EVENT_TONE.get(row.get("event") or "", "muted")
+    out["time"] = (row.get("at") or "")[11:19]
     return out

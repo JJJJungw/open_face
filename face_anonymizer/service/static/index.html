@@ -161,6 +161,44 @@
   .tag.err::before{background:var(--critical)}
   .tag.plain::before{display:none}
   .empty{text-align:center;color:var(--faint);padding:38px 16px;font-size:12.5px}
+
+  /* 상세 설정용 select 는 width:100% 라 바 안에서는 줄을 통째로 먹는다. */
+  .bar select{width:auto;font-size:12px;padding:5px 8px}
+
+  /* 로그 게시판. 표가 아니라 줄이다 — 한 줄이 사건 하나이고, 눈이 시각을 따라
+     세로로 내려가야 해서 앞 세 칸의 폭을 고정한다. */
+  .lrow{display:flex;align-items:baseline;gap:10px;padding:7px 16px;
+        border-bottom:1px solid var(--line);font-size:12.5px;cursor:pointer}
+  .lrow:hover{background:var(--accent-sel)}
+  .lrow .lt{font-variant-numeric:tabular-nums;color:var(--faint);
+            font-size:11.5px;width:60px;flex:none}
+  .lrow .lm{font-size:9.5px;letter-spacing:.04em;text-transform:uppercase;
+            color:var(--faint);border:1px solid var(--line);border-radius:4px;
+            padding:0 4px;width:34px;text-align:center;flex:none}
+  .lrow .lm.msa{color:var(--accent-ink);border-color:var(--accent)}
+  .lrow .lb{width:64px;flex:none;font-weight:600;font-size:11.5px;
+            display:flex;align-items:center;gap:5px}
+  .lrow .lb::before{content:'';width:6px;height:6px;border-radius:50%;
+                    background:var(--faint);flex:none}
+  .lrow .lb.ok::before{background:var(--good)}
+  .lrow .lb.bad::before{background:var(--critical)}
+  .lrow .lb.warn::before{background:var(--warning)}
+  .lrow .lb.run::before{background:var(--accent)}
+  .lrow .ln{color:var(--fg);white-space:nowrap;overflow:hidden;
+            text-overflow:ellipsis;max-width:300px}
+  .lrow .lx{color:var(--dim);flex:1;min-width:0;overflow:hidden;
+            text-overflow:ellipsis;white-space:nowrap}
+  .lrow .lg2{color:var(--faint);font-size:11px;flex:none}
+  /* 작업 단위로 묶었을 때의 머리줄. 게시판의 '글' 에 해당한다. */
+  .lhead{display:flex;align-items:baseline;gap:9px;padding:9px 16px 6px;
+         background:var(--raise);border-top:1px solid var(--line);
+         font-size:12.5px;font-weight:600}
+  .lhead .sub{font-weight:400;color:var(--dim);font-size:11.5px}
+  .lhead .sub.bad{color:var(--critical-ink)}
+  .lgroup .lrow{padding-left:28px;border-bottom:1px dashed var(--line)}
+  /* 묶으면 파일명이 머리줄에 이미 있다. 줄마다 또 쓰면 눈이 그걸 읽느라 정작
+     달라지는 값(사건·수치)을 늦게 찾는다. */
+  .lgroup .lrow .ln{display:none}
   .pager{display:flex;align-items:center;justify-content:center;gap:12px;
          padding:14px 16px;border-top:1px solid var(--line);
          color:var(--dim);font-size:12.5px}
@@ -304,6 +342,7 @@
       <a onclick="go2('overview')" id="tab-overview">현황</a>
       <a onclick="go2('browser')" id="tab-browser">파일 브라우저</a>
       <a onclick="go2('jobs')" id="tab-jobs">작업<span class="c" id="c-jobs"></span></a>
+      <a onclick="go2('logs')" id="tab-logs">로그</a>
       <div class="grp">작업 상태</div>
       <a onclick="setFilter('active')" id="nav-active" class="on">진행중<span class="c"></span></a>
       <a onclick="setFilter('running')" id="nav-running">수행중<span class="c"></span></a>
@@ -347,6 +386,37 @@
         <section class="card" id="card-batches" hidden style="margin-top:14px">
           <h2>폴더별 처리 시각</h2>
           <div id="batches"></div>
+        </section>
+      </section>
+
+      <!-- 로그 -->
+      <section class="view" id="view-logs" hidden>
+        <section class="card">
+          <div class="bar">
+            <select id="lgevent">
+              <option value="">전체 사건</option>
+              <option value="job.finished">완료</option>
+              <option value="job.failed">실패</option>
+              <option value="job.started">시작</option>
+              <option value="job.retry">재시도</option>
+              <option value="job.cancelled">취소</option>
+              <option value="worker.">워커</option>
+            </select>
+            <select id="lgmode">
+              <option value="">api · msa 전부</option>
+              <option value="api">api (우리 서버)</option>
+              <option value="msa">msa (큐 워커)</option>
+            </select>
+            <div class="search"><input id="lgq" placeholder="파일명 · 폴더로 검색"
+                                       autocomplete="off"></div>
+            <label class="toggle"><input type="checkbox" id="lggroup">
+              <span>작업 단위로 묶기</span></label>
+            <label class="toggle"><input type="checkbox" id="lglive" checked>
+              <span>자동 갱신</span></label>
+            <span class="n" id="lgnote"></span>
+            <button class="ghost" onclick="loadLogs()">새로고침</button>
+          </div>
+          <div id="logs"><div class="empty">불러오는 중…</div></div>
         </section>
       </section>
 
@@ -619,24 +689,158 @@ $('#q').addEventListener('input', renderBrowser);
 const FILTER_TEXT = { active:'진행중', running:'수행중', queued:'대기',
                       done:'완료', failed:'실패' };
 const NAV_KEYS = ['active', 'running', 'queued', 'done', 'failed', ''];
-const VIEW_TITLE = { overview:'현황', browser:'파일 브라우저', jobs:'작업' };
+const VIEW_TITLE = { overview:'현황', browser:'파일 브라우저', jobs:'작업',
+                     logs:'로그' };
+const VIEWS = ['overview', 'browser', 'jobs', 'logs'];
 let view = 'browser', lastOverview = 0;
 
 // 사이드바가 목록 필터 하나만 바꾸면 사이드바를 둘 이유가 없다. 화면을 실제로
-// 바꾼다 — 현황은 버킷 기준 진척률과 큐·자원, 나머지 둘은 하던 일.
+// 바꾼다 — 현황은 버킷 기준 진척률과 큐·자원, 로그는 시간 축, 나머지 둘은 하던 일.
 function go2(v) {
   view = v;
-  for (const k of ['overview', 'browser', 'jobs'])
+  for (const k of VIEWS)
     document.getElementById('tab-' + k).classList.toggle('on', k === v);
   $('#page').textContent = VIEW_TITLE[v];
   $('#view-overview').hidden = v !== 'overview';
-  $('#view-work').hidden = v === 'overview';
+  $('#view-logs').hidden = v !== 'logs';
+  $('#view-work').hidden = v === 'overview' || v === 'logs';
   $('#card-browser').hidden = v === 'jobs';
   $('#view-work').classList.toggle('solo', v === 'jobs');
-  $('#kpis').hidden = v === 'overview';
+  // 로그는 작업 상태 KPI 와 아무 상관이 없다. 남겨 두면 위쪽 숫자와 아래쪽
+  // 목록이 서로 다른 이야기를 해서 화면이 두 개인 것처럼 읽힌다.
+  $('#kpis').hidden = v === 'overview' || v === 'logs';
   if (v === 'overview') loadOverview();
+  if (v === 'logs') loadLogs();
   poll();
 }
+
+// ---------------------------------------------------------------------------
+// 로그 — **시간 축.** 작업 목록이 "지금 어떤가" 라면 이쪽은 "무슨 일이 있었나" 다.
+//
+// 문장은 서버가 만들어 준다(events.decorate). 여기서 만들면 로그 파일과 화면이
+// 다른 말을 하게 되고, 나중에 화면이 하나 더 붙으면 같은 계산을 또 짜게 된다.
+const LOG_PAGE = 60;
+let logRows = [], logCursor = null, logMore = false, logTimer = null, logOpen = '';
+
+function logQuery(before) {
+  const p = ['limit=' + LOG_PAGE];
+  const e = $('#lgevent').value, m = $('#lgmode').value, q = $('#lgq').value.trim();
+  if (e) p.push('event=' + encodeURIComponent(e));
+  if (m) p.push('mode=' + m);
+  if (q) p.push('q=' + encodeURIComponent(q));
+  if (before) p.push('before=' + before);
+  return p.join('&');
+}
+
+async function loadLogs(append) {
+  const r = await fetch('/api/events?' + logQuery(append ? logCursor : null))
+    .then(r => r.json()).catch(() => null);
+  if (!r) { $('#lgnote').textContent = '불러오지 못했습니다'; return; }
+  logRows = append ? logRows.concat(r.events) : r.events;
+  logCursor = r.cursor;
+  logMore = r.has_more;
+  renderLogs();
+  scheduleLogs();
+}
+
+function scheduleLogs() {
+  clearTimeout(logTimer);
+  // '더 보기' 로 아래를 펼쳐 놓았거나 한 작업만 열어 둔 상태에서 자동 갱신이
+  // 돌면, 방금 펼친 것이 통째로 접히고 전체 목록으로 되돌아간다. 첫 쪽을
+  // 그냥 보고 있을 때만 갱신한다.
+  if (view === 'logs' && $('#lglive').checked && !logOpen
+      && logRows.length <= LOG_PAGE)
+    logTimer = setTimeout(() => loadLogs(), 4000);
+}
+
+function esc(s) {
+  return String(s == null ? '' : s).replace(/[&<>"]/g,
+    c => ({ '&':'&amp;', '<':'&lt;', '>':'&gt;', '"':'&quot;' }[c]));
+}
+
+function logLine(r) {
+  const job = r.job ? ` onclick="openLog('${esc(r.job)}')"` : '';
+  return `<div class="lrow"${job}>
+    <span class="lt">${esc(r.time)}</span>
+    <span class="lm ${r.mode === 'msa' ? 'msa' : ''}">${esc(r.mode)}</span>
+    <span class="lb ${esc(r.tone)}">${esc(r.label)}</span>
+    <span class="ln">${esc(r.name || r.job || '')}</span>
+    <span class="lx">${esc(r.text)}</span>
+    ${r.batch ? `<span class="lg2">${esc(r.batch)}</span>` : ''}
+  </div>`;
+}
+
+// 작업 단위로 묶기. 같은 파일에 대한 사건이 시간순으로 흩어져 있으면 "이 파일이
+// 어떻게 됐나" 를 눈으로 이어 붙여야 한다. 묶어 두면 한 덩이가 한 파일이다.
+function groupLogs(rows) {
+  const order = [], byJob = new Map();
+  for (const r of rows) {
+    const k = r.job || '(작업 없음)';
+    if (!byJob.has(k)) { byJob.set(k, []); order.push(k); }
+    byJob.get(k).push(r);
+  }
+  return order.map(k => {
+    const list = byJob.get(k);
+    const fin = list.find(r => r.event === 'job.finished');
+    const bad = list.find(r => r.event === 'job.failed');
+    const head = fin || bad || list[0];
+    const tone = bad ? 'bad' : '';
+    const sub = bad ? bad.text : (fin ? fin.text : `${list.length}건`);
+    return `<div class="lgroup">
+      <div class="lhead"><span>${esc(head.name || k)}</span>
+        ${head.batch ? `<span class="sub">${esc(head.batch)}</span>` : ''}
+        <span class="sub ${tone}">${esc(sub)}</span>
+        <span class="sub" style="margin-left:auto">${esc(head.mode)}</span></div>
+      ${list.map(logLine).join('')}</div>`;
+  }).join('');
+}
+
+function renderLogs() {
+  const grouped = $('#lggroup').checked;
+  $('#lgnote').textContent = logOpen
+    ? '한 작업만 보는 중 — 같은 줄을 다시 누르면 전체로'
+    : (logRows.length ? `${logRows.length}줄${logMore ? ' (더 있음)' : ''}` : '');
+  if (!logRows.length) {
+    $('#logs').innerHTML = `<div class="empty">기록이 없습니다.
+      작업을 한 건 돌리면 여기에 쌓입니다.</div>`;
+    return;
+  }
+  const body = grouped ? groupLogs(logRows) : logRows.map(logLine).join('');
+  const more = logMore
+    ? `<div class="pager"><button class="ghost" onclick="loadLogs(true)">더 보기</button></div>`
+    : '';
+  $('#logs').innerHTML = body + more;
+}
+
+// 한 작업만 따로 본다. 게시판에서 글 하나를 여는 것과 같다 — 그 파일에 무슨
+// 일이 있었는지 처음부터 끝까지가 한 화면에 온다.
+function openLog(job) {
+  if (logOpen === job) {           // 같은 줄을 다시 누르면 전체로 돌아간다
+    logOpen = ''; $('#lgq').value = ''; return loadLogs();
+  }
+  logOpen = job;
+  $('#lggroup').checked = true;
+  scheduleLogs();                  // 돌고 있던 자동 갱신을 멈춘다 (logOpen 이므로)
+  fetch('/api/events?limit=200&job=' + encodeURIComponent(job))
+    .then(r => r.json()).then(r => {
+      logRows = r.events; logCursor = r.cursor; logMore = false;
+      renderLogs();
+    }).catch(() => {});
+}
+
+// 필터를 바꾸면 처음부터 다시 읽는다. 커서(before)를 들고 있으면 새 조건에
+// 옛 커서가 붙어서 중간부터 나온다.
+let logDebounce = null;
+function logFilterChanged(delay) {
+  logOpen = ''; logCursor = null;
+  clearTimeout(logDebounce);
+  logDebounce = setTimeout(() => loadLogs(), delay || 0);
+}
+$('#lgevent').onchange = () => logFilterChanged();
+$('#lgmode').onchange = () => logFilterChanged();
+$('#lgq').oninput = () => logFilterChanged(250);   // 한 글자마다 때리지 않는다
+$('#lggroup').onchange = renderLogs;               // 이미 받은 줄을 다시 그리기만
+$('#lglive').onchange = scheduleLogs;
 
 async function loadOverview() {
   lastOverview = Date.now();

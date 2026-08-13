@@ -1087,3 +1087,79 @@ def test_journal_failure_never_breaks_the_job(monkeypatch):
     from face_anonymizer import events
     monkeypatch.setattr(events, "DIR", "/proc/그럴리없는경로")
     assert events.emit("job.started", job="x") is None      # 조용히 넘어간다
+
+
+# ---------------------------------------------------------------------------
+# 로그 화면이 기대는 것
+
+
+def _seed(events, tmp_path, monkeypatch):
+    monkeypatch.setattr(events, "DIR", str(tmp_path / "ev"))
+    monkeypatch.setattr(events, "MODE", "api")
+    events.emit("job.started", job="a", name="뉴스.mp4", batch="kbs")
+    events.emit("job.finished", job="a", name="뉴스.mp4", batch="kbs",
+                seconds=40.7, frames=1027, detected_frames=768,
+                detection_rate=0.7478, review_needed=True)
+    monkeypatch.setattr(events, "MODE", "msa")
+    events.emit("job.failed", job="b", name="인터뷰.mp4", batch="mbc",
+                stage="download", transient=True, detail="HTTP 403")
+
+
+def test_log_lines_come_with_the_sentence_already_written(client, tmp_path,
+                                                          monkeypatch):
+    """**문장은 서버가 만든다.**
+
+    화면이 만들면 로그 파일과 화면이 다른 말을 하게 되고, 나중에 화면이 하나 더
+    붙으면 같은 계산을 또 짜게 된다. 저널에는 수치만 넣고, 문장으로 바꾸는 일은
+    events.describe 한 곳에서만 한다.
+    """
+    from face_anonymizer import events
+    _seed(events, tmp_path, monkeypatch)
+
+    rows = client.get("/api/events?limit=10").json()["events"]
+    fin = next(r for r in rows if r["event"] == "job.finished")
+    assert fin["label"] == "완료" and fin["tone"] == "ok"
+    assert "40.7초" in fin["text"] and "검출 74.8%" in fin["text"]
+    assert "검수 필요" in fin["text"]          # 화면이 눈에 띄게 표시할 근거
+    bad = next(r for r in rows if r["event"] == "job.failed")
+    assert bad["tone"] == "bad" and "[download]" in bad["text"]
+
+
+def test_machines_can_still_ask_for_the_raw_line(client, tmp_path, monkeypatch):
+    """문구는 읽기 좋게 계속 바뀐다. 집계를 붙일 쪽은 원본 줄을 받아야 한다."""
+    from face_anonymizer import events
+    _seed(events, tmp_path, monkeypatch)
+
+    rows = client.get("/api/events?text=false&limit=10").json()["events"]
+    assert all("label" not in r and "text" not in r for r in rows)
+
+
+def test_log_filters_are_applied_by_the_server(client, tmp_path, monkeypatch):
+    """거르는 일을 화면에서 하면, 조건에 맞는 줄이 창 밖에 있을 때 빈 화면이
+    뜬다 — 목록 쪽에서 이미 겪은 문제다(docs/issues/006)."""
+    from face_anonymizer import events
+    _seed(events, tmp_path, monkeypatch)
+
+    assert len(client.get("/api/events?mode=msa").json()["events"]) == 1
+    assert len(client.get("/api/events?event=job.failed").json()["events"]) == 1
+    assert len(client.get("/api/events?q=인터뷰").json()["events"]) == 1
+    assert len(client.get("/api/events?batch=kbs").json()["events"]) == 2
+
+
+def test_more_button_uses_a_time_cursor_not_an_offset(client, tmp_path,
+                                                      monkeypatch):
+    """저널은 읽는 사이에도 계속 자란다.
+
+    offset 으로 다음 쪽을 요청하면 그 사이 쌓인 줄만큼 기준이 밀려서 **같은 줄을
+    두 번 보거나 통째로 건너뛴다.** 마지막 줄의 시각을 커서로 쓰면 그런 일이
+    없다. 총 건수를 세지 않는 이유도 같다 — 세는 순간 이미 옛 숫자다.
+    """
+    from face_anonymizer import events
+    _seed(events, tmp_path, monkeypatch)
+
+    first = client.get("/api/events?limit=1").json()
+    assert first["has_more"] is True and first["cursor"]
+    nxt = client.get(f"/api/events?limit=5&before={first['cursor']}").json()
+    ids = {r["ts"] for r in nxt["events"]}
+    assert first["events"][0]["ts"] not in ids      # 겹치지 않는다
+    assert nxt["has_more"] is False
