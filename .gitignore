@@ -42,3 +42,7 @@ env/
 .DS_Store
 .vscode/
 .idea/
+
+# 런타임 산출물 — 작업 폴더와 이벤트 저널
+jobs/
+msa-smoke-out/

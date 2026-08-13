@@ -28,7 +28,7 @@ except ImportError:                   # pragma: no cover
 
 from ..storage import naming
 from ..storage import s3 as s3mod
-from .. import timefmt
+from .. import events, timefmt
 from . import config, errors, jobs
 
 log = logging.getLogger(__name__)
@@ -209,10 +209,16 @@ def fail_or_retry(j, exc, permanent):
         jobs.save_job(j)
         log.warning("작업 %s 실패 [%s] (%d/%d회) — %.0f초 뒤 다시 시도한다: %s",
                     j.id, info["code"], j.attempts, config.MAX_ATTEMPTS, delay, msg)
+        events.emit("job.retry", job=j.id, name=j.name, batch=j.batch or None,
+                    code=info["code"], attempts=j.attempts, delay_s=round(delay, 1),
+                    detail=msg)
         schedule(j.id, delay)
     else:
         log.error("작업 %s 실패 [%s] (%d회 시도, %s): %s", j.id, info["code"],
                   j.attempts, "재시도 불가" if permanent else "재시도 소진", msg)
+        events.emit("job.failed", job=j.id, name=j.name, batch=j.batch or None,
+                    code=info["code"], stage=info.get("stage") or None,
+                    policy=info.get("policy"), attempts=j.attempts, detail=msg)
         # 원인 파악에 필요한 것은 사유·단계·시도 횟수이고 전부 job.json 에
         # 있다. S3 작업이면 원본도 버킷에 그대로다 — 200MB 를 붙들고 있을
         # 이유가 없다. 직접 업로드는 원본이 여기밖에 없어 남긴다.
@@ -255,12 +261,14 @@ def run(job_id):
     with jobs.LOCK:
         j.status, j.stage_t0 = "running", time.time()
         j.started = time.time()
-        log.info("▶ 시작  %s%s  [%s]", j.name,
-                 f"  ({j.batch})" if j.batch else "", timefmt.stamp(j.started))
         j.attempts += 1
         j.not_before, j.waiting, j.deferred_since = 0.0, "", 0.0
         params, workdir, name = dict(j.params), j.workdir, j.name
+        log.info("▶ 시작  %s%s  [%s]", j.name,
+                 f"  ({j.batch})" if j.batch else "", timefmt.stamp(j.started))
     jobs.save_job(j)
+    events.emit("job.started", job=j.id, name=j.name, batch=j.batch or None,
+                attempt=j.attempts, s3_key=j.s3_key or None)
 
     def progress(stage, done, total):
         # 취소는 여기서만 끊을 수 있다. 파이프라인이 프레임마다 부르는 유일한
@@ -348,6 +356,20 @@ def run(job_id):
             }
             j.error = {}
         jobs.save_job(j)
+        # **결과가 채워진 뒤에** 찍는다. 락 안에서 찍으면 프레임 수도 검출률도
+        # 아직 비어 있어서, 정작 근거로 쓸 값이 하나도 안 남는다.
+        r = j.result
+        events.emit("job.finished", job=j.id, name=j.name,
+                    batch=j.batch or None, seconds=r.get("seconds"),
+                    frames=r.get("frames"),
+                    detected_frames=r.get("detected_frames"),
+                    detection_rate=r.get("detection_rate"),
+                    realtime_factor=r.get("realtime_factor"),
+                    warnings=list(r.get("warnings") or ()),
+                    source_codec=r.get("source_codec"),
+                    transcoded=r.get("transcoded"),
+                    timing=r.get("timing"), attempts=j.attempts,
+                    started_at=timefmt.iso(j.started))
         # 결과는 이미 버킷에 있다. 로컬 사본을 TTL 동안 들고 있으면 대량
         # 처리에서 디스크가 먼저 찬다(docs/issues/001). 다운로드 라우트가
         # "로컬에 없으면 S3 로 302" 이므로 잃는 것이 없다. 직접 업로드는
@@ -362,6 +384,7 @@ def run(job_id):
                        "hint": "", "retryable": False}
         jobs.save_job(j)
         log.info("작업 %s 취소됨", job_id)
+        events.emit("job.cancelled", job=j.id, name=j.name, batch=j.batch or None)
     except config.PERMANENT_ERRORS as e:
         fail_or_retry(j, e, permanent=True)
     except Exception as e:                      # noqa: BLE001 — 워커가 조용히 죽으면 안 된다
@@ -399,6 +422,8 @@ def enqueue(name, params, s3_key="", jid=None, workdir=None, batch=""):
     os.makedirs(workdir, exist_ok=True)
     job = jobs.Job(id=jid, name=name, workdir=workdir, s3_key=s3_key,
                    params=params, batch=batch)
+    events.emit("job.queued", job=jid, name=name, batch=batch or None,
+                s3_key=s3_key or None)
     with jobs.LOCK:
         # 대기열 확인과 등록이 같은 락 안에 있어야 동시 요청이 상한을 넘지 않는다.
         if config.QUEUE_MAX and sum(1 for o in jobs.JOBS.values()

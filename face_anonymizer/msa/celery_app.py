@@ -64,6 +64,14 @@ _anonymizer = None
 
 
 @worker_process_init.connect
+def _logging(**_kw):
+    """자식 프로세스마다 로깅을 갖춘다. celery 가 루트를 잡긴 하지만 포맷이
+    다르고, 우리 시각 표기(KST)를 쓰려면 여기서 한 번 더 정한다."""
+    from .. import logsetup
+    logsetup.setup(force=True)
+
+
+@worker_process_init.connect
 def _preload(**_kw):
     """검출기를 미리 올린다. 첫 잡이 로딩 수십 초를 뒤집어쓰지 않게.
 

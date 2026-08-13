@@ -1044,3 +1044,46 @@ def test_picked_files_do_not_get_a_batch_label(client):
     assert batch_of("v1/input/kbs/a.mp4", ["v1/input/kbs/"]) == "kbs"
     assert batch_of("v1/input/kbs/a.mp4", []) == ""
     assert batch_of("v1/input/mbc/a.mp4", ["v1/input/kbs/"]) == ""
+
+
+# ── 이벤트 저널 ──────────────────────────────────────────────────────────────
+
+def test_journal_records_the_life_of_a_job(client, tmp_path, make_video, monkeypatch):
+    """로그 문장이 아니라 **기계가 읽는 기록**이 남는다.
+
+    job.json 은 최종 상태만 안다. "언제 시작해서 언제 끝났고 중간에 몇 번
+    재시도했나" 라는 시간 축은 저널에만 있다.
+    """
+    from face_anonymizer import events
+    monkeypatch.setattr(events, "DIR", str(tmp_path / "events"))
+
+    path, n, size = make_video(frames=4)
+    client.attach(size)
+    jid = job_id(submit(client, path))
+    wait(client, jid, timeout=60)
+
+    rows = client.get(f"/api/events?job={jid}").json()["events"]
+    kinds = [r["event"] for r in rows]
+    assert "job.finished" in kinds and "job.started" in kinds
+    fin = next(r for r in rows if r["event"] == "job.finished")
+    # 납품 근거가 되는 값들이 한 줄에 다 있다
+    assert fin["frames"] == n and fin["seconds"] > 0
+    assert fin["at"].endswith("+09:00") and fin["job"] == jid
+
+
+def test_journal_never_records_signed_urls(tmp_path, monkeypatch):
+    """서명된 URL 에는 서명이 들어 있다. 기록에 남기면 안 된다."""
+    from face_anonymizer import events
+    monkeypatch.setattr(events, "DIR", str(tmp_path / "events"))
+
+    row = events.emit("job.started", job="x", input_url="https://s3/…?X-Amz-Signature=abc",
+                      token="fencing", name="a.mp4")
+    assert "input_url" not in row and "token" not in row
+    assert row["name"] == "a.mp4"
+
+
+def test_journal_failure_never_breaks_the_job(monkeypatch):
+    """기록하려다 작업이 죽으면 본말전도다."""
+    from face_anonymizer import events
+    monkeypatch.setattr(events, "DIR", "/proc/그럴리없는경로")
+    assert events.emit("job.started", job="x") is None      # 조용히 넘어간다

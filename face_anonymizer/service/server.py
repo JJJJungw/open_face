@@ -27,6 +27,7 @@ from contextlib import asynccontextmanager
 from fastapi import FastAPI, Request, Response
 from fastapi.responses import FileResponse, HTMLResponse, RedirectResponse
 
+from .. import events, logsetup
 from ..core.anonymize import METHODS
 from ..core.pipeline import parse_bitrate
 from ..storage import naming
@@ -43,7 +44,11 @@ _sweeper = None
 @asynccontextmanager
 async def lifespan(_app):
     global _sweeper
+    # 여기서 안 하면 우리 INFO 는 전부 버려진다 — uvicorn 은 루트를 안 건드린다.
+    logsetup.setup()
     os.makedirs(config.JOBS_DIR, exist_ok=True)
+    log.info("서버 기동 — 작업 폴더 %s", config.JOBS_DIR)
+    events.emit("server.started", jobs_dir=config.JOBS_DIR)
     worker.resume_orphans()
     if config.SWEEP_SEC > 0 and _sweeper is None:
         _sweeper = threading.Thread(target=jobs.sweep_loop, daemon=True,
@@ -498,6 +503,18 @@ def batch_of(key, prefixes):
 def list_batches():
     """폴더별 시작·종료·진척. 사람이 묻는 단위가 파일이 아니라 폴더다."""
     return {"batches": jobs.batches()}
+
+
+@app.get("/api/events")
+def list_events(job: str = None, batch: str = None, event: str = None,
+                since: float = None, limit: int = 200):
+    """이벤트 저널. **로그가 아니라 기록이다.**
+
+    로그 문장은 읽기 좋게 계속 바뀌므로 파싱 대상이 아니다. 기계가 볼 것은
+    처음부터 따로 남긴다(face_anonymizer/events.py).
+    """
+    return {"events": events.read(job=job, batch=batch, event=event,
+                                  since=since, limit=limit)}
 
 
 @app.get("/api/jobs")
