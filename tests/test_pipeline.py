@@ -146,9 +146,26 @@ def test_batch_size_does_not_change_result(make_video, tmp_path):
 
 
 def test_pipeline_does_not_need_torch():
-    """CI 에서 2GB 짜리 torch 없이 회귀를 잡을 수 있는 근거."""
+    """CI 에서 2GB 짜리 torch 없이 회귀를 잡을 수 있는 근거.
+
+    ``sys.modules`` 를 그냥 들여다보면 **테스트 순서에 따라 답이 바뀐다.**
+    torch 가 깔린 기계(=GPU 서버)에서는 앞선 테스트가 진짜 검출기를 올리면서
+    이미 넣어 두기 때문에, 배선이 멀쩡해도 실패한다. 정작 묻고 싶은 것은
+    "이 모듈만 임포트했을 때 딸려 오는가" 이므로 새 프로세스에서 확인한다.
+    """
+    import os
+    import subprocess
     import sys
-    assert "torch" not in sys.modules
+
+    root = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
+    r = subprocess.run(
+        [sys.executable, "-c",
+         "import sys, face_anonymizer.core.pipeline;"
+         " print('torch' in sys.modules)"],
+        cwd=root, capture_output=True, text=True,
+        env={**os.environ, "PYTHONPATH": root})
+    assert r.returncode == 0, r.stderr
+    assert r.stdout.strip() == "False", "pipeline 임포트만으로 torch 가 딸려 온다"
 
 
 def test_snap_to_stride_rounds_up():
