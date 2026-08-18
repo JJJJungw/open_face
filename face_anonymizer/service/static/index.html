@@ -49,6 +49,10 @@
   nav a .c{margin-left:auto;font-size:11px;color:var(--faint);
            font-variant-numeric:tabular-nums}
   nav a.on .c{color:var(--accent-ink)}
+  /* 현황·로그에는 작업 목록이 없다. 그 화면에서 상태가 켜져 있으면 두 곳이
+     동시에 선택된 것처럼 보이고, 정작 화면은 어느 쪽도 반영하지 않는다. */
+  nav.nolist .st{opacity:.4}
+  nav.nolist a.st:hover{opacity:1}
 
   main{min-width:0;overflow:auto;display:flex;flex-direction:column}
   .top{display:flex;align-items:center;gap:14px;padding:15px 24px;
@@ -345,14 +349,14 @@
       <a onclick="go2('browser')" id="tab-browser">파일 브라우저</a>
       <a onclick="go2('jobs')" id="tab-jobs">작업<span class="c" id="c-jobs"></span></a>
       <a onclick="go2('logs')" id="tab-logs">로그</a>
-      <div class="grp">작업 상태</div>
-      <a onclick="setFilter('active')" id="nav-active" class="on">진행중<span class="c"></span></a>
-      <a onclick="setFilter('running')" id="nav-running">수행중<span class="c"></span></a>
-      <a onclick="setFilter('queued')" id="nav-queued">대기<span class="c"></span></a>
-      <a onclick="setFilter('review')" id="nav-review">검수<span class="c"></span></a>
-      <a onclick="setFilter('done')" id="nav-done">완료<span class="c"></span></a>
-      <a onclick="setFilter('failed')" id="nav-failed">실패<span class="c"></span></a>
-      <a onclick="setFilter('')" id="nav-all">전체 기록<span class="c"></span></a>
+      <div class="grp st">작업 상태</div>
+      <a onclick="setFilter('active')" id="nav-active" class="st on">진행중<span class="c"></span></a>
+      <a onclick="setFilter('running')" id="nav-running" class="st">수행중<span class="c"></span></a>
+      <a onclick="setFilter('queued')" id="nav-queued" class="st">대기<span class="c"></span></a>
+      <a onclick="setFilter('review')" id="nav-review" class="st">검수<span class="c"></span></a>
+      <a onclick="setFilter('done')" id="nav-done" class="st">완료<span class="c"></span></a>
+      <a onclick="setFilter('failed')" id="nav-failed" class="st">실패<span class="c"></span></a>
+      <a onclick="setFilter('')" id="nav-all" class="st">전체 기록<span class="c"></span></a>
     </nav>
     <div class="hud">
       <div class="hd">
@@ -701,8 +705,7 @@ let view = 'browser', lastOverview = 0;
 // 바꾼다 — 현황은 버킷 기준 진척률과 큐·자원, 로그는 시간 축, 나머지 둘은 하던 일.
 function go2(v) {
   view = v;
-  for (const k of VIEWS)
-    document.getElementById('tab-' + k).classList.toggle('on', k === v);
+  paintNav();
   $('#page').textContent = VIEW_TITLE[v];
   $('#view-overview').hidden = v !== 'overview';
   $('#view-logs').hidden = v !== 'logs';
@@ -941,12 +944,32 @@ function navCounts(st) {
   $('#c-jobs').textContent = navCount(st, '') || '';
 }
 
+// 작업 목록이 실제로 그려지는 화면들. 현황과 로그에는 목록이 없다.
+const LIST_VIEWS = ['browser', 'jobs'];
+
+// **사이드바를 칠하는 일은 여기 한 곳에서만 한다.**
+//
+// 화면(위)과 작업 상태(아래)를 각자 칠하게 두면 둘 다 켜진 상태가 만들어진다 —
+// '현황' 과 '수행중' 이 동시에 파랗게 켜져 있는데 화면은 현황이라, 무엇을 보고
+// 있는지 사이드바가 거짓말을 한다. 상태 선택은 목록이 있는 화면에서만 뜻이
+// 있으므로, 목록이 없는 화면에서는 아예 끄고 묶음을 흐리게 한다.
+function paintNav() {
+  const live = LIST_VIEWS.includes(view);
+  for (const k of VIEWS)
+    document.getElementById('tab-' + k).classList.toggle('on', k === view);
+  for (const k of NAV_KEYS)
+    document.getElementById('nav-' + (k || 'all'))
+      .classList.toggle('on', live && k === filter);
+  document.querySelector('nav').classList.toggle('nolist', !live);
+}
+
 function setFilter(f) {
   filter = f;
   page = 0;                      // 탭을 바꾸면 첫 페이지부터
-  if (view === 'overview') return go2('jobs');
-  for (const k of NAV_KEYS)
-    document.getElementById('nav-' + (k || 'all')).classList.toggle('on', k === f);
+  // 목록이 없는 화면에서 상태를 누르면 그 선택이 아무 데도 안 보인다.
+  // 누른 사람의 뜻은 "그 목록을 보겠다" 이므로 목록이 있는 화면으로 데려간다.
+  if (!LIST_VIEWS.includes(view)) return go2('jobs');
+  paintNav();
   poll();
 }
 
