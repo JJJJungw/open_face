@@ -191,3 +191,16 @@ def test_a_broken_saved_file_does_not_stop_the_server(fresh):
     (fresh.jobs_dir / providers.SAVED_NAME).write_text("{ 이건 JSON 이 아니다")
     assert providers.load_saved() == {}
     assert providers.StorageConfig.from_env().provider == "s3"
+
+
+def test_the_screen_does_not_open_before_it_is_configured(fresh):
+    """관문이 화면에 실제로 있는가.
+
+    붙을 곳이 없는데 본 화면을 그리면 진척률·큐가 0 으로 채워져 나오고
+    사이드바 탭은 눌러도 빈 화면과 404 뿐이다. 그 화면들은 '아직 아니다' 라고
+    말해 주지 않는다 — 그냥 아무것도 없는 도구처럼 보인다.
+    """
+    html = fresh.get("/").text
+    assert 'id="setup"' in html
+    assert '<div class="app" hidden>' in html      # 통과해야 열린다
+    assert "어디에 붙을지" in html
