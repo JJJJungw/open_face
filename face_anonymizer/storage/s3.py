@@ -18,6 +18,7 @@ boto3 는 **함수 안에서 지연 임포트**한다. S3 를 안 쓰는 사용�
 
 import logging
 import os
+from urllib.parse import quote
 import time
 
 from . import naming
@@ -238,17 +239,27 @@ class S3Store:
             raise S3Error(f"내려받은 파일이 비어 있습니다: {key}")
         return dest
 
-    def presigned_url(self, key, expires=None):
+    def presigned_url(self, key, expires=None, filename=None):
         """결과물을 바로 받을 수 있는 임시 URL.
 
         GPU 서버가 파일 전송까지 떠안을 이유가 없고, 로컬 사본이 보관 기간에
         정리돼도 S3 원본은 남아 있다.
+
+        ``filename`` 을 주면 **내려받기**가 되고, 없으면 브라우저에서 바로 튼다.
+        이게 없으면 S3 가 헤더 없이 mp4 를 주고, 브라우저는 내려받는 대신
+        페이지를 떠나 영상을 재생한다 — '내려받기' 를 눌렀는데 화면이 사라진다.
+        검수처럼 **보는 것이 목적**일 때는 일부러 비운다.
         """
+        params = {"Bucket": self.bucket, "Key": key}
+        if filename:
+            # 한글 파일명은 그대로 헤더에 못 넣는다(RFC 5987).
+            quoted = quote(filename)
+            params["ResponseContentDisposition"] = (
+                f'attachment; filename="{quoted}"; '
+                f"filename*=UTF-8''{quoted}")
         try:
             return self.client.generate_presigned_url(
-                "get_object",
-                Params={"Bucket": self.bucket, "Key": key},
-                ExpiresIn=int(expires or URL_TTL))
+                "get_object", Params=params, ExpiresIn=int(expires or URL_TTL))
         except Exception as e:                      # noqa: BLE001
             raise wrap(e, f"다운로드 주소를 만들지 못했습니다 ({key})") from e
 

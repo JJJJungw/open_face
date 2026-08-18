@@ -67,7 +67,14 @@ class FakeS3Client:
                 Callback(0)
 
     def generate_presigned_url(self, op, Params=None, ExpiresIn=None):
-        return f"https://signed/{Params['Key']}?e={ExpiresIn}"
+        # 진짜 S3 는 ResponseContentDisposition 을 쿼리로 실어 서명한다.
+        # 그게 있어야 브라우저가 재생 대신 내려받기를 한다 — 흉내에서도 실어 준다.
+        extra = ""
+        cd = (Params or {}).get("ResponseContentDisposition")
+        if cd:
+            from urllib.parse import quote as _q
+            extra = "&response-content-disposition=" + _q(cd)
+        return f"https://signed/{Params['Key']}?e={ExpiresIn}{extra}"
 
     def head_object(self, Bucket, Key):
         if Key not in self.objects:
@@ -726,3 +733,37 @@ def test_review_does_not_hold_the_local_copy_hostage(s3client, monkeypatch):
     # 그래도 볼 수 있어야 판정할 수 있다
     r = s3client.get(f"/api/jobs/{jid}/download", follow_redirects=False)
     assert r.status_code == 302
+
+
+def test_download_forces_an_attachment_from_s3(s3client):
+    """**'내려받기' 를 눌렀는데 페이지가 영상으로 바뀌면 안 된다.**
+
+    presigned URL 에 Content-Disposition 이 없으면 S3 가 mp4 를 헤더 없이 주고,
+    브라우저는 내려받는 대신 페이지를 떠나 재생한다.
+    """
+    jid = s3client.post("/api/jobs", data={"s3_key": KEY}).json()["accepted"][0]["id"]
+    wait(s3client, jid, timeout=60)
+
+    r = s3client.get(f"/api/jobs/{jid}/download", follow_redirects=False)
+    assert r.status_code == 302
+    assert "response-content-disposition" in r.headers["location"].lower()
+    assert "attachment" in r.headers["location"].lower()
+
+
+def test_review_opens_inline_because_watching_is_the_point(s3client, monkeypatch):
+    """검수는 **보는 것이 목적**이라 내려받기가 아니라 재생이 맞다."""
+    class Blind:
+        def detect_batch(self, frames, imgsz=None, conf=None, iou=None):
+            return [[] for _ in frames]
+    from face_anonymizer import VideoAnonymizer
+    from face_anonymizer.service import worker
+    anon = VideoAnonymizer(detector=Blind())
+    monkeypatch.setattr(worker, "get_anonymizer", lambda: anon)
+    monkeypatch.setattr(worker, "_anonymizer", anon)
+
+    jid = s3client.post("/api/jobs", data={"s3_key": KEY}).json()["accepted"][0]["id"]
+    assert wait(s3client, jid, timeout=60)["status"] == "review"
+
+    r = s3client.get(f"/api/jobs/{jid}/download?inline=1", follow_redirects=False)
+    assert r.status_code == 302
+    assert "attachment" not in r.headers["location"].lower()

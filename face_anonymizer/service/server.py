@@ -548,7 +548,7 @@ def list_batches():
 def list_events(job: str = None, batch: str = None, event: str = None,
                 mode: str = None, since: float = None, before: float = None,
                 q: str = None, limit: int = 200, text: bool = True,
-                full: bool = False):
+                full: bool = False, from_day: str = None, to_day: str = None):
     """이벤트 저널. **로그가 아니라 기록이다.**
 
     로그 문장은 읽기 좋게 계속 바뀌므로 파싱 대상이 아니다. 기계가 볼 것은
@@ -571,6 +571,7 @@ def list_events(job: str = None, batch: str = None, event: str = None,
     # 것까지 줄마다 붙어 오면 한 쪽에 몇 배가 실린다 — 상세는 펼칠 때 따로 온다.
     rows = events.read(job=job, batch=batch, event=event, mode=mode,
                        since=since, before=before, q=q, limit=want + 1,
+                       from_day=from_day, to_day=to_day,
                        fields=None if full else events.LIST_FIELDS)
     more = len(rows) > want
     rows = rows[:want]
@@ -617,6 +618,12 @@ def event_detail(ts: float, job: str = None, event: str = None):
     return {"event": events.decorate(row), "raw": row}
 
 
+@app.get("/api/events/days")
+def event_days():
+    """저널이 있는 날짜들. 날짜 고르기가 **있는 날만** 고르게 한다."""
+    return {"days": events.days()}
+
+
 @app.get("/api/events/batches")
 def event_batches():
     """로그 화면의 폴더 필터 목록. **저널에서 뽑는다**(events.batches 주석 참고)."""
@@ -626,13 +633,18 @@ def event_batches():
 @app.get("/api/export.csv")
 def export_csv(job: str = None, batch: list[str] = Query(default=[]),
                event: str = None, mode: str = None, since: float = None,
-               before: float = None, q: str = None, limit: int = 5000):
+               before: float = None, q: str = None, limit: int = 5000,
+               from_day: str = None, to_day: str = None):
     """지금 화면에 걸린 조건 그대로 내보낸다.
 
     **보이는 것과 받는 것이 같아야 한다.** 내보내기 전용 조건을 따로 두면 화면
     에서 거른 것과 파일에 담긴 것이 달라지고, 그걸 알아채는 것은 파일을 연 뒤다.
 
     폴더는 여럿 줄 수 있다(``?batch=kbs&batch=mbc``). 아무것도 안 주면 전부다.
+
+    ``from_day``/``to_day`` 는 ``2026-08-18`` 형식이고 **양 끝을 포함**한다.
+    날짜 해석은 서버가 한다 — 화면이 브라우저 타임존으로 계산하면 다른 지역에서
+    열었을 때 저널의 그 날짜와 다른 구간을 가리킨다.
 
     **UTF-8 BOM 을 붙인다.** 안 붙이면 한국어 윈도우 엑셀이 파일명을 깨뜨린다 —
     받아서 열었을 때 깨져 있으면 그게 첫인상이 된다.
@@ -646,12 +658,14 @@ def export_csv(job: str = None, batch: list[str] = Query(default=[]),
         # 폴더별로 따로 읽고 합친다. events.read 는 폴더 하나만 받는다.
         for b in picked:
             rows += events.read(job=job, batch=b, event=event, mode=mode,
-                                since=since, before=before, q=q, limit=limit)
+                                since=since, before=before, q=q, limit=limit,
+                                from_day=from_day, to_day=to_day)
         rows.sort(key=lambda r: -(r.get("ts") or 0))
         rows = rows[:limit]
     else:
         rows = events.read(job=job, event=event, mode=mode, since=since,
-                           before=before, q=q, limit=limit)
+                           before=before, q=q, limit=limit,
+                           from_day=from_day, to_day=to_day)
 
     buf = io.StringIO()
     w = csv.writer(buf, lineterminator="\r\n")     # 엑셀은 CRLF 를 기대한다
@@ -660,9 +674,14 @@ def export_csv(job: str = None, batch: list[str] = Query(default=[]),
         r = events.decorate(raw)
         w.writerow([get(r) for _name, get in EXPORT_COLUMNS])
 
-    stamp = (timefmt.iso(time.time()) or "")[:16].replace(":", "").replace("-", "")
-    tag = "-".join(picked) if picked and len(picked) <= 3 else ""
-    name = f"face-anonymizer-log-{tag + '-' if tag else ''}{stamp}.csv"
+    bits = []
+    if picked and len(picked) <= 3:
+        bits += picked
+    if from_day or to_day:
+        bits.append(f"{from_day or '처음'}_{to_day or '지금'}")
+    if not bits:
+        bits.append((timefmt.iso(time.time()) or "")[:10])
+    name = "face-anonymizer-log-" + "-".join(bits) + ".csv"
     return Response(
         content="\ufeff" + buf.getvalue(),
         media_type="text/csv; charset=utf-8",
@@ -712,7 +731,12 @@ def get_job(jid: str):
 
 
 @app.get("/api/jobs/{jid}/download")
-def download(jid: str):
+def download(jid: str, inline: bool = False):
+    """결과물. 기본은 **내려받기**, ``inline=1`` 이면 브라우저에서 바로 튼다.
+
+    검수는 보는 것이 목적이라 inline 이 맞고, 완료된 건은 받는 것이 목적이다.
+    구분하지 않으면 '내려받기' 를 눌렀는데 페이지가 영상으로 바뀐다.
+    """
     j = jobs.find_job(jid)
     if j is None:
         raise errors.JOB_NOT_FOUND(jid)
@@ -720,14 +744,19 @@ def download(jid: str):
     if j.status not in ("done", "review"):
         raise (errors.JOB_FAILED(j.error.get("detail", "") if isinstance(j.error, dict) else j.error)
            if j.status == "failed" else errors.JOB_NOT_FINISHED(f"status={j.status}"))
+    name = naming.output_name(j.name)
     if not j.output or not os.path.exists(j.output):
         # 로컬 사본은 정리됐어도 S3 원본은 남아 있다.
         store = s3mod.get_store()
         if j.s3_output and store is not None:
-            return RedirectResponse(store.presigned_url(j.s3_output),
-                                    status_code=302)
+            # 파일명을 같이 서명해야 S3 가 attachment 헤더를 붙여 준다.
+            return RedirectResponse(
+                store.presigned_url(j.s3_output,
+                                    filename=None if inline else name),
+                status_code=302)
         raise errors.RESULT_EXPIRED(jid)
-    name = naming.output_name(j.name)
+    if inline:
+        return FileResponse(j.output, media_type="video/mp4")
     return FileResponse(j.output, media_type="video/mp4", filename=name)
 
 

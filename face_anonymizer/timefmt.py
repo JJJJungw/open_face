@@ -34,6 +34,36 @@ def iso(epoch=None):
     return _dt.datetime.fromtimestamp(epoch, TZ).isoformat(timespec="seconds")
 
 
+def day_range(from_day=None, to_day=None):
+    """``2026-08-18`` 같은 날짜 → (시작 epoch, 끝 epoch). 없으면 None.
+
+    **날짜 해석을 서버가 한다.** 화면이 브라우저 타임존으로 계산하면, 다른
+    지역에서 열었을 때 "8월 18일" 이 저널의 8월 18일과 다른 구간을 가리킨다.
+    시각 표기를 서버가 정하는 것과 같은 이유다.
+
+    끝은 **그날을 포함**한다 — 사람이 "18일까지" 라고 하면 18일 23:59 까지다.
+    """
+    since = before = None
+    try:
+        if from_day:
+            d = _dt.date.fromisoformat(str(from_day).strip())
+            since = _dt.datetime(d.year, d.month, d.day, tzinfo=TZ).timestamp()
+        if to_day:
+            d = _dt.date.fromisoformat(str(to_day).strip())
+            end = _dt.datetime(d.year, d.month, d.day, tzinfo=TZ) + _dt.timedelta(days=1)
+            before = end.timestamp()
+    except (TypeError, ValueError):
+        return None, None
+    return since, before
+
+
+def day_of(epoch=None):
+    """``2026-08-18`` — 그 시각이 속한 (표기 기준) 날짜."""
+    if not epoch:
+        return None
+    return _dt.datetime.fromtimestamp(epoch, TZ).strftime("%Y-%m-%d")
+
+
 def span(start, end):
     """``8월 13일 01:04:37 ~ 01:05:26 (49초)``.
 

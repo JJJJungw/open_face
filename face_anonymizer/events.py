@@ -109,14 +109,27 @@ def emit(event, **fields):
     return row
 
 
-def files(limit_days=7):
-    """최근 날짜 파일들, 최신 순."""
+def files(limit_days=7, from_day=None, to_day=None):
+    """날짜 파일들, 최신 순.
+
+    파일 이름이 곧 날짜(``2026-08-18.jsonl``)라 **범위를 파일 단위로 자른다** —
+    범위 밖 파일은 열지도 않는다.
+
+    기본은 최근 7일이다. 화면은 그 정도만 보면 되고, 더 오래된 것을 뒤지려고
+    매번 전부 여는 것은 낭비다. 다만 **날짜를 지정하면 그 상한을 풀어야 한다** —
+    "지난달 것을 받겠다" 는데 7일 창에 걸려 빈 파일이 나오면 안 된다.
+    """
     try:
         names = sorted((n for n in os.listdir(DIR) if n.endswith(".jsonl")),
                        reverse=True)
     except OSError:
         return []
-    return [os.path.join(DIR, n) for n in names[:limit_days]]
+    if from_day or to_day:
+        lo, hi = str(from_day or "0000-00-00"), str(to_day or "9999-99-99")
+        names = [n for n in names if lo <= n[:10] <= hi]
+    else:
+        names = names[:limit_days]
+    return [os.path.join(DIR, n) for n in names]
 
 
 # 뒤에서부터 읽을 때 한 번에 가져오는 크기. 저널 한 줄이 대략 300~500바이트라
@@ -168,7 +181,8 @@ LIST_FIELDS = ("at", "ts", "mode", "event", "job", "name", "batch",
 
 
 def read(job=None, batch=None, event=None, since=None, limit=200,
-         mode=None, before=None, q=None, fields=None):
+         mode=None, before=None, q=None, fields=None,
+         from_day=None, to_day=None):
     """저널을 뒤에서부터 읽어 조건에 맞는 것만. 최신 순.
 
     파일을 통째로 파싱하지 않는다 — 뒤에서부터 필요한 만큼만 읽는다(tail_lines).
@@ -183,8 +197,14 @@ def read(job=None, batch=None, event=None, since=None, limit=200,
     limit = max(1, min(int(limit or 200), READ_MAX))
     needle = (q or "").strip().lower()
     keep = set(fields) if fields else None
+    # 날짜 범위는 **파일 단위로 먼저** 자른다. 범위 밖 파일은 열지도 않는다.
+    day_since, day_before = timefmt.day_range(from_day, to_day)
+    if day_since and (since is None or day_since > float(since)):
+        since = day_since
+    if day_before and (before is None or day_before < float(before)):
+        before = day_before
     out = []
-    for path in files():
+    for path in files(from_day=from_day, to_day=to_day):
         for line in tail_lines(path):
             try:
                 row = json.loads(line)
@@ -236,6 +256,15 @@ def detail_of(job=None, ts=None, event=None):
                 continue
             return row
     return None
+
+
+def days():
+    """저널이 있는 날짜들, 최신 순. 날짜 고르기 화면이 쓴다."""
+    try:
+        return sorted((n[:10] for n in os.listdir(DIR) if n.endswith(".jsonl")),
+                      reverse=True)
+    except OSError:
+        return []
 
 
 def batches(limit=None):

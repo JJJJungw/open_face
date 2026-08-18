@@ -1732,3 +1732,77 @@ def test_tail_reading_handles_multibyte_boundaries(tmp_path, monkeypatch):
     rows = events.read(limit=50)
     assert len(rows) == 50
     assert [r["name"] for r in rows] == list(reversed(names))
+
+
+def test_a_date_range_is_interpreted_by_the_server(client, tmp_path,
+                                                   monkeypatch):
+    """**날짜 해석을 화면에 맡기면 안 된다.**
+
+    화면이 브라우저 타임존으로 계산하면, 다른 지역에서 열었을 때 "8월 18일" 이
+    저널의 8월 18일과 다른 구간을 가리킨다. 시각 표기를 서버가 정하는 것과 같은
+    이유다. 끝 날짜는 **그날을 포함**한다 — "18일까지" 는 18일 23:59 까지다.
+    """
+    from face_anonymizer import timefmt
+    since, before = timefmt.day_range("2026-08-18", "2026-08-18")
+    assert timefmt.day_of(since) == "2026-08-18"
+    assert timefmt.day_of(before - 1) == "2026-08-18"      # 그날 끝까지
+    assert timefmt.day_of(before) == "2026-08-19"          # 딱 여기서 끊긴다
+    assert timefmt.day_range(None, None) == (None, None)
+    assert timefmt.day_range("아무거나", None) == (None, None)
+
+
+def test_an_old_day_is_reachable_even_past_the_seven_day_window(tmp_path,
+                                                                monkeypatch):
+    """기본은 최근 7일만 본다. **날짜를 지정하면 그 상한이 풀려야 한다** —
+    "지난달 것을 받겠다" 는데 7일 창에 걸려 빈 파일이 나오면 안 된다."""
+    from face_anonymizer import events
+    d = tmp_path / "ev"
+    d.mkdir()
+    from face_anonymizer import timefmt
+    for day in ("2026-06-01", "2026-08-16", "2026-08-17", "2026-08-18"):
+        ts = timefmt.day_range(day, day)[0] + 36000        # 그날 오전 10시
+        (d / f"{day}.jsonl").write_text(
+            '{"at":"%sT10:00:00+09:00","ts":%f,"mode":"api",'
+            '"event":"job.finished","job":"j","name":"%s.mp4"}\n' % (day, ts, day),
+            encoding="utf-8")
+    monkeypatch.setattr(events, "DIR", str(d))
+
+    # 날짜를 안 주면 최근 7일 파일만 연다
+    assert len(events.files()) == 4          # 파일이 4개뿐이라 다 들어온다
+    assert [os.path.basename(p) for p in
+            events.files(from_day="2026-06-01", to_day="2026-06-01")] \
+        == ["2026-06-01.jsonl"]
+
+    rows = events.read(from_day="2026-06-01", to_day="2026-06-01", limit=10)
+    assert [r["name"] for r in rows] == ["2026-06-01.mp4"]
+
+
+def test_the_day_list_only_offers_days_that_exist(tmp_path, monkeypatch):
+    """없는 날을 골라 놓고 "왜 비었지" 하지 않게."""
+    from face_anonymizer import events
+    monkeypatch.setattr(events, "DIR", str(tmp_path / "ev"))
+    events.emit("job.finished", job="a", name="x.mp4")
+    assert events.days() == [timefmt_today()]
+
+
+def timefmt_today():
+    import time as _t
+    from face_anonymizer import timefmt
+    return timefmt.day_of(_t.time())
+
+
+def test_export_respects_the_date_range(client, tmp_path, monkeypatch):
+    """내보내기도 화면과 같은 기간을 본다 — 보이는 것과 받는 것이 같아야 한다."""
+    from face_anonymizer import events
+    monkeypatch.setattr(events, "DIR", str(tmp_path / "ev"))
+    events.emit("job.finished", job="a", name="오늘.mp4", batch="kbs", seconds=1)
+
+    today = timefmt_today()
+    body = client.get(f"/api/export.csv?from_day={today}&to_day={today}") \
+        .content.decode("utf-8-sig")
+    assert "오늘.mp4" in body
+
+    empty = client.get("/api/export.csv?from_day=2000-01-01&to_day=2000-01-02") \
+        .content.decode("utf-8-sig")
+    assert "오늘.mp4" not in empty
+    assert empty.splitlines()[0].startswith("시각,")     # 열 이름은 남는다
