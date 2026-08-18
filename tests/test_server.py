@@ -1356,3 +1356,105 @@ def test_a_folder_is_not_finished_while_review_is_pending(client, make_video,
     j.batch = "kbs"
     b = jobsmod.batches([j])[0]
     assert b["remain"] == 1 and b["percent"] == 0 and not b["finished_at"]
+
+
+# ---------------------------------------------------------------------------
+# 검수 흐름의 구멍들 (docs/issues/010 §후속)
+
+
+def test_review_is_never_swept_away_by_ttl(client, make_video, monkeypatch):
+    """**밤에 300건 돌려 놓고 아침에 오면 검수 목록이 비어 있으면 안 된다.**
+
+    TTL 정리는 status 로 기간을 고르는데 review 가 그 목록에 없어서 일반
+    TTL(기본 2시간)을 탔다. 지워지는 것은 "사람이 봐야 한다" 는 사실 그 자체이고,
+    결과물은 버킷에 남아 납품 폴더에 섞인다.
+    """
+    from face_anonymizer.service import jobs as jobsmod
+    monkeypatch.setattr(config, "JOB_TTL", 1)          # 1초면 끝난 건 다 지워진다
+    jid, _s = _no_face_job(client, make_video, monkeypatch)
+    j = jobsmod.find_job(jid)
+    j.finished = time.time() - 3600                    # 한 시간 전에 끝난 것으로
+
+    jobsmod.sweep()
+
+    assert client.get(f"/api/jobs/{jid}").json()["status"] == "review"
+
+
+def test_review_ttl_can_be_turned_on_deliberately(client, make_video,
+                                                  monkeypatch):
+    """영구 보관이 기본이지만, 운영이 원하면 기간을 줄 수 있어야 한다."""
+    from face_anonymizer.service import jobs as jobsmod
+    monkeypatch.setattr(config, "REVIEW_TTL", 1)
+    jid, _s = _no_face_job(client, make_video, monkeypatch)
+    j = jobsmod.find_job(jid)
+    j.finished = time.time() - 3600
+
+    jobsmod.sweep()
+
+    assert client.get(f"/api/jobs/{jid}").status_code == 404
+
+
+def test_a_rejected_file_can_be_submitted_again(client, monkeypatch):
+    """반려의 유일한 후속 조치가 막혀 있으면 안 된다.
+
+    반려해도 버킷의 결과물은 지우지 않는다(되돌릴 수 없으므로). 그런데
+    ``skip_processed`` 는 결과물이 있으면 '이미 처리됨' 으로 거른다. 그대로 두면
+    **반려 → 설정 바꿔 재제출 → 409** 가 되어 다시 돌릴 방법이 없다.
+    """
+    from face_anonymizer.service import jobs as jobsmod
+    j = jobsmod.Job(id="r1", name="a.mp4", params={}, workdir="/tmp/r1",
+                    status="failed", s3_key="kbs/a.mp4",
+                    s3_output="out/kbs_deid/a_deid.mp4",
+                    error={"code": "review_rejected"})
+    with jobsmod.LOCK:
+        jobsmod.JOBS["r1"] = j
+    try:
+        assert "kbs/a.mp4" in jobsmod.rejected_inputs()
+    finally:
+        with jobsmod.LOCK:
+            jobsmod.JOBS.pop("r1", None)
+
+
+def test_only_review_rejections_are_exempt(client):
+    """아무 실패나 빼 주면 '이미 처리됨' 걸러내기가 통째로 무력해진다."""
+    from face_anonymizer.service import jobs as jobsmod
+    j = jobsmod.Job(id="r2", name="a.mp4", params={}, workdir="/tmp/r2",
+                    status="failed", s3_key="kbs/b.mp4",
+                    error={"code": "gpu_out_of_memory"})
+    with jobsmod.LOCK:
+        jobsmod.JOBS["r2"] = j
+    try:
+        assert "kbs/b.mp4" not in jobsmod.rejected_inputs()
+    finally:
+        with jobsmod.LOCK:
+            jobsmod.JOBS.pop("r2", None)
+
+
+def test_review_still_counts_after_a_restart(client, make_video, monkeypatch):
+    """재시작 뒤 검수 배지가 0 인데 탭을 열면 목록이 나오면 안 된다.
+
+    counts() 는 메모리만 본다(폴링 경로라 디스크를 훑을 수 없다). 그래서 재시작
+    복구가 review 도 메모리에 올려 줘야 숫자와 목록이 같은 말을 한다.
+    """
+    from face_anonymizer.service import jobs as jobsmod
+    jid, _s = _no_face_job(client, make_video, monkeypatch)
+    with jobsmod.LOCK:                       # 재시작을 흉내 낸다
+        jobsmod.JOBS.clear()
+    assert client.get("/api/status").json()["counts"]["review"] == 0
+
+    worker.resume_orphans()
+
+    assert client.get("/api/status").json()["counts"]["review"] == 1
+    assert len(client.get("/api/jobs?status=review").json()) == 1
+
+
+def test_progress_counts_nothing_until_a_folder_is_chosen(client):
+    """**사람이 고른 적 없는 숫자를 보여 주면 안 된다.**
+
+    예전에는 인자 없이 부르면 설정에 박힌 루트 밑을 통째로 훑어서 버킷의 모든
+    폴더가 화면에 나왔고, 그 범위를 화면에서 바꿀 방법이 없었다.
+    """
+    r = client.get("/api/s3/progress")
+    assert r.status_code in (200, 404)       # S3 미설정이면 404
+    if r.status_code == 200:
+        assert r.json()["folders"] == [] and r.json()["prefixes"] == []

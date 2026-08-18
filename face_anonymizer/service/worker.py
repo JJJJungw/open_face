@@ -391,10 +391,13 @@ def run(job_id):
         # 처리에서 디스크가 먼저 찬다(docs/issues/001). 다운로드 라우트가
         # "로컬에 없으면 S3 로 302" 이므로 잃는 것이 없다. 직접 업로드는
         # 로컬이 유일한 사본이라 건드리지 않는다.
-        # 검수 대기 중인 것은 남긴다. 사람이 확인하려면 파일이 있어야 하고,
-        # S3 로 302 시키면 되지만 직접 업로드한 건은 로컬이 유일한 사본이다.
-        if (j.status == "done" and j.s3_key and j.s3_output
-                and not config.KEEP_LOCAL):
+        # 검수 대기라고 로컬을 붙들지 않는다. 다운로드 라우트가 "로컬에 없으면
+        # S3 로 302" 라서 검수하는 사람은 그대로 볼 수 있다. 붙들고 있으면
+        # 검수가 밀린 만큼 디스크가 차고, 결국 새 작업 제출이 거부된다
+        # (docs/issues/001 이 이 형태로 되살아난다).
+        #
+        # 직접 업로드분은 원래대로 남긴다 — 로컬이 유일한 사본이다.
+        if j.s3_key and j.s3_output and not config.KEEP_LOCAL:
             jobs.drop_media(j, "S3 업로드 완료")
     except (JobCancelled, s3mod.TransferAborted):
         with jobs.LOCK:

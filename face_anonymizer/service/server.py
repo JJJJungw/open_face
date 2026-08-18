@@ -24,7 +24,7 @@ import threading
 import time
 from contextlib import asynccontextmanager
 
-from fastapi import Body, FastAPI, Request, Response
+from fastapi import Body, FastAPI, Query, Request, Response
 from fastapi.responses import FileResponse, HTMLResponse, RedirectResponse
 
 from .. import events, logsetup, timefmt
@@ -126,25 +126,44 @@ def metrics_endpoint():
 
 
 @app.get("/api/s3/progress")
-def s3_progress(prefix: str = ""):
-    """입력 폴더별 진척률. 큐가 아니라 **버킷** 기준이다.
+def s3_progress(prefix: list[str] = Query(default=[])):
+    """고른 폴더의 진척률. 큐가 아니라 **버킷** 기준이다.
 
     큐 지표는 지금 들어와 있는 것만 안다. 데이터셋을 통째로 돌리는 작업에서
     정작 궁금한 건 전체 중 얼마나 남았는지이고, 그건 결과 버킷에 있다.
+
+    **고르지 않으면 아무것도 세지 않는다.** 예전에는 인자 없이 부르면 설정에
+    박힌 루트 프리픽스 밑을 통째로 훑어서, 버킷에 있는 모든 폴더가 화면에
+    나왔다. 그 범위를 화면에서 바꿀 방법이 없었고 — 즉 사람이 고른 적이 없는
+    숫자였다. 지금 작업하는 폴더가 무엇인지는 사람만 안다.
+
+    폴더는 여럿 고를 수 있다(``?prefix=a/&prefix=b/``). 한 번에 여러 방송사를
+    돌리는 일이 흔해서, 하나만 고르게 하면 화면을 오가며 봐야 한다.
     """
     store = s3mod.get_store()
     if store is None:
         raise errors.S3_NOT_CONFIGURED()
-    if ".." in prefix:
-        raise errors.INVALID_KEY(prefix)
+    picked = [p for p in (prefix or []) if p]
+    for p in picked:
+        if ".." in p:
+            raise errors.INVALID_KEY(p)
+    rows = []
     try:
-        rows = metrics.folder_progress(store, prefix or store.root_prefix)
+        for p in picked:
+            rows += metrics.folder_progress(store, p)
     except s3mod.S3Error as e:
         raise (e.problem or errors.S3_UPSTREAM)(str(e)) from e
-    return {"prefix": prefix, "output_prefix": store.output_prefix,
-            "folders": rows,
-            "total": sum(r["total"] for r in rows),
-            "done": sum(r["done"] for r in rows)}
+    # 같은 폴더를 두 번 고르거나 상위·하위를 같이 골라도 한 줄만 남긴다.
+    seen, uniq = set(), []
+    for r in rows:
+        if r["prefix"] not in seen:
+            seen.add(r["prefix"])
+            uniq.append(r)
+    uniq.sort(key=lambda x: -x["total"])
+    return {"prefixes": picked, "output_prefix": store.output_prefix,
+            "root_prefix": store.root_prefix, "folders": uniq,
+            "total": sum(r["total"] for r in uniq),
+            "done": sum(r["done"] for r in uniq)}
 
 
 @app.get("/api/health")
@@ -397,7 +416,7 @@ async def create_jobs(request: Request):
         store = s3mod.get_store()
         if store is not None:
             try:
-                done = store.processed_keys()
+                done = store.processed_keys() - jobs.rejected_inputs()
             except s3mod.S3Error as e:
                 raise (e.problem or errors.S3_UPSTREAM)(str(e)) from e
             fresh = []
@@ -684,11 +703,6 @@ def review_job(jid: str, body: dict = Body(default={})):
                 action=action, note=note or None,
                 codes=[i.get("code") for i in (j.review or [])],
                 s3_output=j.s3_output or None)
-    # 승인한 뒤에는 원래 정리 정책으로 돌아간다 — 검수 때문에 붙들고 있던
-    # 로컬 사본을 계속 두면 대량 처리에서 디스크가 먼저 찬다(docs/issues/001).
-    if (action == "approve" and j.s3_key and j.s3_output
-            and not config.KEEP_LOCAL):
-        jobs.drop_media(j, "검수 승인")
     return jobs.snapshot(j, 0)
 
 

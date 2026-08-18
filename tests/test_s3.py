@@ -700,3 +700,29 @@ def test_worker_callback_aborts_when_cancel_is_requested(s3client, monkeypatch):
     j.cancel = True
     with pytest.raises(s3mod.TransferAborted):
         seen["cb"](1024)
+
+
+def test_review_does_not_hold_the_local_copy_hostage(s3client, monkeypatch):
+    """검수 대기라고 로컬을 붙들지 않는다.
+
+    붙들면 검수가 밀린 만큼 디스크가 차고, 결국 새 작업 제출이 거부된다
+    (docs/issues/001 이 그 형태로 되살아난다). 다운로드가 "로컬에 없으면 S3 로
+    302" 라서 검수하는 사람은 그대로 볼 수 있다 — 붙들 이유가 없다.
+    """
+    class Blind:
+        def detect_batch(self, frames, imgsz=None, conf=None, iou=None):
+            return [[] for _ in frames]
+    from face_anonymizer import VideoAnonymizer
+    from face_anonymizer.service import worker
+    anon = VideoAnonymizer(detector=Blind())
+    monkeypatch.setattr(worker, "get_anonymizer", lambda: anon)
+    monkeypatch.setattr(worker, "_anonymizer", anon)
+
+    jid = s3client.post("/api/jobs", data={"s3_key": KEY}).json()["accepted"][0]["id"]
+    s = wait(s3client, jid, timeout=60)
+
+    assert s["status"] == "review"
+    assert workdir_files(s3client, jid) == ["job.json"]
+    # 그래도 볼 수 있어야 판정할 수 있다
+    r = s3client.get(f"/api/jobs/{jid}/download", follow_redirects=False)
+    assert r.status_code == 302

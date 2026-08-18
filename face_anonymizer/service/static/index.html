@@ -381,7 +381,18 @@
         <div class="grid2">
           <section class="card">
             <h2>폴더별 진척률
+              <button class="ghost" id="pickbtn" onclick="togglePicker()"
+                      style="margin-left:auto">폴더 고르기</button>
               <span class="cnt" id="progsum"></span></h2>
+            <div id="pickpanel" class="pad" hidden>
+              <div class="bar" style="border:0;padding:0 0 10px">
+                <div class="crumb" id="pickcrumb"></div>
+                <span class="n" id="picksum"></span>
+                <button class="ghost" onclick="clearPicks()">선택 해제</button>
+                <button onclick="applyPicks()">적용</button>
+              </div>
+              <div id="picklist"></div>
+            </div>
             <div id="prog" class="pad"><div class="empty">불러오는 중…</div></div>
           </section>
           <section class="card">
@@ -848,11 +859,98 @@ $('#lgq').oninput = () => logFilterChanged(250);   // 한 글자마다 때리지
 $('#lggroup').onchange = renderLogs;               // 이미 받은 줄을 다시 그리기만
 $('#lglive').onchange = scheduleLogs;
 
+// ---------------------------------------------------------------------------
+// 진척률을 볼 폴더 — **사람이 고른다.**
+//
+// 예전에는 설정(FA_S3_PREFIX)에 박힌 루트 밑을 통째로 훑어서 버킷에 있는 폴더가
+// 전부 나왔다. 화면에서 그 범위를 바꿀 방법이 없었으니, 보고 있던 숫자는 사람이
+// 고른 적 없는 숫자였다. 지금 무슨 폴더를 돌리는지는 사람만 안다.
+//
+// 고른 것은 브라우저에 남긴다 — 새로고침마다 다시 고르게 하면 안 쓰게 된다.
+// 서버에 두지 않는 이유는 이게 **보는 사람의 취향**이지 서비스 설정이 아니어서다.
+let picks = [], pickTemp = [], pickAt = '';
+
+function loadPicks() {
+  try { picks = JSON.parse(localStorage.getItem('fa.picks') || '[]') || []; }
+  catch (e) { picks = []; }
+}
+function savePicks() {
+  try { localStorage.setItem('fa.picks', JSON.stringify(picks)); } catch (e) {}
+}
+
+function progressQuery() {
+  return picks.map(p => 'prefix=' + encodeURIComponent(p)).join('&');
+}
+
+function togglePicker(force) {
+  const el = $('#pickpanel');
+  const open = force === true ? true : el.hidden;
+  el.hidden = !open;
+  $('#pickbtn').textContent = open ? '닫기' : '폴더 고르기';
+  if (open) { pickTemp = picks.slice(); pickAt = ''; loadPickList(); }
+}
+
+async function loadPickList(prefix) {
+  pickAt = prefix != null ? prefix : pickAt;
+  const r = await fetch('/api/s3/objects?prefix=' + encodeURIComponent(pickAt))
+    .then(r => r.ok ? r.json() : null).catch(() => null);
+  if (!r) { $('#picklist').innerHTML =
+    '<div class="empty">S3 가 연결되지 않았습니다</div>'; return; }
+  // 빵부스러기 — 어디를 보고 있는지. 하위 폴더가 있으면 더 들어갈 수 있다.
+  const segs = (pickAt || '').split('/').filter(Boolean);
+  const crumb = ['<a onclick="loadPickList(\'\')">버킷</a>']
+    .concat(segs.map((sg, i) =>
+      `<a onclick="loadPickList('${segs.slice(0, i + 1).join('/')}/')">${sg}</a>`))
+    .join('<span class="sep">/</span>');
+  $('#pickcrumb').innerHTML = crumb;
+  const rows = (r.folders || []).map(f => {
+    const on = pickTemp.includes(f);
+    const name = f.replace(pickAt, '').replace(/\/$/, '');
+    return `<div class="prow" style="cursor:default">
+      <label class="toggle" style="flex:1">
+        <input type="checkbox" ${on ? 'checked' : ''}
+               onchange="pickToggle('${f}', this.checked)">
+        <span><b>${name}</b></span></label>
+      <button class="ghost" onclick="loadPickList('${f}')">열기</button>
+    </div>`;
+  }).join('');
+  $('#picklist').innerHTML = rows ||
+    '<div class="empty">하위 폴더가 없습니다. 이 폴더를 그대로 고르세요</div>';
+  if (!rows && pickAt) {
+    const on = pickTemp.includes(pickAt);
+    $('#picklist').innerHTML += `<div class="pad"><label class="toggle">
+      <input type="checkbox" ${on ? 'checked' : ''}
+             onchange="pickToggle('${pickAt}', this.checked)">
+      <span>이 폴더(<b>${pickAt}</b>) 집계에 넣기</span></label></div>`;
+  }
+  pickSummary();
+}
+
+function pickToggle(prefix, on) {
+  pickTemp = pickTemp.filter(p => p !== prefix);
+  if (on) pickTemp.push(prefix);
+  pickSummary();
+}
+function pickSummary() {
+  $('#picksum').textContent = pickTemp.length ? `${pickTemp.length}개 선택됨`
+                                              : '선택된 폴더 없음';
+}
+function clearPicks() { pickTemp = []; loadPickList(); }
+function applyPicks() {
+  picks = pickTemp.slice();
+  savePicks();
+  togglePicker();
+  loadOverview();
+}
+
 async function loadOverview() {
   lastOverview = Date.now();
   const [m, p, b] = await Promise.all([
     fetch('/api/metrics').then(r => r.json()).catch(() => null),
-    fetch('/api/s3/progress').then(r => r.ok ? r.json() : null).catch(() => null),
+    picks.length
+      ? fetch('/api/s3/progress?' + progressQuery())
+          .then(r => r.ok ? r.json() : null).catch(() => null)
+      : Promise.resolve(null),
     fetch('/api/batches').then(r => r.ok ? r.json() : null).catch(() => null),
   ]);
   renderProgress(p);
@@ -882,9 +980,19 @@ function renderBatches(b) {
 
 function renderProgress(p) {
   const el = $('#prog');
+  // 고르기 전에는 아무것도 세지 않는다. 예전에는 설정에 박힌 루트 밑을 통째로
+  // 훑어서 버킷의 모든 폴더가 나왔는데, 그 범위를 화면에서 바꿀 방법이 없었다 —
+  // 즉 사람이 고른 적 없는 숫자였다. 지금 무슨 폴더를 돌리는지는 사람만 안다.
+  if (!picks.length) {
+    $('#progsum').textContent = '';
+    el.innerHTML = `<div class="empty">볼 폴더를 고르지 않았습니다<br>
+      <button class="ghost" style="margin-top:10px"
+              onclick="togglePicker(true)">폴더 고르기</button></div>`;
+    return;
+  }
   if (!p || !p.folders || !p.folders.length) {
     $('#progsum').textContent = '';
-    el.innerHTML = '<div class="empty">집계할 입력이 없습니다</div>';
+    el.innerHTML = '<div class="empty">고른 폴더에 영상이 없습니다</div>';
     return;
   }
   $('#progsum').textContent = `${p.done} / ${p.total}건`;
@@ -1476,6 +1584,7 @@ fetch('/api/defaults').then(r => r.json()).then(d => {
     `(기본 ${d.method} · conf ${d.conf} · ${d.imgsz} · batch ${d.batch_size})`;
 }).catch(() => { $('#dsum').textContent = '(서버 기본값을 쓰지 못함)'; });
 
+loadPicks();
 setFilter('active');
 go2('browser');
 loadObjects();

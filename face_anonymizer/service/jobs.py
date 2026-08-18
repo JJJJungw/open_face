@@ -268,7 +268,12 @@ def sweep():
     now, removed = time.time(), 0
     for j in all_jobs():
         # 실패·취소는 원인을 보려면 남아 있어야 한다.
-        ttl = config.FAILED_TTL if j.status in ("failed", "cancelled") else config.JOB_TTL
+        # 검수 대기는 **사람을 기다리는 중**이라 시간으로 지우면 안 된다.
+        if j.status == "review":
+            ttl = config.REVIEW_TTL
+        else:
+            ttl = (config.FAILED_TTL if j.status in ("failed", "cancelled")
+                   else config.JOB_TTL)
         if not ttl:
             continue
         if j.finished and now - j.finished > ttl:
@@ -329,6 +334,13 @@ def recover_orphans():
             j.finished = time.time()
             save_job(j)
             failed += 1
+        elif j.status == "review":
+            # 워커에 다시 넣지 않는다 — 처리는 이미 끝났고 남은 것은 사람의
+            # 확인이다. 다만 **집계에는 잡혀야 한다.** counts() 는 메모리만
+            # 보므로, 여기서 안 올리면 재시작 뒤 검수 배지가 0 인데 탭을 열면
+            # 목록이 나오는 상태가 된다.
+            with LOCK:
+                JOBS[j.id] = j
         elif j.status == "queued":
             # 시도 횟수는 올리지 않는다. 재시작은 이 작업이 실패한 것이 아니다 —
             # 여기서 세면 배포를 몇 번 하는 것만으로 재시도가 소진된다.
@@ -443,6 +455,21 @@ def recent_stats(limit=5):
     if rf:
         out["realtime_factor"] = round(sum(rf) / len(rf), 2)
     return out
+
+
+def rejected_inputs():
+    """검수에서 **반려된** 작업의 입력 키들.
+
+    반려해도 버킷의 결과물은 지우지 않는다(되돌릴 수 없으므로). 그런데
+    ``skip_processed`` 는 결과 버킷에 물건이 있으면 '이미 처리됨' 으로 거른다.
+    그대로 두면 **반려 → 설정 바꿔 재제출 → 409 already_processed** 가 되어,
+    반려의 유일한 후속 조치가 막힌다.
+
+    그래서 반려된 입력은 그 대조에서 빼 준다. 다시 돌리면 결과물이 덮어써진다.
+    """
+    return {j.s3_key for j in all_jobs()
+            if j.s3_key and j.status == "failed"
+            and (j.error or {}).get("code") == "review_rejected"}
 
 
 def cancel_all():
