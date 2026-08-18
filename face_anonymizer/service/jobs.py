@@ -457,6 +457,72 @@ def recent_stats(limit=5):
     return out
 
 
+# ── 진척률을 볼 폴더 ────────────────────────────────────────────────────────
+#
+# **제출한 폴더가 곧 진척률 대상이다.** 사람이 어느 폴더를 돌릴지 고르는 행위는
+# 이미 파일 브라우저에서 일어났다. 거기서 고른 것과 진척률에서 보는 것이 다르면
+# 두 번 고르는 셈이고, 둘이 어긋나면 화면이 엉뚱한 폴더의 숫자를 보여 준다.
+#
+# 작업 목록에서 뽑지 않고 따로 남기는 이유는 **TTL 때문**이다. 완료된 작업은
+# 2시간 뒤 정리되는데, 그러면 어제 돌린 폴더의 진척률이 화면에서 사라진다.
+# 900건짜리 데이터셋은 며칠에 걸쳐 도는 일이라 그게 곧 쓸모 없음이 된다.
+TRACK_FILE = "_tracked.json"
+
+
+def _track_path():
+    return os.path.join(config.JOBS_DIR, TRACK_FILE)
+
+
+def tracked_prefixes():
+    """진척률을 보여 줄 입력 폴더들. 최근에 제출한 것이 앞."""
+    try:
+        with open(_track_path(), encoding="utf-8") as f:
+            rows = json.load(f)
+    except (OSError, ValueError):
+        return []
+    return [r for r in rows if isinstance(r, str)]
+
+
+def track_prefix(key_or_prefix):
+    """제출한 폴더를 진척률 대상에 넣는다. 이미 있으면 맨 앞으로만 올린다.
+
+    실패해도 조용히 넘어간다 — 진척률 화면 하나 때문에 제출이 깨지면 안 된다.
+    """
+    p = key_or_prefix
+    if not p:
+        return
+    if not p.endswith("/"):
+        p = p.rsplit("/", 1)[0] + "/" if "/" in p else ""
+    if not p:
+        return
+    with LOCK:
+        rows = [r for r in tracked_prefixes() if r != p]
+        rows.insert(0, p)
+        del rows[64:]                 # 화면에 그릴 수 있는 만큼만
+        try:
+            os.makedirs(config.JOBS_DIR, exist_ok=True)
+            tmp = _track_path() + ".tmp"
+            with open(tmp, "w", encoding="utf-8") as f:
+                json.dump(rows, f, ensure_ascii=False)
+            os.replace(tmp, _track_path())
+        except OSError as e:
+            log.warning("진척률 폴더 목록을 쓰지 못했다: %s", e)
+
+
+def untrack_prefix(prefix):
+    """진척률 목록에서 뺀다. 버킷은 건드리지 않는다."""
+    with LOCK:
+        rows = [r for r in tracked_prefixes() if r != prefix]
+        try:
+            tmp = _track_path() + ".tmp"
+            with open(tmp, "w", encoding="utf-8") as f:
+                json.dump(rows, f, ensure_ascii=False)
+            os.replace(tmp, _track_path())
+        except OSError as e:
+            log.warning("진척률 폴더 목록을 쓰지 못했다: %s", e)
+    return rows
+
+
 def rejected_inputs():
     """검수에서 **반려된** 작업의 입력 키들.
 

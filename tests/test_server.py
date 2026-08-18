@@ -1448,13 +1448,64 @@ def test_review_still_counts_after_a_restart(client, make_video, monkeypatch):
     assert len(client.get("/api/jobs?status=review").json()) == 1
 
 
-def test_progress_counts_nothing_until_a_folder_is_chosen(client):
-    """**사람이 고른 적 없는 숫자를 보여 주면 안 된다.**
+def test_progress_shows_nothing_before_anything_was_submitted(client):
+    """**돌린 적 없는 폴더의 숫자를 보여 주면 안 된다.**
 
-    예전에는 인자 없이 부르면 설정에 박힌 루트 밑을 통째로 훑어서 버킷의 모든
-    폴더가 화면에 나왔고, 그 범위를 화면에서 바꿀 방법이 없었다.
+    예전에는 인자 없이 부르면 설정에 박힌 루트 밑을 통째로 훑어서, 한 번도
+    제출한 적 없는 폴더까지 화면을 채웠다. 그 범위를 화면에서 바꿀 방법도 없었다.
     """
     r = client.get("/api/s3/progress")
     assert r.status_code in (200, 404)       # S3 미설정이면 404
     if r.status_code == 200:
         assert r.json()["folders"] == [] and r.json()["prefixes"] == []
+
+
+def test_submitting_a_folder_is_what_starts_tracking_it(client, tmp_path,
+                                                        monkeypatch):
+    """**제출이 곧 선택이다.**
+
+    어느 폴더를 돌릴지는 파일 브라우저에서 이미 골랐다. 진척률 화면에서 또
+    고르게 하면 두 번 고르는 셈이고, 둘이 어긋나면 엉뚱한 폴더의 숫자가 뜬다.
+    """
+    from face_anonymizer.service import jobs as jobsmod
+    monkeypatch.setattr(config, "JOBS_DIR", str(tmp_path))
+
+    assert jobsmod.tracked_prefixes() == []
+    jobsmod.track_prefix("v1/input/kbs/K_00001.mp4")     # 키를 주면 폴더로 접는다
+    assert jobsmod.tracked_prefixes() == ["v1/input/kbs/"]
+
+    jobsmod.track_prefix("v1/input/mbc/M_00001.mp4")
+    # 최근에 제출한 것이 앞 — 지금 돌리는 폴더가 위에 보여야 한다
+    assert jobsmod.tracked_prefixes() == ["v1/input/mbc/", "v1/input/kbs/"]
+
+    jobsmod.track_prefix("v1/input/kbs/K_00002.mp4")     # 같은 폴더 다시
+    assert jobsmod.tracked_prefixes() == ["v1/input/kbs/", "v1/input/mbc/"]
+
+
+def test_tracking_survives_the_ttl_sweep(client, tmp_path, monkeypatch):
+    """작업 목록에서 뽑지 않고 따로 남기는 이유다.
+
+    완료된 작업은 2시간 뒤 정리되는데, 목록에서 뽑으면 어제 돌린 폴더의
+    진척률이 화면에서 사라진다. 900건짜리는 며칠에 걸쳐 도는 일이라 그게 곧
+    쓸모 없음이 된다.
+    """
+    from face_anonymizer.service import jobs as jobsmod
+    monkeypatch.setattr(config, "JOBS_DIR", str(tmp_path))
+    jobsmod.track_prefix("v1/input/kbs/a.mp4")
+    with jobsmod.LOCK:
+        jobsmod.JOBS.clear()
+    jobsmod.sweep()
+    assert jobsmod.tracked_prefixes() == ["v1/input/kbs/"]
+
+
+def test_a_finished_folder_can_be_taken_off_the_list(client, tmp_path,
+                                                     monkeypatch):
+    """다 끝난 폴더를 계속 띄워 두면 지금 돌고 있는 것이 안 보인다."""
+    from face_anonymizer.service import jobs as jobsmod
+    monkeypatch.setattr(config, "JOBS_DIR", str(tmp_path))
+    jobsmod.track_prefix("v1/input/kbs/a.mp4")
+    jobsmod.track_prefix("v1/input/mbc/a.mp4")
+
+    assert client.delete("/api/s3/progress?prefix=v1/input/kbs/").status_code == 204
+
+    assert jobsmod.tracked_prefixes() == ["v1/input/mbc/"]

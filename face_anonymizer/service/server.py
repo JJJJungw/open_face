@@ -143,7 +143,9 @@ def s3_progress(prefix: list[str] = Query(default=[])):
     store = s3mod.get_store()
     if store is None:
         raise errors.S3_NOT_CONFIGURED()
-    picked = [p for p in (prefix or []) if p]
+    # 인자가 없으면 **지금까지 제출한 폴더들**을 본다. 예전에는 설정에 박힌
+    # 루트 밑을 통째로 훑어서, 한 번도 돌린 적 없는 폴더까지 화면에 나왔다.
+    picked = [p for p in (prefix or []) if p] or jobs.tracked_prefixes()
     for p in picked:
         if ".." in p:
             raise errors.INVALID_KEY(p)
@@ -164,6 +166,17 @@ def s3_progress(prefix: list[str] = Query(default=[])):
             "root_prefix": store.root_prefix, "folders": uniq,
             "total": sum(r["total"] for r in uniq),
             "done": sum(r["done"] for r in uniq)}
+
+
+@app.delete("/api/s3/progress", status_code=204)
+def untrack(prefix: str):
+    """진척률 목록에서 폴더 하나를 뺀다. **버킷은 건드리지 않는다.**
+
+    다 끝난 폴더를 계속 띄워 두면 지금 돌고 있는 것이 안 보인다. 다시 제출하면
+    자동으로 돌아온다.
+    """
+    jobs.untrack_prefix(prefix)
+    return Response(status_code=204)
 
 
 @app.get("/api/health")
@@ -471,6 +484,10 @@ async def create_jobs(request: Request):
                 _job, snap = worker.enqueue(name, dict(params), s3_key=key,
                                             batch=batch_of(key, prefixes))
                 accepted.append({"id": snap["id"], "name": name, "s3_key": key})
+                # **제출한 폴더가 곧 진척률 대상이다.** 어느 폴더를 돌릴지는
+                # 여기서 이미 골랐다 — 진척률 화면에서 또 고르게 하면 두 번
+                # 고르는 셈이고, 둘이 어긋나면 엉뚱한 폴더의 숫자가 뜬다.
+                jobs.track_prefix(key)
             except errors.ProblemError as e:
                 rejected.append({"s3_key": key, "error": e.body()})
 

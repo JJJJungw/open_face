@@ -381,18 +381,7 @@
         <div class="grid2">
           <section class="card">
             <h2>폴더별 진척률
-              <button class="ghost" id="pickbtn" onclick="togglePicker()"
-                      style="margin-left:auto">폴더 고르기</button>
               <span class="cnt" id="progsum"></span></h2>
-            <div id="pickpanel" class="pad" hidden>
-              <div class="bar" style="border:0;padding:0 0 10px">
-                <div class="crumb" id="pickcrumb"></div>
-                <span class="n" id="picksum"></span>
-                <button class="ghost" onclick="clearPicks()">선택 해제</button>
-                <button onclick="applyPicks()">적용</button>
-              </div>
-              <div id="picklist"></div>
-            </div>
             <div id="prog" class="pad"><div class="empty">불러오는 중…</div></div>
           </section>
           <section class="card">
@@ -859,87 +848,14 @@ $('#lgq').oninput = () => logFilterChanged(250);   // 한 글자마다 때리지
 $('#lggroup').onchange = renderLogs;               // 이미 받은 줄을 다시 그리기만
 $('#lglive').onchange = scheduleLogs;
 
-// ---------------------------------------------------------------------------
-// 진척률을 볼 폴더 — **사람이 고른다.**
-//
-// 예전에는 설정(FA_S3_PREFIX)에 박힌 루트 밑을 통째로 훑어서 버킷에 있는 폴더가
-// 전부 나왔다. 화면에서 그 범위를 바꿀 방법이 없었으니, 보고 있던 숫자는 사람이
-// 고른 적 없는 숫자였다. 지금 무슨 폴더를 돌리는지는 사람만 안다.
-//
-// 고른 것은 브라우저에 남긴다 — 새로고침마다 다시 고르게 하면 안 쓰게 된다.
-// 서버에 두지 않는 이유는 이게 **보는 사람의 취향**이지 서비스 설정이 아니어서다.
-let picks = [], pickTemp = [], pickAt = '';
-
-function loadPicks() {
-  try { picks = JSON.parse(localStorage.getItem('fa.picks') || '[]') || []; }
-  catch (e) { picks = []; }
-}
-function savePicks() {
-  try { localStorage.setItem('fa.picks', JSON.stringify(picks)); } catch (e) {}
-}
-
-function progressQuery() {
-  return picks.map(p => 'prefix=' + encodeURIComponent(p)).join('&');
-}
-
-function togglePicker(force) {
-  const el = $('#pickpanel');
-  const open = force === true ? true : el.hidden;
-  el.hidden = !open;
-  $('#pickbtn').textContent = open ? '닫기' : '폴더 고르기';
-  if (open) { pickTemp = picks.slice(); pickAt = ''; loadPickList(); }
-}
-
-async function loadPickList(prefix) {
-  pickAt = prefix != null ? prefix : pickAt;
-  const r = await fetch('/api/s3/objects?prefix=' + encodeURIComponent(pickAt))
-    .then(r => r.ok ? r.json() : null).catch(() => null);
-  if (!r) { $('#picklist').innerHTML =
-    '<div class="empty">S3 가 연결되지 않았습니다</div>'; return; }
-  // 빵부스러기 — 어디를 보고 있는지. 하위 폴더가 있으면 더 들어갈 수 있다.
-  const segs = (pickAt || '').split('/').filter(Boolean);
-  const crumb = ['<a onclick="loadPickList(\'\')">버킷</a>']
-    .concat(segs.map((sg, i) =>
-      `<a onclick="loadPickList('${segs.slice(0, i + 1).join('/')}/')">${sg}</a>`))
-    .join('<span class="sep">/</span>');
-  $('#pickcrumb').innerHTML = crumb;
-  const rows = (r.folders || []).map(f => {
-    const on = pickTemp.includes(f);
-    const name = f.replace(pickAt, '').replace(/\/$/, '');
-    return `<div class="prow" style="cursor:default">
-      <label class="toggle" style="flex:1">
-        <input type="checkbox" ${on ? 'checked' : ''}
-               onchange="pickToggle('${f}', this.checked)">
-        <span><b>${name}</b></span></label>
-      <button class="ghost" onclick="loadPickList('${f}')">열기</button>
-    </div>`;
-  }).join('');
-  $('#picklist').innerHTML = rows ||
-    '<div class="empty">하위 폴더가 없습니다. 이 폴더를 그대로 고르세요</div>';
-  if (!rows && pickAt) {
-    const on = pickTemp.includes(pickAt);
-    $('#picklist').innerHTML += `<div class="pad"><label class="toggle">
-      <input type="checkbox" ${on ? 'checked' : ''}
-             onchange="pickToggle('${pickAt}', this.checked)">
-      <span>이 폴더(<b>${pickAt}</b>) 집계에 넣기</span></label></div>`;
-  }
-  pickSummary();
-}
-
-function pickToggle(prefix, on) {
-  pickTemp = pickTemp.filter(p => p !== prefix);
-  if (on) pickTemp.push(prefix);
-  pickSummary();
-}
-function pickSummary() {
-  $('#picksum').textContent = pickTemp.length ? `${pickTemp.length}개 선택됨`
-                                              : '선택된 폴더 없음';
-}
-function clearPicks() { pickTemp = []; loadPickList(); }
-function applyPicks() {
-  picks = pickTemp.slice();
-  savePicks();
-  togglePicker();
+// 진척률은 **제출한 폴더**를 따라간다. 화면이 범위를 정하지 않는다 —
+// 어느 폴더를 돌릴지는 파일 브라우저에서 이미 골랐고, 그 선택이 곧 이 화면의
+// 대상이다. 서버가 제출 시점에 기록하므로 여기서 넘겨줄 것이 없다.
+async function untrackFolder(prefix) {
+  if (!confirm(`'${prefix}' 를 진척률 목록에서 뺄까요?\n버킷의 파일은 그대로 두고 화면에서만 사라집니다.`))
+    return;
+  await fetch('/api/s3/progress?prefix=' + encodeURIComponent(prefix),
+              { method: 'DELETE' }).catch(() => {});
   loadOverview();
 }
 
@@ -947,10 +863,7 @@ async function loadOverview() {
   lastOverview = Date.now();
   const [m, p, b] = await Promise.all([
     fetch('/api/metrics').then(r => r.json()).catch(() => null),
-    picks.length
-      ? fetch('/api/s3/progress?' + progressQuery())
-          .then(r => r.ok ? r.json() : null).catch(() => null)
-      : Promise.resolve(null),
+    fetch('/api/s3/progress').then(r => r.ok ? r.json() : null).catch(() => null),
     fetch('/api/batches').then(r => r.ok ? r.json() : null).catch(() => null),
   ]);
   renderProgress(p);
@@ -980,19 +893,13 @@ function renderBatches(b) {
 
 function renderProgress(p) {
   const el = $('#prog');
-  // 고르기 전에는 아무것도 세지 않는다. 예전에는 설정에 박힌 루트 밑을 통째로
-  // 훑어서 버킷의 모든 폴더가 나왔는데, 그 범위를 화면에서 바꿀 방법이 없었다 —
-  // 즉 사람이 고른 적 없는 숫자였다. 지금 무슨 폴더를 돌리는지는 사람만 안다.
-  if (!picks.length) {
-    $('#progsum').textContent = '';
-    el.innerHTML = `<div class="empty">볼 폴더를 고르지 않았습니다<br>
-      <button class="ghost" style="margin-top:10px"
-              onclick="togglePicker(true)">폴더 고르기</button></div>`;
-    return;
-  }
+  // 제출한 적 없는 폴더는 여기 나오지 않는다. 예전에는 설정에 박힌 루트 밑을
+  // 통째로 훑어서, 한 번도 돌린 적 없는 폴더까지 화면을 채웠다.
   if (!p || !p.folders || !p.folders.length) {
     $('#progsum').textContent = '';
-    el.innerHTML = '<div class="empty">고른 폴더에 영상이 없습니다</div>';
+    el.innerHTML = `<div class="empty">아직 처리한 폴더가 없습니다<br>
+      <span style="opacity:.8">파일 브라우저에서 폴더를 제출하면 여기에 나타납니다</span>
+      </div>`;
     return;
   }
   $('#progsum').textContent = `${p.done} / ${p.total}건`;
@@ -1000,7 +907,10 @@ function renderProgress(p) {
     const pc = f.percent;
     return `<div class="prow">
       <div class="t"><b>${f.name}</b>
-        <span>${f.done} / ${f.total} · 남음 ${f.remain}</span></div>
+        <span>${f.done} / ${f.total} · 남음 ${f.remain}
+          <a onclick="untrackFolder('${f.prefix}')" title="진척률 목록에서 뺍니다"
+             style="cursor:pointer;color:var(--faint);margin-left:8px">&times;</a>
+        </span></div>
       <div class="track ${pc >= 100 ? 'full' : ''}"><i style="width:${pc}%"></i></div>
     </div>`;
   }).join('');
@@ -1584,7 +1494,6 @@ fetch('/api/defaults').then(r => r.json()).then(d => {
     `(기본 ${d.method} · conf ${d.conf} · ${d.imgsz} · batch ${d.batch_size})`;
 }).catch(() => { $('#dsum').textContent = '(서버 기본값을 쓰지 못함)'; });
 
-loadPicks();
 setFilter('active');
 go2('browser');
 loadObjects();
