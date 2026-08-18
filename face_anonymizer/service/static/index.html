@@ -306,6 +306,7 @@
   .dot.ok{background:var(--good);box-shadow:0 0 0 3px rgba(12,163,12,.14)}
   .dot.run{background:var(--accent);box-shadow:0 0 0 3px var(--accent-dim);
            animation:pulse 1.5s ease-in-out infinite}
+  .dot.warn{background:var(--warning);box-shadow:0 0 0 3px rgba(250,178,25,.18)}
   .dot.err{background:var(--critical);box-shadow:0 0 0 3px rgba(208,59,59,.14)}
   @keyframes pulse{0%,100%{opacity:1}50%{opacity:.35}}
   .ringwrap{position:relative;display:flex;align-items:center;justify-content:center;
@@ -1186,11 +1187,21 @@ function hud(jobs, st) {
   const remain = (running ? 1 : 0) + queued;
   const avg = avgSeconds(st);
 
-  dot.className = 'dot ' + (running ? 'run' : 'ok');
+  // 검수 대기는 '진행중'(수행중+대기)에 안 들어간다 — 워커가 할 일이 아니라
+  // 사람이 할 일이라서다. 그런데 폴더 진척률은 검수를 '남은 것' 으로 센다.
+  // 여기서 그냥 '유휴' 라고 말해 버리면 두 화면이 다른 말을 하고, 사람은
+  // "다 됐다는데 왜 남았다고 나오지" 하고 헤맨다.
+  const review = c.review || 0;
+  dot.className = 'dot ' + (running ? 'run' : (review ? 'warn' : 'ok'));
   title.textContent = running ? `수행중 · 남은 ${remain}건`
-                              : (remain ? `대기 ${remain}건` : '유휴');
+                              : (remain ? `대기 ${remain}건`
+                                        : (review ? `검수 대기 ${review}건` : '유휴'));
   if (!running) {
-    body.innerHTML = `<div class="idle">${remain ? '곧 시작합니다' : '처리할 작업이 없습니다'}</div>
+    body.innerHTML = `<div class="idle">${
+        remain ? '곧 시작합니다'
+               : (review ? '<a onclick="setFilter(\'review\')" style="cursor:pointer;'
+                           + 'color:var(--accent-ink)">검수 화면에서 확인해 주세요</a>'
+                         : '처리할 작업이 없습니다')}</div>
       <div class="hgrid">
         <div><span>대기</span><b>${queued}건</b></div>
         <div><span>디스크</span><b>${st.free_mb != null

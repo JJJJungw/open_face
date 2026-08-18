@@ -159,6 +159,10 @@ RESULT_EXPIRED = _p(
 JOB_NOT_CANCELLABLE = _p(
     "job_not_cancellable", 409, "취소할 수 없는 상태입니다",
     "이미 끝났거나 실패한 작업입니다.")
+JOB_IN_REVIEW = _p(
+    "job_in_review", 409, "검수 대기 중인 작업입니다",
+    "취소하거나 지우는 대신 승인 또는 반려로 판정해 주세요. "
+    "판정 없이 없애면 왜 걸렸는지가 같이 사라집니다.")
 JOB_NOT_IN_REVIEW = _p(
     "job_not_in_review", 409, "검수 대기 중인 작업이 아닙니다",
     "상태가 review 인 작업만 승인하거나 반려할 수 있습니다.")

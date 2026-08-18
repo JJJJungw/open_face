@@ -663,6 +663,10 @@ def cancel_job(jid: str):
     j = jobs.find_job(jid)
     if j is None:
         raise errors.JOB_NOT_FOUND(jid)
+    if j.status == "review":
+        # 취소를 허용해도 상태는 그대로다(취소는 queued 만 즉시 바꾼다). 아무 일도
+        # 안 일어나는데 200 이 나가고, 사람은 취소했다고 믿는다.
+        raise errors.JOB_IN_REVIEW(f"status={j.status}", status=j.status)
     if j.status in ("done", "failed", "cancelled"):
         raise errors.JOB_NOT_CANCELLABLE(f"status={j.status}", status=j.status)
     with jobs.LOCK:
@@ -697,11 +701,14 @@ def review_job(jid: str, body: dict = Body(default={})):
     j = jobs.find_job(jid)
     if j is None:
         raise errors.JOB_NOT_FOUND(jid)
-    if j.status != "review":
-        raise errors.JOB_NOT_IN_REVIEW(f"status={j.status}", status=j.status)
 
     now = time.time()
+    # **확인과 변경을 한 락 안에서 한다.** 밖에서 확인하면 탭 두 개에서 동시에
+    # 누를 때 둘 다 통과해, 나중 것이 앞의 판정을 덮어쓴다 — 승인해 둔 건이
+    # 조용히 실패로 바뀔 수 있다.
     with jobs.LOCK:
+        if j.status != "review":
+            raise errors.JOB_NOT_IN_REVIEW(f"status={j.status}", status=j.status)
         j.status = "done" if action == "approve" else "failed"
         j.finished = now
         j.reviewed = {"action": action, "note": note,
@@ -733,11 +740,14 @@ def job_result(jid: str):
     j = jobs.find_job(jid)
     if j is None:
         raise errors.JOB_NOT_FOUND(jid)
-    if j.status != "done":
+    # 검수 중에도 알려 준다 — **보지 않고는 판정할 수 없다.** download 만 열어
+    # 두면 presigned URL 로 보려는 쪽이 막힌다(둘은 같은 목적의 두 경로다).
+    if j.status not in ("done", "review"):
         raise (errors.JOB_FAILED(j.error.get("detail", ""))
                if j.status == "failed"
                else errors.JOB_NOT_FINISHED(f"status={j.status}"))
     out = {"id": j.id, "name": naming.output_name(j.name),
+           "status": j.status, "review": list(j.review or ()),
            "s3_key": j.s3_output or None}
     store = s3mod.get_store()
     if j.s3_output and store is not None:
@@ -755,6 +765,10 @@ def delete_job(jid: str):
     j = jobs.find_job(jid)
     if j is None:
         raise errors.JOB_NOT_FOUND(jid)
+    if j.status == "review":
+        # 화면은 검수 카드에 삭제 버튼을 안 그리지만 API 는 열려 있었다.
+        # 판정 없이 지우면 "왜 걸렸나" 가 같이 사라진다.
+        raise errors.JOB_IN_REVIEW("판정 먼저", status=j.status)
     if j.status in ("queued", "running"):
         raise errors.JOB_NOT_CANCELLABLE(
             "진행 중이다. /cancel 로 먼저 취소하라", status=j.status)

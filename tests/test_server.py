@@ -1509,3 +1509,64 @@ def test_a_finished_folder_can_be_taken_off_the_list(client, tmp_path,
     assert client.delete("/api/s3/progress?prefix=v1/input/kbs/").status_code == 204
 
     assert jobsmod.tracked_prefixes() == ["v1/input/mbc/"]
+
+
+def test_a_review_job_cannot_be_cancelled(client, make_video, monkeypatch):
+    """취소를 받아 줘도 상태는 안 바뀐다(취소는 대기 건만 즉시 바꾼다).
+
+    아무 일도 안 일어나는데 200 이 나가면 사람은 취소했다고 믿는다. 검수 건을
+    없애는 길은 반려 하나여야 한다 — 그래야 사유가 남는다.
+    """
+    jid, _s = _no_face_job(client, make_video, monkeypatch)
+    r = client.post(f"/api/jobs/{jid}/cancel")
+    assert r.status_code == 409 and r.json()["code"] == "job_in_review"
+    assert client.get(f"/api/jobs/{jid}").json()["status"] == "review"
+
+
+def test_a_review_job_cannot_be_deleted_before_a_decision(client, make_video,
+                                                          monkeypatch):
+    """판정 없이 지우면 **왜 걸렸나가 같이 사라진다.**
+
+    화면은 검수 카드에 삭제 버튼을 안 그리지만 API 는 열려 있었다.
+    """
+    jid, _s = _no_face_job(client, make_video, monkeypatch)
+    assert client.delete(f"/api/jobs/{jid}").status_code == 409
+    assert client.get(f"/api/jobs/{jid}").json()["status"] == "review"
+    # 판정한 뒤에는 지울 수 있다
+    client.post(f"/api/jobs/{jid}/review", json={"action": "reject"})
+    assert client.delete(f"/api/jobs/{jid}").status_code == 204
+
+
+def test_the_result_location_is_told_during_review_too(client, make_video,
+                                                       monkeypatch):
+    """download 만 열어 두면 반쪽이다 — presigned URL 로 보려는 쪽이 막힌다."""
+    jid, _s = _no_face_job(client, make_video, monkeypatch)
+    r = client.get(f"/api/jobs/{jid}/result")
+    assert r.status_code == 200
+    assert r.json()["status"] == "review"
+    assert r.json()["review"][0]["code"] == "no-detections"
+
+
+def test_two_decisions_at_once_do_not_race(client, make_video, monkeypatch):
+    """탭 두 개에서 동시에 누르면 둘 다 통과하던 자리.
+
+    확인이 락 밖이면 나중 것이 앞의 판정을 덮어쓴다 — 승인해 둔 건이 조용히
+    실패로 바뀔 수 있다.
+    """
+    import threading
+    jid, _s = _no_face_job(client, make_video, monkeypatch)
+    codes, lock = [], threading.Lock()
+
+    def press(action):
+        r = client.post(f"/api/jobs/{jid}/review", json={"action": action})
+        with lock:
+            codes.append(r.status_code)
+
+    ts = [threading.Thread(target=press, args=(a,))
+          for a in ("approve", "reject")]
+    for t in ts:
+        t.start()
+    for t in ts:
+        t.join()
+
+    assert sorted(codes) == [200, 409], codes      # 정확히 하나만 먹는다
