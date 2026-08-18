@@ -625,9 +625,13 @@ def event_days():
 
 
 @app.get("/api/events/batches")
-def event_batches():
-    """로그 화면의 폴더 필터 목록. **저널에서 뽑는다**(events.batches 주석 참고)."""
-    return {"batches": events.batches()}
+def event_batches(from_day: str = None, to_day: str = None):
+    """로그 화면의 폴더 필터 목록. **저널에서, 기간을 따라** 뽑는다.
+
+    저널은 지워지지 않아서 없어진 폴더 이름이 영원히 남는다. 기간을 좁히면
+    그 기간에 실제로 돈 폴더만 나온다(events.batches 주석 참고).
+    """
+    return {"batches": events.batches(from_day=from_day, to_day=to_day)}
 
 
 @app.get("/api/export.csv")

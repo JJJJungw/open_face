@@ -1806,3 +1806,33 @@ def test_export_respects_the_date_range(client, tmp_path, monkeypatch):
         .content.decode("utf-8-sig")
     assert "오늘.mp4" not in empty
     assert empty.splitlines()[0].startswith("시각,")     # 열 이름은 남는다
+
+
+def test_the_folder_filter_follows_the_date_range(tmp_path, monkeypatch):
+    """**저널은 지워지지 않아서 없어진 폴더 이름이 영원히 남는다.**
+
+    실제로 그랬다 — 버킷을 `2026-08/` 에서 `kbs/` 로 재편한 뒤에도 필터에 옛
+    이름이 계속 떴다. 기록이 남는 것은 맞지만, 지금 고를 수 있는 것처럼 보이면
+    안 된다. 기간을 좁히면 그 기간에 실제로 돈 폴더만 나온다.
+    """
+    import json
+    from face_anonymizer import events, timefmt
+    d = tmp_path / "ev"
+    d.mkdir()
+    monkeypatch.setattr(events, "DIR", str(d))
+
+    def put(day, batch):
+        ts = timefmt.day_range(day, day)[0] + 32400
+        (d / f"{day}.jsonl").write_text(json.dumps(
+            {"at": f"{day}T09:00:00+09:00", "ts": ts, "mode": "api",
+             "event": "job.finished", "job": "x", "name": "a.mp4",
+             "batch": batch}, ensure_ascii=False) + "\n", encoding="utf-8")
+
+    put("2026-06-01", "2026-08")      # 재편 전 이름
+    put("2026-08-18", "kbs")          # 재편 후 이름
+
+    assert events.batches(from_day="2026-08-18", to_day="2026-08-18") == ["kbs"]
+    assert events.batches(from_day="2026-06-01", to_day="2026-06-01") == ["2026-08"]
+    # 전 기간을 보면 둘 다 — 옛 기록을 지우자는 게 아니다
+    assert set(events.batches(from_day="2000-01-01", to_day="2026-08-18")) \
+        == {"kbs", "2026-08"}

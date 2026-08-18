@@ -813,6 +813,7 @@ function logFilterParams() {
 // 자주 쓰는 기간을 한 번에. 날짜를 두 번 고르게 하면 "오늘 것만" 을 보려고도
 // 달력을 두 번 열어야 한다.
 function pickDays(n) {
+  // 기간이 바뀌면 그 기간에 돈 폴더만 남아야 한다.
   if (n === null) { $('#lgfrom').value = ''; $('#lgto').value = ''; }
   else {
     const end = new Date(), start = new Date();
@@ -821,6 +822,7 @@ function pickDays(n) {
     $('#lgfrom').value = fmtd(start);
     $('#lgto').value = fmtd(end);
   }
+  loadLogBatches();
   logFilterChanged();
 }
 
@@ -854,11 +856,17 @@ function exportLogs() {
 }
 
 async function loadLogBatches() {
-  // 작업 목록이 아니라 **저널**에서 받는다. 작업은 TTL 로 정리되므로 거기서
-  // 뽑으면 어제 돌린 폴더가 필터에서 사라진다 — 저널엔 그 줄이 남아 있는데.
-  const r = await fetch('/api/events/batches').then(r => r.ok ? r.json() : null)
-    .catch(() => null);
+  // 작업 목록이 아니라 **저널**에서, 그리고 **지금 걸린 기간 안에서** 받는다.
+  // 저널은 지워지지 않아 버킷을 재편하면 없어진 폴더 이름이 영원히 남는다.
+  const f = $('#lgfrom').value, t = $('#lgto').value;
+  const q = [f && 'from_day=' + f, t && 'to_day=' + t].filter(Boolean).join('&');
+  const r = await fetch('/api/events/batches' + (q ? '?' + q : ''))
+    .then(r => r.ok ? r.json() : null).catch(() => null);
   const names = (r && r.batches || []).filter(Boolean);
+  // 기간이 좁아지면서 고른 폴더가 목록에서 사라질 수 있다. 그대로 두면 화면이
+  // 비는데 왜 비었는지가 안 보인다.
+  const gone = logBatches.filter(b => !names.includes(b));
+  if (gone.length) logBatches = logBatches.filter(b => names.includes(b));
   const el = $('#lgbatches');
   el.hidden = !names.length;                 // 폴더로 돌린 적이 없으면 줄 자체를 숨긴다
   if (!names.length) return;
@@ -1102,8 +1110,8 @@ function logFilterChanged(delay) {
 $('#lgevent').onchange = () => logFilterChanged();
 $('#lgmode').onchange = () => logFilterChanged();
 $('#lgq').oninput = () => logFilterChanged(250);   // 한 글자마다 때리지 않는다
-$('#lgfrom').onchange = () => logFilterChanged();
-$('#lgto').onchange = () => logFilterChanged();
+$('#lgfrom').onchange = () => { loadLogBatches(); logFilterChanged(); };
+$('#lgto').onchange = () => { loadLogBatches(); logFilterChanged(); };
 $('#lggroup').onchange = renderLogs;               // 이미 받은 줄을 다시 그리기만
 $('#lglive').onchange = scheduleLogs;
 

@@ -267,15 +267,21 @@ def days():
         return []
 
 
-def batches(limit=None):
+def batches(limit=None, from_day=None, to_day=None):
     """저널에 나타난 폴더 이름들, 최근에 보인 것이 앞.
 
     **작업 목록이 아니라 저널에서 뽑는다.** 작업은 TTL 로 정리되므로 거기서
     뽑으면 어제 돌린 폴더가 필터 목록에서 사라진다 — 정작 저널에는 그 줄들이
     그대로 남아 있는데 걸러 볼 방법이 없어진다.
+
+    **기간을 따라간다.** 저널은 지워지지 않아서, 버킷을 재편하면 없어진 폴더
+    이름이 필터에 영원히 남는다(실제로 그랬다 — 버킷이 `2026-08/` 에서
+    `kbs/` 로 바뀐 뒤에도 옛 이름이 계속 떴다). 기간을 좁히면 그 기간에 실제로
+    돈 폴더만 보인다.
     """
     seen = []
-    for row in read(limit=limit or READ_MAX):
+    for row in read(limit=limit or READ_MAX,
+                    from_day=from_day, to_day=to_day):
         b = row.get("batch")
         if b and b not in seen:
             seen.append(b)
