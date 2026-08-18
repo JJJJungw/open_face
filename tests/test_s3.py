@@ -89,7 +89,9 @@ def wait(c, jid, timeout=30.0):
     end = time.time() + timeout
     while time.time() < end:
         s = c.get(f"/api/jobs/{jid}").json()
-        if s["status"] in ("done", "failed", "cancelled"):
+        # review 도 **워커가 손을 뗀** 상태다. 여기 빼면 검출 0건인 합성 클립이
+        # 영원히 안 끝난 것으로 보인다 — 남은 것은 사람의 확인이지 처리가 아니다.
+        if s["status"] in ("done", "review", "failed", "cancelled"):
             return s
         time.sleep(0.02)
     raise AssertionError("작업이 끝나지 않았다")

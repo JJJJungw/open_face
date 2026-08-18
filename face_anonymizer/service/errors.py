@@ -159,6 +159,12 @@ RESULT_EXPIRED = _p(
 JOB_NOT_CANCELLABLE = _p(
     "job_not_cancellable", 409, "취소할 수 없는 상태입니다",
     "이미 끝났거나 실패한 작업입니다.")
+JOB_NOT_IN_REVIEW = _p(
+    "job_not_in_review", 409, "검수 대기 중인 작업이 아닙니다",
+    "상태가 review 인 작업만 승인하거나 반려할 수 있습니다.")
+REVIEW_ACTION_INVALID = _p(
+    "review_action_invalid", 400, "알 수 없는 검수 판정입니다",
+    "approve(승인) 또는 reject(반려) 중 하나여야 합니다.")
 
 # ── S3 (404/502) ──────────────────────────────────────────────────────────
 S3_NOT_CONFIGURED = _p(

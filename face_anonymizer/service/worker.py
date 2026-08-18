@@ -28,7 +28,7 @@ except ImportError:                   # pragma: no cover
 
 from ..storage import naming
 from ..storage import s3 as s3mod
-from .. import events, timefmt
+from .. import events, job_runner, timefmt
 from . import config, errors, jobs
 
 log = logging.getLogger(__name__)
@@ -328,11 +328,21 @@ def run(job_id):
                 raise JobCancelled()
             with jobs.LOCK:
                 j.s3_output = key
+        # 사람이 봐야 하는 사유가 있으면 **완료로 넘기지 않는다.**
+        # 딱지만 붙이고 done 으로 두면 결국 완료 목록에 섞여 그대로 납품된다.
+        # 얼굴이 하나도 안 잡힌 영상은 원본이 그대로 나간 것이므로, 그게 정당한
+        # 0 인지 설정이 틀려서 0 인지 사람이 한 번 봐야 한다(docs/issues/008).
+        needs = job_runner.review_of(res.warnings)
         with jobs.LOCK:
-            j.status, j.output, j.finished = "done", res.output, time.time()
-            log.info("■ 완료  %s%s  %s", j.name,
+            j.review = needs
+            j.status = "review" if needs else "done"
+            j.output, j.finished = res.output, time.time()
+            log.info("%s  %s%s  %s", "⚑ 검수 필요" if needs else "■ 완료", j.name,
                      f"  ({j.batch})" if j.batch else "",
                      timefmt.span(j.started, j.finished))
+            if needs:
+                for item in needs:
+                    log.warning("검수 사유  %s — %s", j.name, item["message"])
             j.result = {
                 "frames": res.frames, "raw_boxes": res.raw_boxes,
                 "filled_boxes": res.filled_boxes, "method": res.method,
@@ -373,11 +383,18 @@ def run(job_id):
                     transcoded=r.get("transcoded"),
                     timing=r.get("timing"), attempts=j.attempts,
                     started_at=timefmt.iso(j.started))
+        if j.review:
+            events.emit("job.review", job=j.id, name=j.name, batch=j.batch or None,
+                        codes=[i["code"] for i in j.review],
+                        detail=" / ".join(i["detail"] for i in j.review))
         # 결과는 이미 버킷에 있다. 로컬 사본을 TTL 동안 들고 있으면 대량
         # 처리에서 디스크가 먼저 찬다(docs/issues/001). 다운로드 라우트가
         # "로컬에 없으면 S3 로 302" 이므로 잃는 것이 없다. 직접 업로드는
         # 로컬이 유일한 사본이라 건드리지 않는다.
-        if j.s3_key and j.s3_output and not config.KEEP_LOCAL:
+        # 검수 대기 중인 것은 남긴다. 사람이 확인하려면 파일이 있어야 하고,
+        # S3 로 302 시키면 되지만 직접 업로드한 건은 로컬이 유일한 사본이다.
+        if (j.status == "done" and j.s3_key and j.s3_output
+                and not config.KEEP_LOCAL):
             jobs.drop_media(j, "S3 업로드 완료")
     except (JobCancelled, s3mod.TransferAborted):
         with jobs.LOCK:

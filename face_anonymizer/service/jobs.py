@@ -59,6 +59,11 @@ class Job:
     batch: str = ""
     deferred_since: float = 0.0   # 보류가 시작된 시각 (상한 판정용)
     stage_t0: float = 0.0
+    # 사람이 확인해야 하는 사유들. 비어 있지 않으면 status 가 review 가 된다.
+    # [{"code","detail","message"}] — job_runner.review_of() 와 같은 모양이다.
+    review: list = field(default_factory=list)
+    # 검수 판정 기록. {"action": "approve"|"reject", "note", "at", "at_iso"}
+    reviewed: dict = field(default_factory=dict)
     # 전체 진행률(0~100). **되감기지 않게** 지금까지의 최고치를 들고 다닌다.
     # 단계가 통째로 없을 수 있어서(h264 원본이면 전사가 없다) 계산값만으로는
     # 뒤로 갈 수 있는데, 뒤로 가는 진행바는 사용자가 고장으로 읽는다.
@@ -154,8 +159,8 @@ def snapshot(j, queued_ahead=0):
     # j.overall 을 들고 다니며 되감기를 막는다. 단계가 통째로 없을 수 있고
     # (h264 원본이면 전사가 없다) 저장·복원 사이에 값이 뒤집힐 수도 있다.
     overall = progress.overall(j.stage, j.done, j.total, floor=j.overall or 0.0)
-    if j.status == "done":
-        overall = 100.0
+    if j.status in ("done", "review"):
+        overall = 100.0      # 처리는 끝났다. 남은 것은 사람의 확인이다
     j.overall = overall
 
     # 이 작업 하나가 끝나기까지 남은 시간. 위 진행률이 전 단계를 덮으므로
@@ -177,6 +182,7 @@ def snapshot(j, queued_ahead=0):
         "attempts": j.attempts, "max_attempts": config.MAX_ATTEMPTS,
         "s3_key": j.s3_key, "s3_output": j.s3_output,
         "queued_ahead": queued_ahead, "batch": j.batch,
+        "review": list(j.review or ()), "reviewed": dict(j.reviewed or {}),
         # 언제 시작해서 언제 끝났나. 화면이 계산하지 않고 서버가 정해 준 문장을
         # 그대로 쓴다 — 로그와 화면이 다른 시각을 말하면 대조가 안 된다.
         "started_at": timefmt.iso(j.started),
@@ -362,7 +368,11 @@ def queue_depth():
         return sum(1 for j in JOBS.values() if j.status == "queued")
 
 
-STATUSES = ("queued", "running", "done", "failed", "cancelled")
+# review = 처리는 끝났지만 **사람이 확인하기 전까지 완료가 아니다.**
+# 얼굴이 하나도 안 잡힌 영상은 원본이 그대로 나가는데, 그게 정당한 0 인지
+# 설정이 틀려서 0 인지 코드가 구분할 수 없다(docs/issues/008). 딱지만 붙이고
+# done 으로 두면 결국 완료 목록에 섞여 그대로 납품된다.
+STATUSES = ("queued", "running", "review", "done", "failed", "cancelled")
 
 
 def counts():
@@ -420,7 +430,7 @@ def recent_stats(limit=5):
     """
     with LOCK:
         rows = [j for j in JOBS.values()
-                if j.status == "done" and isinstance(j.result, dict)
+                if j.status in ("done", "review") and isinstance(j.result, dict)
                 and j.result.get("seconds")]
     rows.sort(key=lambda x: -(x.finished or 0))
     rows = rows[:max(1, limit)]
@@ -480,7 +490,7 @@ def batches(rows=None):
             continue
         b = out.setdefault(j.batch, {
             "batch": j.batch, "total": 0, "done": 0, "failed": 0,
-            "cancelled": 0, "running": 0, "queued": 0,
+            "cancelled": 0, "running": 0, "queued": 0, "review": 0,
             "started": 0.0, "finished": 0.0, "seconds": 0.0})
         b["total"] += 1
         if j.status in b:

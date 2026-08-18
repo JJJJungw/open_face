@@ -24,10 +24,10 @@ import threading
 import time
 from contextlib import asynccontextmanager
 
-from fastapi import FastAPI, Request, Response
+from fastapi import Body, FastAPI, Request, Response
 from fastapi.responses import FileResponse, HTMLResponse, RedirectResponse
 
-from .. import events, logsetup
+from .. import events, logsetup, timefmt
 from ..core.anonymize import METHODS
 from ..core.pipeline import parse_bitrate
 from ..storage import naming
@@ -468,7 +468,9 @@ async def create_jobs(request: Request):
     return {"accepted": accepted, "rejected": rejected, "queued": jobs.queue_depth()}
 
 
-_LIST_RANK = {"running": 0, "queued": 1}
+# 검수는 **사람을 기다리는 일**이라 대기보다 위다. 아래로 내리면 300건짜리
+# 배치에서 검수 두 건이 완료 기록에 파묻혀 영영 안 보인다.
+_LIST_RANK = {"running": 0, "review": 1, "queued": 2}
 
 
 def list_key(j):
@@ -481,10 +483,10 @@ def list_key(j):
     처리하는데 목록은 최신순 100건이라, 300건짜리 배치에서는 지금 돌고 있는
     작업이 창 밖으로 밀려난다 — 화면이 '유휴' 라고 말한다(docs/issues/006).
     """
-    rank = _LIST_RANK.get(j.status, 2)
-    if rank == 2:                       # done·failed·cancelled — 최근 것부터
+    rank = _LIST_RANK.get(j.status, 3)
+    if rank == 3:                       # done·failed·cancelled — 최근 것부터
         return (rank, -(j.finished or j.created))
-    return (rank, j.created)            # 수행중·대기 — 먼저 들어온 것부터
+    return (rank, j.created)            # 수행중·검수·대기 — 먼저 들어온 것부터
 
 
 def batch_of(key, prefixes):
@@ -580,7 +582,8 @@ def download(jid: str):
     j = jobs.find_job(jid)
     if j is None:
         raise errors.JOB_NOT_FOUND(jid)
-    if j.status != "done":
+    # 검수 대기 중인 것도 받을 수 있어야 한다 — **보지 않고는 판정할 수 없다.**
+    if j.status not in ("done", "review"):
         raise (errors.JOB_FAILED(j.error.get("detail", "") if isinstance(j.error, dict) else j.error)
            if j.status == "failed" else errors.JOB_NOT_FINISHED(f"status={j.status}"))
     if not j.output or not os.path.exists(j.output):
@@ -632,6 +635,61 @@ def cancel_job(jid: str):
             j.status, j.finished = "cancelled", time.time()
     jobs.save_job(j)
     return jobs.snapshot(j, jobs.queued_ahead_of(j))
+
+
+@app.post("/api/jobs/{jid}/review")
+def review_job(jid: str, body: dict = Body(default={})):
+    """검수 판정 — **여기서만 완료가 된다.**
+
+    처리가 끝나도 사람이 봐야 하는 사유가 있으면 상태가 ``review`` 로 멈춘다.
+    얼굴이 하나도 안 잡힌 영상은 원본이 그대로 나간 것인데, 그게 얼굴 없는
+    영상이라 정당한 0 인지 설정이 틀려서 0 인지 **코드가 구분할 수 없다**
+    (docs/issues/008). 그 판단을 사람이 내리는 자리다.
+
+    ``approve`` 면 완료로, ``reject`` 면 실패로 넘어간다. 어느 쪽이든 누가 언제
+    무슨 사유로 넘겼는지가 작업 기록과 저널에 남는다 — 나중에 "이 영상 왜
+    완료로 되어 있냐" 에 답할 수 있어야 한다.
+
+    **반려해도 버킷의 결과물은 지우지 않는다.** 지우는 것은 되돌릴 수 없고,
+    반려 사유가 "다시 처리하면 될 것" 일 수도 있어서다. 대신 결과물 키를
+    응답과 저널에 남기므로 납품 폴더에서 빼는 판단을 사람이 할 수 있다.
+    """
+    action = str((body or {}).get("action") or "").strip().lower()
+    note = str((body or {}).get("note") or "").strip()[:500]
+    if action not in ("approve", "reject"):
+        raise errors.REVIEW_ACTION_INVALID(f"action={action or '(없음)'}")
+    j = jobs.find_job(jid)
+    if j is None:
+        raise errors.JOB_NOT_FOUND(jid)
+    if j.status != "review":
+        raise errors.JOB_NOT_IN_REVIEW(f"status={j.status}", status=j.status)
+
+    now = time.time()
+    with jobs.LOCK:
+        j.status = "done" if action == "approve" else "failed"
+        j.finished = now
+        j.reviewed = {"action": action, "note": note,
+                      "at": round(now, 3), "at_iso": timefmt.iso(now)}
+        if action == "reject":
+            # 화면이 실패 카드와 같은 모양으로 그릴 수 있게 오류 형식을 맞춘다.
+            j.error = {"code": "review_rejected", "title": "검수에서 반려되었습니다",
+                       "detail": note or " / ".join(i["message"] for i in j.review),
+                       "hint": "결과물은 버킷에 남아 있습니다. 납품 폴더에서 "
+                               "빼거나 설정을 바꿔 다시 처리해 주세요.",
+                       "retryable": False, "policy": "permanent"}
+    jobs.save_job(j)
+    log.info("%s  %s  %s", "☑ 검수 승인" if action == "approve" else "☒ 검수 반려",
+             j.name, note or "")
+    events.emit("job.reviewed", job=j.id, name=j.name, batch=j.batch or None,
+                action=action, note=note or None,
+                codes=[i.get("code") for i in (j.review or [])],
+                s3_output=j.s3_output or None)
+    # 승인한 뒤에는 원래 정리 정책으로 돌아간다 — 검수 때문에 붙들고 있던
+    # 로컬 사본을 계속 두면 대량 처리에서 디스크가 먼저 찬다(docs/issues/001).
+    if (action == "approve" and j.s3_key and j.s3_output
+            and not config.KEEP_LOCAL):
+        jobs.drop_media(j, "검수 승인")
+    return jobs.snapshot(j, 0)
 
 
 @app.get("/api/jobs/{jid}/result")

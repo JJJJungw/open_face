@@ -178,6 +178,7 @@ def read(job=None, batch=None, event=None, since=None, limit=200,
 EVENT_LABEL = {
     "job.queued": "대기 등록", "job.started": "시작", "job.finished": "완료",
     "job.failed": "실패", "job.retry": "재시도", "job.cancelled": "취소",
+    "job.review": "검수 대기", "job.reviewed": "검수 판정",
     "job.progress": "진행", "worker.ready": "워커 준비",
     "worker.stopped": "워커 종료", "server.started": "서버 기동",
 }
@@ -186,6 +187,7 @@ EVENT_LABEL = {
 # 여기서 정하는 것은 '어떤 종류의 소식인가' 이기 때문이다.
 EVENT_TONE = {
     "job.finished": "ok", "job.failed": "bad", "job.cancelled": "muted",
+    "job.review": "warn", "job.reviewed": "ok",
     "job.retry": "warn", "job.started": "run", "job.progress": "run",
     "job.queued": "muted", "worker.ready": "muted", "worker.stopped": "muted",
 }
@@ -222,6 +224,13 @@ def describe(row):
         bits.append(f"{row.get('attempts') or '?'}회째")
         if row.get("detail"):
             bits.append(str(row["detail"])[:120])
+    elif e == "job.review":
+        bits.append(", ".join(row.get("codes") or []) or "확인 필요")
+    elif e == "job.reviewed":
+        bits.append("승인 → 완료" if row.get("action") == "approve"
+                    else "반려 → 실패")
+        if row.get("note"):
+            bits.append(str(row["note"])[:120])
     elif e == "job.progress":
         if row.get("percent") is not None:
             bits.append(f"{row['percent']}%")

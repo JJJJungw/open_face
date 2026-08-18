@@ -48,7 +48,9 @@ def wait(c, jid, timeout=30.0):
     deadline = time.time() + timeout
     while time.time() < deadline:
         s = c.get(f"/api/jobs/{jid}").json()
-        if s["status"] in ("done", "failed", "cancelled"):
+        # review 도 **워커가 손을 뗀** 상태다. 여기 빼면 검출 0건인 합성 클립이
+        # 영원히 안 끝난 것으로 보인다 — 남은 것은 사람의 확인이지 처리가 아니다.
+        if s["status"] in ("done", "review", "failed", "cancelled"):
             return s
         time.sleep(0.02)
     raise AssertionError(f"작업이 {timeout}s 안에 끝나지 않았다")
@@ -547,7 +549,9 @@ def test_transient_failure_is_retried(client, make_video, monkeypatch):
     jid = job_id(submit(client, path))
     s = wait(client, jid, timeout=60)
 
-    assert s["status"] == "done", s.get("error")
+    # 이 가짜 검출기는 3회째에 성공하지만 얼굴은 하나도 못 찾는다 — 그래서
+    # 완료가 아니라 검수 대기로 간다. 여기서 보는 것은 **재시도가 돌았는가** 다.
+    assert s["status"] == "review", s.get("error")
     assert s["attempts"] == 3
 
 
@@ -1239,3 +1243,116 @@ def test_the_two_faces_measure_progress_with_the_same_ruler():
                  started=time.time() - 10)
     assert jobs.snapshot(j)["overall"] == beat.percent
     assert beat.percent == progress.overall("detect", 40, 100)
+
+
+# ---------------------------------------------------------------------------
+# 검수 — 처리가 끝나도 사람이 넘기기 전까지는 완료가 아니다
+
+
+def _no_face_job(client, make_video, monkeypatch):
+    """얼굴을 하나도 못 찾는 검출기로 한 건 돌린다."""
+    class Blind:
+        def detect_batch(self, frames, imgsz=None, conf=None, iou=None):
+            return [[] for _ in frames]
+    anon = VideoAnonymizer(detector=Blind())
+    monkeypatch.setattr(worker, "get_anonymizer", lambda: anon)
+    monkeypatch.setattr(worker, "_anonymizer", anon)
+    path, _n, size = make_video(frames=6)
+    jid = job_id(submit(client, path))
+    return jid, wait(client, jid, timeout=60)
+
+
+def test_zero_detection_does_not_become_done_on_its_own(client, make_video,
+                                                        monkeypatch):
+    """**딱지만 붙이고 done 으로 두면 결국 완료 목록에 섞여 그대로 납품된다.**
+
+    얼굴이 하나도 안 잡힌 영상은 원본이 그대로 나간 것이다. 그게 얼굴 없는
+    영상이라 정당한 0 인지 설정이 틀려서 0 인지는 코드가 구분할 수 없으므로
+    (docs/issues/008) 사람이 넘기기 전까지 완료가 아니어야 한다.
+    """
+    _jid, s = _no_face_job(client, make_video, monkeypatch)
+    assert s["status"] == "review"
+    assert s["review"] and s["review"][0]["code"] == "no-detections"
+    assert s["review"][0]["message"]           # 사람이 읽을 사유가 같이 온다
+
+
+def test_review_jobs_are_not_counted_as_done(client, make_video, monkeypatch):
+    """완료 건수에 섞이면 '몇 건 납품 가능한가' 가 틀린 값이 된다."""
+    _jid, _s = _no_face_job(client, make_video, monkeypatch)
+    c = client.get("/api/status").json()["counts"]
+    assert c["review"] == 1 and c["done"] == 0
+    assert [j["id"] for j in client.get("/api/jobs?status=done").json()] == []
+    assert len(client.get("/api/jobs?status=review").json()) == 1
+
+
+def test_approving_is_the_only_way_it_becomes_done(client, make_video,
+                                                   monkeypatch):
+    jid, _s = _no_face_job(client, make_video, monkeypatch)
+    r = client.post(f"/api/jobs/{jid}/review", json={"action": "approve"})
+    assert r.status_code == 200 and r.json()["status"] == "done"
+    assert r.json()["reviewed"]["action"] == "approve"
+    assert client.get("/api/status").json()["counts"]["done"] == 1
+
+
+def test_rejecting_marks_it_failed_with_the_reason(client, make_video,
+                                                   monkeypatch):
+    """반려는 실패로 간다. **왜 반려했는지가 같이 남아야** 나중에 답할 수 있다."""
+    jid, _s = _no_face_job(client, make_video, monkeypatch)
+    r = client.post(f"/api/jobs/{jid}/review",
+                    json={"action": "reject", "note": "얼굴이 분명히 있는데 못 잡음"})
+    assert r.status_code == 200
+    s = r.json()
+    assert s["status"] == "failed"
+    assert s["reviewed"]["note"] == "얼굴이 분명히 있는데 못 잡음"
+    assert s["reviewed"]["at_iso"].endswith("+09:00")
+    assert s["error"]["code"] == "review_rejected"
+
+
+def test_a_decision_can_only_be_made_once(client, make_video, monkeypatch):
+    """두 번째 판정을 받아 주면 완료된 건을 나중에 조용히 실패로 바꿀 수 있다."""
+    jid, _s = _no_face_job(client, make_video, monkeypatch)
+    assert client.post(f"/api/jobs/{jid}/review",
+                       json={"action": "approve"}).status_code == 200
+    r = client.post(f"/api/jobs/{jid}/review", json={"action": "reject"})
+    assert r.status_code == 409 and r.json()["code"] == "job_not_in_review"
+
+
+def test_unknown_action_is_refused(client, make_video, monkeypatch):
+    """오타 하나로 엉뚱한 상태가 되면 안 된다."""
+    jid, _s = _no_face_job(client, make_video, monkeypatch)
+    r = client.post(f"/api/jobs/{jid}/review", json={"action": "approved"})
+    assert r.status_code == 400 and r.json()["code"] == "review_action_invalid"
+    assert client.get(f"/api/jobs/{jid}").json()["status"] == "review"
+
+
+def test_the_result_can_be_watched_before_deciding(client, make_video,
+                                                   monkeypatch):
+    """**보지 않고는 판정할 수 없다.** 검수 중에도 결과물은 받을 수 있어야 한다."""
+    jid, _s = _no_face_job(client, make_video, monkeypatch)
+    assert client.get(f"/api/jobs/{jid}/download").status_code == 200
+
+
+def test_the_decision_lands_in_the_journal(client, make_video, monkeypatch,
+                                           tmp_path):
+    """"이 영상 왜 완료로 되어 있냐" 에 답할 수 있어야 한다."""
+    from face_anonymizer import events
+    monkeypatch.setattr(events, "DIR", str(tmp_path / "ev"))
+    jid, _s = _no_face_job(client, make_video, monkeypatch)
+    client.post(f"/api/jobs/{jid}/review",
+                json={"action": "reject", "note": "재처리 필요"})
+
+    kinds = {r["event"] for r in events.read(job=jid)}
+    assert {"job.review", "job.reviewed"} <= kinds
+    row = next(r for r in events.read(job=jid) if r["event"] == "job.reviewed")
+    assert row["action"] == "reject" and row["note"] == "재처리 필요"
+
+
+def test_a_folder_is_not_finished_while_review_is_pending(client, make_video,
+                                                          monkeypatch):
+    """검수 대기를 '끝난 것' 으로 세면 폴더가 다 됐다고 잘못 말한다."""
+    from face_anonymizer.service import jobs as jobsmod
+    jid, _s = _no_face_job(client, make_video, monkeypatch)
+    j = jobsmod.find_job(jid)
+    j.batch = "kbs"
+    b = jobsmod.batches([j])[0]
+    assert b["remain"] == 1 and b["percent"] == 0 and not b["finished_at"]
