@@ -104,16 +104,6 @@ def test_bad_upload_leaves_no_workdir(client, tmp_path):
     assert not jobs.exists() or not list(jobs.iterdir())
 
 
-def test_download_before_done_is_409(client, make_video):
-    path, n, size = make_video(frames=6)
-    client.attach(size)
-    jid = job_id(submit(client, path))
-    # 완료 전 상태를 강제로 만들어 둔다 (실제 진행 중 상태를 잡으려면 경쟁이 생긴다)
-    jobsmod.JOBS[jid].status = "running"
-    assert client.get(f"/api/jobs/{jid}/download").status_code == 409
-    assert client.delete(f"/api/jobs/{jid}").status_code == 409
-
-
 def test_imgsz_is_range_clamped(client, make_video):
     """서버는 범위만 본다. stride 배수 맞추기는 검출기 몫이다(규칙을 두 벌 두지 않는다)."""
     path, n, size = make_video(frames=6)
@@ -142,12 +132,8 @@ def test_full_lifecycle_and_no_leak(client, tmp_path, make_video):
     # 각 단계가 반올림된 값이라 합이 총계를 몇 ms 넘길 수 있다.
     assert sum(res["timing"].values()) <= res["seconds"] + 0.01
 
-    r = client.get(f"/api/jobs/{jid}/download")
-    assert r.status_code == 200
-    out = tmp_path / "out.mp4"
-    out.write_bytes(r.content)
-
-    frames = read_frames(str(out))
+    # 산출물은 작업 폴더에 있다. 서버가 파일을 흘려보내지 않는다.
+    frames = read_frames(jobsmod.JOBS[jid].output)
     assert len(frames) == n
     leaked = [i for i, f in enumerate(frames)
               if not region_is_obscured(f, face_rect(i, *size))]
@@ -179,7 +165,7 @@ def test_job_state_is_written_to_disk(client, tmp_path, make_video):
 
 
 def test_survives_restart(client, tmp_path, make_video):
-    """프로세스 메모리가 비어도 조회와 다운로드가 된다 (재시작 / 다른 워커)."""
+    """프로세스 메모리가 비어도 조회가 된다 (재시작 / 다른 워커)."""
     path, n, size = make_video(frames=10)
     client.attach(size)
     jid = job_id(submit(client, path))
@@ -191,7 +177,8 @@ def test_survives_restart(client, tmp_path, make_video):
     assert r.status_code == 200
     assert r.json()["status"] == "done"
     assert r.json()["result"]["frames"] == n
-    assert client.get(f"/api/jobs/{jid}/download").status_code == 200
+    # 메모리에 없어도 디스크에서 읽어 결과물 위치를 알려 준다
+    assert client.get(f"/api/jobs/{jid}/result").status_code == 200
     assert any(j["id"] == jid for j in client.get("/api/jobs").json())
 
 
@@ -308,7 +295,8 @@ def test_missing_output_reports_410_not_500(client, tmp_path, make_video):
     wait(client, jid)
 
     os.remove(jobsmod.JOBS[jid].output)
-    assert client.get(f"/api/jobs/{jid}/download").status_code == 410
+    # 버킷 사본도 없으니 정말 없는 것이다 — 500 이 아니라 410 이어야 한다.
+    assert client.get(f"/api/jobs/{jid}/result").status_code == 410
 
 
 @pytest.mark.parametrize("bad", ["../etc", "..", "a/b", ".hidden"])
@@ -852,7 +840,7 @@ def test_direct_upload_keeps_its_local_copy(client, make_video):
     assert s["status"] == "done"
     left = sorted(os.listdir(jobsmod.JOBS[jid].workdir))
     assert left != ["job.json"], "업로드분까지 지우면 안 된다"
-    assert client.get(f"/api/jobs/{jid}/download").status_code == 200
+    assert os.path.exists(jobsmod.JOBS[jid].output)
 
 
 def test_sweep_removes_temp_dirs_left_by_a_killed_process(client, tmp_path, monkeypatch):
@@ -1327,9 +1315,10 @@ def test_unknown_action_is_refused(client, make_video, monkeypatch):
 
 def test_the_result_can_be_watched_before_deciding(client, make_video,
                                                    monkeypatch):
-    """**보지 않고는 판정할 수 없다.** 검수 중에도 결과물은 받을 수 있어야 한다."""
+    """**보지 않고는 판정할 수 없다.** 검수 중에도 결과물 위치를 알려 줘야 한다."""
     jid, _s = _no_face_job(client, make_video, monkeypatch)
-    assert client.get(f"/api/jobs/{jid}/download").status_code == 200
+    r = client.get(f"/api/jobs/{jid}/result")
+    assert r.status_code == 200 and r.json()["status"] == "review"
 
 
 def test_the_decision_lands_in_the_journal(client, make_video, monkeypatch,

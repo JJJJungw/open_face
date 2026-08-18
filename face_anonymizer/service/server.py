@@ -734,36 +734,6 @@ def get_job(jid: str):
     return jobs.snapshot(j, jobs.queued_ahead_of(j))
 
 
-@app.get("/api/jobs/{jid}/download")
-def download(jid: str, inline: bool = False):
-    """결과물. 기본은 **내려받기**, ``inline=1`` 이면 브라우저에서 바로 튼다.
-
-    검수는 보는 것이 목적이라 inline 이 맞고, 완료된 건은 받는 것이 목적이다.
-    구분하지 않으면 '내려받기' 를 눌렀는데 페이지가 영상으로 바뀐다.
-    """
-    j = jobs.find_job(jid)
-    if j is None:
-        raise errors.JOB_NOT_FOUND(jid)
-    # 검수 대기 중인 것도 받을 수 있어야 한다 — **보지 않고는 판정할 수 없다.**
-    if j.status not in ("done", "review"):
-        raise (errors.JOB_FAILED(j.error.get("detail", "") if isinstance(j.error, dict) else j.error)
-           if j.status == "failed" else errors.JOB_NOT_FINISHED(f"status={j.status}"))
-    name = naming.output_name(j.name)
-    if not j.output or not os.path.exists(j.output):
-        # 로컬 사본은 정리됐어도 S3 원본은 남아 있다.
-        store = s3mod.get_store()
-        if j.s3_output and store is not None:
-            # 파일명을 같이 서명해야 S3 가 attachment 헤더를 붙여 준다.
-            return RedirectResponse(
-                store.presigned_url(j.s3_output,
-                                    filename=None if inline else name),
-                status_code=302)
-        raise errors.RESULT_EXPIRED(jid)
-    if inline:
-        return FileResponse(j.output, media_type="video/mp4")
-    return FileResponse(j.output, media_type="video/mp4", filename=name)
-
-
 @app.post("/api/jobs/cancel-all")
 def cancel_all_jobs():
     """진행중인 작업을 한 번에 멈춘다. 대기는 즉시, 수행중은 몇 초 안에.
@@ -863,10 +833,13 @@ def review_job(jid: str, body: dict = Body(default={})):
 
 @app.get("/api/jobs/{jid}/result")
 def job_result(jid: str):
-    """결과물 받는 방법을 알려준다.
+    """결과물이 어디 있는지 알려준다. **파일은 우리가 흘려보내지 않는다.**
 
-    S3 작업이면 **presigned URL** 을 준다 — GPU 서버가 파일 전송까지 떠안을
-    이유가 없고, 로컬 사본이 보관 기간에 정리돼도 S3 원본은 남아 있다.
+    S3 작업이면 presigned URL 을 준다 — GPU 서버가 파일 전송까지 떠안을 이유가
+    없고, 로컬 사본이 보관 기간에 정리돼도 S3 원본은 남아 있다. 예전에는
+    ``/download`` 로 직접 내보내기도 했는데, 그건 테스트용으로 둔 것이었고
+    **상태가 바뀌는 시점과 로컬 정리 사이의 틈**에서 500 이 나는 경쟁까지
+    있었다(정리 뒤에 읽으면 파일이 없다). 지금은 위치만 알려 준다.
     """
     j = jobs.find_job(jid)
     if j is None:
@@ -886,8 +859,14 @@ def job_result(jid: str):
         out["expires_in"] = s3mod.URL_TTL
         out["via"] = "s3"
     else:
-        out["download_url"] = f"/api/jobs/{j.id}/download"
-        out["via"] = "server"
+        # 직접 업로드분은 버킷에 없다. 결과물은 서버 작업 폴더에 있고, 그건
+        # 운영하는 사람이 가져갈 몫이다 — 우리가 스트리밍하지 않는다.
+        if not j.output or not os.path.exists(j.output):
+            # 보관 기간이 지나 정리됐다. 버킷 사본도 없으니 정말 없는 것이다.
+            raise errors.RESULT_EXPIRED(jid)
+        out["download_url"] = None
+        out["via"] = "local"
+        out["hint"] = "S3 로 제출한 작업이 아니라 서버 작업 폴더에만 있습니다."
     return out
 
 

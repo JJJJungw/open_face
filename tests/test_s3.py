@@ -379,16 +379,6 @@ def test_local_copy_is_removed_after_upload(s3client):
     assert workdir_files(s3client, jid) == ["job.json"]
 
 
-def test_download_redirects_to_s3_when_local_copy_is_gone(s3client):
-    """로컬 사본이 정리돼도 받을 수 있어야 한다 — 정리의 전제다."""
-    jid = s3client.post("/api/jobs", data={"s3_key": KEY}).json()["accepted"][0]["id"]
-    wait(s3client, jid, timeout=60)
-
-    r = s3client.get(f"/api/jobs/{jid}/download", follow_redirects=False)
-    assert r.status_code == 302
-    assert r.headers["location"].startswith("https://signed/")
-
-
 def test_keeping_the_local_copy_can_be_turned_back_on(s3client, monkeypatch):
     """로컬에서 결과를 바로 열어 보고 싶을 때가 있다."""
     monkeypatch.setattr(config, "KEEP_LOCAL", True)
@@ -730,40 +720,6 @@ def test_review_does_not_hold_the_local_copy_hostage(s3client, monkeypatch):
 
     assert s["status"] == "review"
     assert workdir_files(s3client, jid) == ["job.json"]
-    # 그래도 볼 수 있어야 판정할 수 있다
-    r = s3client.get(f"/api/jobs/{jid}/download", follow_redirects=False)
-    assert r.status_code == 302
-
-
-def test_download_forces_an_attachment_from_s3(s3client):
-    """**'내려받기' 를 눌렀는데 페이지가 영상으로 바뀌면 안 된다.**
-
-    presigned URL 에 Content-Disposition 이 없으면 S3 가 mp4 를 헤더 없이 주고,
-    브라우저는 내려받는 대신 페이지를 떠나 재생한다.
-    """
-    jid = s3client.post("/api/jobs", data={"s3_key": KEY}).json()["accepted"][0]["id"]
-    wait(s3client, jid, timeout=60)
-
-    r = s3client.get(f"/api/jobs/{jid}/download", follow_redirects=False)
-    assert r.status_code == 302
-    assert "response-content-disposition" in r.headers["location"].lower()
-    assert "attachment" in r.headers["location"].lower()
-
-
-def test_review_opens_inline_because_watching_is_the_point(s3client, monkeypatch):
-    """검수는 **보는 것이 목적**이라 내려받기가 아니라 재생이 맞다."""
-    class Blind:
-        def detect_batch(self, frames, imgsz=None, conf=None, iou=None):
-            return [[] for _ in frames]
-    from face_anonymizer import VideoAnonymizer
-    from face_anonymizer.service import worker
-    anon = VideoAnonymizer(detector=Blind())
-    monkeypatch.setattr(worker, "get_anonymizer", lambda: anon)
-    monkeypatch.setattr(worker, "_anonymizer", anon)
-
-    jid = s3client.post("/api/jobs", data={"s3_key": KEY}).json()["accepted"][0]["id"]
-    assert wait(s3client, jid, timeout=60)["status"] == "review"
-
-    r = s3client.get(f"/api/jobs/{jid}/download?inline=1", follow_redirects=False)
-    assert r.status_code == 302
-    assert "attachment" not in r.headers["location"].lower()
+    # 그래도 볼 수 있어야 판정할 수 있다 — 버킷의 서명된 주소로 안내한다
+    d = s3client.get(f"/api/jobs/{jid}/result").json()
+    assert d["via"] == "s3" and d["download_url"].startswith("https://signed/")

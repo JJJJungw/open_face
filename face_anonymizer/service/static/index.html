@@ -1545,8 +1545,8 @@ function card(j) {
       </div>
       <div class="meta" style="margin-top:8px">${j.span || '—'}</div>
       <div class="row">
-        <a class="dl" href="/api/jobs/${j.id}/download?inline=1"
-           target="_blank" rel="noopener">결과 확인</a>
+        <button onclick="event.stopPropagation();watchResult('${j.id}')"
+                class="ghost">결과 확인</button>
         <button onclick="review('${j.id}','approve')">완료로 넘기기</button>
         <button class="ghost" onclick="review('${j.id}','reject')">반려</button>
       </div>`;
@@ -1590,9 +1590,8 @@ function card(j) {
       <div class="meta" style="margin-top:8px">${j.span || '—'}</div>
       <div class="meta" style="margin-top:4px">검출 ${fmt(t.detect)} · 추적 ${fmt(t.track)}
         · 렌더 ${fmt(t.render)} · ${v.width}×${v.height} · ${r.method || '—'}</div>
-      <div class="row">
-        <a class="dl" href="/api/jobs/${j.id}/download" download>내려받기</a>
-      </div>`;
+      <div class="meta" style="margin-top:6px">${r.s3_output
+        ? `결과물 <b>${r.s3_output}</b>` : '결과물은 서버 작업 폴더에 있습니다'}</div>`;
   }
   // 끝난 작업만 지울 수 있다. 대기·수행중은 '취소' 가 따로 있고, 둘을 같은
   // 자리에 두면 무엇이 멈추고 무엇이 사라지는지 구분이 안 된다.
@@ -1684,6 +1683,16 @@ async function review(id, action) {
     alert(problemText(p) || '판정을 반영하지 못했습니다');
   }
   poll();
+}
+
+// 결과물은 **버킷에 있다.** 우리가 파일을 흘려보내지 않고 위치만 알려 준다 —
+// 서버가 스트리밍하면 상태 전환과 로컬 정리 사이의 틈에서 깨지고, GPU 서버가
+// 할 일도 아니다. 검수는 봐야 판정할 수 있으니 그 링크를 새 탭에서 연다.
+async function watchResult(id) {
+  const r = await fetch('/api/jobs/' + id + '/result')
+    .then(r => r.ok ? r.json() : null).catch(() => null);
+  if (r && r.download_url) window.open(r.download_url, '_blank', 'noopener');
+  else alert((r && r.hint) || '결과물 위치를 확인하지 못했습니다');
 }
 
 async function del(id) { await fetch('/api/jobs/' + id, { method:'DELETE' }); poll(); }
