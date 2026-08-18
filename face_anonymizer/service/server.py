@@ -547,11 +547,14 @@ def list_batches():
 @app.get("/api/events")
 def list_events(job: str = None, batch: str = None, event: str = None,
                 mode: str = None, since: float = None, before: float = None,
-                q: str = None, limit: int = 200, text: bool = True):
+                q: str = None, limit: int = 200, text: bool = True,
+                full: bool = False):
     """이벤트 저널. **로그가 아니라 기록이다.**
 
     로그 문장은 읽기 좋게 계속 바뀌므로 파싱 대상이 아니다. 기계가 볼 것은
     처음부터 따로 남긴다(face_anonymizer/events.py).
+
+    ``full=true`` 면 저널 줄을 통째로 준다. 기본은 목록이 그리는 값만이다.
 
     ``text=true`` 면 화면이 바로 그릴 수 있게 라벨·문장·색조를 붙여 준다.
     **문장을 서버가 만드는 이유**는 로그 파일과 화면이 다른 말을 하면 안 되기
@@ -564,8 +567,11 @@ def list_events(job: str = None, batch: str = None, event: str = None,
     # 한 줄 더 읽어 본다. 그게 있으면 뒤가 남았다는 뜻이다 — 전체를 세지 않고도
     # '더 보기' 를 띄울지 정할 수 있다. 저널은 계속 자라서 총 건수가 의미 없다.
     want = max(1, min(int(limit or 200), events.READ_MAX))
+    # 목록은 **그리는 값만** 받는다. 단계별 소요나 경고 원문처럼 펼쳐야 보이는
+    # 것까지 줄마다 붙어 오면 한 쪽에 몇 배가 실린다 — 상세는 펼칠 때 따로 온다.
     rows = events.read(job=job, batch=batch, event=event, mode=mode,
-                       since=since, before=before, q=q, limit=want + 1)
+                       since=since, before=before, q=q, limit=want + 1,
+                       fields=None if full else events.LIST_FIELDS)
     more = len(rows) > want
     rows = rows[:want]
     return {"events": [events.decorate(r) for r in rows] if text else rows,
@@ -596,6 +602,19 @@ EXPORT_COLUMNS = (
     ("단계", lambda r: r.get("stage") or ""),
     ("작업 id", lambda r: r.get("job") or ""),
 )
+
+
+@app.get("/api/events/detail")
+def event_detail(ts: float, job: str = None, event: str = None):
+    """줄 하나를 **원본 그대로**. 로그 화면에서 펼쳤을 때 쓴다.
+
+    목록에 상세까지 실어 보내지 않는 대신, 사람이 펼친 그 한 줄만 가져온다.
+    60줄 중 사람이 펼치는 건 보통 한둘이다.
+    """
+    row = events.detail_of(job=job, ts=ts, event=event)
+    if row is None:
+        raise errors.JOB_NOT_FOUND(f"ts={ts}")
+    return {"event": events.decorate(row), "raw": row}
 
 
 @app.get("/api/events/batches")

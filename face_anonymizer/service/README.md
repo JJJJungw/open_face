@@ -272,6 +272,17 @@ RFC 9457 `application/problem+json`. 사람이 읽는 문구와 별개로 `code`
 정리되므로 거기서 뽑으면 어제 돌린 폴더가 필터에서 사라진다 — 정작 저널에는 그
 줄들이 남아 있는데 걸러 볼 방법이 없어진다.
 
+줄을 누르면 **그 줄만** 펼쳐서 상세를 보여 준다(`GET /api/events/detail`). 목록은
+그리는 값만 받고(`events.LIST_FIELDS`), 단계별 소요·경고 원문·영상 스펙처럼 펼쳐야
+보이는 것은 안 싣는다 — 60줄에 다 붙어 오면 한 쪽에 두 배가 실리는데 사람이
+펼치는 건 보통 한둘이다. 저널 줄에는 id 가 없어서 **(시각, 사건, 작업)** 셋으로
+찾는다. id 를 새로 넣지 않는 이유는 이미 쌓인 파일에는 그게 없기 때문이다.
+
+저널은 **끝에서부터** 읽는다(`events.tail_lines`). 예전에는 `readlines()` 로
+하루치를 통째로 메모리에 얹었다 — 최신 60줄을 보려고. 900건짜리를 돌리면 하루에
+수천 줄이 쌓이고 그게 폴링마다 반복된다. UTF-8 은 여러 바이트짜리 글자가 있어서
+줄바꿈 경계에서만 자르고 앞쪽 반쪽 줄은 다음 덩이와 이어 붙인다.
+
 `내보내기`(`GET /api/export.csv`)는 **화면에 걸린 조건 그대로** CSV 를 준다.
 전용 조건을 따로 두면 화면에서 거른 것과 파일에 담긴 것이 달라지고, 그걸
 알아채는 것은 파일을 연 뒤다. UTF-8 **BOM 과 CRLF** 를 붙인다 — 안 붙이면
@@ -310,6 +321,7 @@ RFC 9457 `application/problem+json`. 사람이 읽는 문구와 별개로 `code`
 | GET | `/api/metrics` | 큐 지표 · GPU · 디스크 |
 | GET | `/api/s3/objects` `/api/s3/progress` | 버킷 나열 · 제출한 폴더의 진척률 |
 | DELETE | `/api/s3/progress?prefix=` | 진척률 목록에서 폴더 빼기 (버킷은 그대로) |
-| GET | `/api/events` `/api/events/batches` | 이벤트 저널 · 폴더 목록 |
+| GET | `/api/events` `/api/events/batches` | 이벤트 저널(목록용 슬림) · 폴더 목록 |
+| GET | `/api/events/detail?ts=&job=&event=` | 줄 하나를 원본 그대로 |
 | GET | `/api/export.csv` | 화면 조건 그대로 CSV (BOM·CRLF) |
 | GET | `/api/defaults` `/api/problems` | 기본값 · 오류 카탈로그 |

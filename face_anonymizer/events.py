@@ -119,12 +119,62 @@ def files(limit_days=7):
     return [os.path.join(DIR, n) for n in names[:limit_days]]
 
 
+# 뒤에서부터 읽을 때 한 번에 가져오는 크기. 저널 한 줄이 대략 300~500바이트라
+# 64KB 면 150줄쯤 된다 — 화면 한 쪽(60줄)을 대개 한 번에 채운다.
+_TAIL_CHUNK = 64 * 1024
+
+
+def tail_lines(path):
+    """파일을 **끝에서부터** 한 줄씩 내놓는다.
+
+    예전에는 ``readlines()`` 로 통째로 올렸다. 최신 60줄을 보려고 하루치를 다
+    메모리에 얹는 셈인데, 900건짜리를 돌리면 하루에 수천 줄이 쌓이고 그게 폴링
+    때마다 반복된다. 뒤에서 필요한 만큼만 읽으면 파일이 아무리 커도 비용이 같다.
+
+    UTF-8 은 여러 바이트짜리 글자가 있어서 아무 데나 자르면 안 된다. 줄바꿈
+    경계에서만 자르고, 맨 앞의 반쪽 줄은 다음 덩이와 이어 붙인다.
+    """
+    try:
+        with open(path, "rb") as f:
+            f.seek(0, os.SEEK_END)
+            pos = f.tell()
+            rest = b""
+            while pos > 0:
+                size = min(_TAIL_CHUNK, pos)
+                pos -= size
+                f.seek(pos)
+                chunk = f.read(size) + rest
+                parts = chunk.split(b"\n")
+                rest = parts.pop(0)          # 앞쪽 반쪽 줄은 다음 덩이가 채운다
+                for raw in reversed(parts):
+                    if raw.strip():
+                        yield raw
+            if rest.strip():
+                yield rest
+    except OSError:
+        return
+
+
+# 목록이 실제로 그리는 값들. **상세는 펼칠 때 따로 가져온다.**
+#
+# 예전에는 저널 줄을 통째로 내려보냈다. 단계별 소요(timing)나 경고 원문처럼
+# 펼쳐야 보이는 것까지 60줄에 다 붙어 오는 셈이라, 목록 한 번에 몇 배가 실렸다.
+LIST_FIELDS = ("at", "ts", "mode", "event", "job", "name", "batch",
+               "seconds", "elapsed_s", "frames", "detection_rate",
+               "review_needed", "transcoded", "source_codec", "stage",
+               "transient", "detail", "attempts", "percent", "eta_s",
+               "action", "note", "codes", "done", "failed", "avg_elapsed_s",
+               "cold_s", "queue")
+
+
 def read(job=None, batch=None, event=None, since=None, limit=200,
-         mode=None, before=None, q=None):
+         mode=None, before=None, q=None, fields=None):
     """저널을 뒤에서부터 읽어 조건에 맞는 것만. 최신 순.
 
-    파일을 통째로 파싱하지 않는다 — 뒤에서부터 필요한 만큼만 읽는다. 하루치가
-    수만 줄이 되어도 응답이 일정하다.
+    파일을 통째로 파싱하지 않는다 — 뒤에서부터 필요한 만큼만 읽는다(tail_lines).
+    하루치가 수만 줄이 되어도 응답이 일정하다.
+
+    ``fields`` 를 주면 그 키만 남긴다. 목록은 상세까지 필요 없다.
 
     ``before`` 는 '더 보기' 용이다. 받은 마지막 줄의 ``ts`` 를 그대로 넣으면 그
     아래부터 이어 읽는다. ``offset`` 을 쓰지 않는 이유는, 읽는 사이에도 줄이
@@ -132,20 +182,13 @@ def read(job=None, batch=None, event=None, since=None, limit=200,
     """
     limit = max(1, min(int(limit or 200), READ_MAX))
     needle = (q or "").strip().lower()
+    keep = set(fields) if fields else None
     out = []
     for path in files():
-        try:
-            with open(path, encoding="utf-8") as f:
-                lines = f.readlines()
-        except OSError:
-            continue
-        for line in reversed(lines):
-            line = line.strip()
-            if not line:
-                continue
+        for line in tail_lines(path):
             try:
                 row = json.loads(line)
-            except ValueError:
+            except (ValueError, UnicodeDecodeError):
                 continue                     # 반쪽 줄(쓰다 만 것)은 건너뛴다
             if job and row.get("job") != job:
                 continue
@@ -162,10 +205,37 @@ def read(job=None, batch=None, event=None, since=None, limit=200,
             if needle and needle not in " ".join(
                     str(row.get(k) or "") for k in ("name", "batch", "job")).lower():
                 continue
-            out.append(row)
+            out.append({k: v for k, v in row.items() if k in keep}
+                       if keep else row)
             if len(out) >= limit:
                 return out
     return out
+
+
+def detail_of(job=None, ts=None, event=None):
+    """줄 하나를 **원본 그대로** 찾는다. 펼쳤을 때 쓴다.
+
+    저널 줄에는 id 가 없다. 대신 (시각, 사건, 작업) 셋이면 사실상 유일하다 —
+    같은 작업의 같은 사건이 같은 밀리초에 두 번 일어나지 않는다. id 를 새로
+    넣지 않는 이유는 **이미 쌓인 파일에는 그게 없기** 때문이다.
+    """
+    if ts is None:
+        return None
+    target = round(float(ts), 3)
+    for path in files():
+        for line in tail_lines(path):
+            try:
+                row = json.loads(line)
+            except (ValueError, UnicodeDecodeError):
+                continue
+            if round(float(row.get("ts") or 0), 3) != target:
+                continue
+            if job and row.get("job") != job:
+                continue
+            if event and row.get("event") != event:
+                continue
+            return row
+    return None
 
 
 def batches(limit=None):

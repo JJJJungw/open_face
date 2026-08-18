@@ -200,6 +200,21 @@
   .lrow .lx{color:var(--dim);flex:1;min-width:0;overflow:hidden;
             text-overflow:ellipsis;white-space:nowrap}
   .lrow .lg2{color:var(--faint);font-size:11px;flex:none}
+  .lrow .lcv{color:var(--faint);font-size:9px;width:10px;flex:none;
+             transition:transform .12s}
+  .lrow.open .lcv{transform:rotate(90deg);color:var(--accent-ink)}
+  .lrow.open{background:var(--accent-sel)}
+  .ldet{padding:10px 16px 14px 88px;border-bottom:1px solid var(--line);
+        background:var(--accent-sel);font-size:12px}
+  .ldet .kv{display:grid;grid-template-columns:repeat(auto-fill,minmax(150px,1fr));
+            gap:6px 14px;margin-bottom:8px}
+  .ldet .kv > div{display:flex;gap:6px;min-width:0}
+  .ldet .kv span{color:var(--faint);flex:none}
+  .ldet .kv b{color:var(--fg);font-weight:600;overflow:hidden;
+              text-overflow:ellipsis;white-space:nowrap}
+  .ldet pre{margin:0;padding:8px 10px;background:var(--surface);
+            border:1px solid var(--line);border-radius:8px;overflow:auto;
+            font-size:11px;color:var(--dim);max-height:220px}
   /* 작업 단위로 묶었을 때의 머리줄. 게시판의 '글' 에 해당한다. */
   .lhead{display:flex;align-items:baseline;gap:9px;padding:9px 16px 6px;
          background:var(--raise);border-top:1px solid var(--line);
@@ -811,7 +826,7 @@ function scheduleLogs() {
   // 돌면, 방금 펼친 것이 통째로 접히고 전체 목록으로 되돌아간다. 첫 쪽을
   // 그냥 보고 있을 때만 갱신한다.
   if (view === 'logs' && $('#lglive').checked && !logOpen
-      && logRows.length <= LOG_PAGE)
+      && !logOpenRows.size && logRows.length <= LOG_PAGE)
     logTimer = setTimeout(() => loadLogs(), 4000);
 }
 
@@ -820,16 +835,91 @@ function esc(s) {
     c => ({ '&':'&amp;', '<':'&lt;', '>':'&gt;', '"':'&quot;' }[c]));
 }
 
+function rowKey(r) { return `${r.ts}|${r.event}|${r.job || ''}`; }
+
 function logLine(r) {
-  const job = r.job ? ` onclick="openLog('${esc(r.job)}')"` : '';
-  return `<div class="lrow"${job}>
+  const k = rowKey(r), open = logOpenRows.has(k);
+  return `<div class="lrow ${open ? 'open' : ''}" data-k="${esc(k)}"
+       onclick="toggleDetail('${esc(k)}')">
+    <span class="lcv">▶</span>
     <span class="lt">${esc(r.time)}</span>
     <span class="lm ${r.mode === 'msa' ? 'msa' : ''}">${esc(r.mode)}</span>
     <span class="lb ${esc(r.tone)}">${esc(r.label)}</span>
-    <span class="ln">${esc(r.name || r.job || '')}</span>
+    <span class="ln" title="이 작업만 보기"
+          onclick="event.stopPropagation();openLog('${esc(r.job || '')}')"
+          style="${r.job ? 'cursor:pointer' : ''}">${esc(r.name || r.job || '')}</span>
     <span class="lx">${esc(r.text)}</span>
     ${r.batch ? `<span class="lg2">${esc(r.batch)}</span>` : ''}
-  </div>`;
+  </div>${open ? detailHtml(k) : ''}`;
+}
+
+// ---------------------------------------------------------------------------
+// 상세는 **펼칠 때만** 가져온다.
+//
+// 목록이 그리는 값은 여섯 칸뿐인데 예전에는 저널 줄을 통째로 받았다. 단계별
+// 소요나 경고 원문처럼 펼쳐야 보이는 것까지 60줄에 다 붙어 온 셈이다. 60줄 중
+// 사람이 펼치는 건 보통 한둘이라, 그 한둘만 따로 가져오는 편이 훨씬 싸다.
+//
+// 한 번 받은 것은 들고 있는다. 4초마다 목록을 다시 그리는데 그때마다 다시
+// 가져오면 펼쳐 둔 줄이 깜빡인다.
+const logDetails = new Map();
+let logOpenRows = new Set();
+
+const DETAIL_LABEL = {
+  seconds:'소요(초)', elapsed_s:'경과(초)', frames:'프레임',
+  detected_frames:'검출 프레임', detection_rate:'검출률',
+  realtime_factor:'실시간 대비', raw_boxes:'검출 박스', filled_boxes:'보간',
+  source_codec:'원본 코덱', transcoded:'전사', attempts:'시도',
+  stage:'단계', transient:'일시적', percent:'진행률', eta_s:'남은(초)',
+  action:'판정', note:'사유', job:'작업 id', queue:'큐', cold_s:'기동(초)',
+  done:'성공', failed:'실패', avg_elapsed_s:'평균(초)', started_at:'시작',
+  finished_at:'종료', span:'구간', review_needed:'검수 필요',
+};
+const DETAIL_SKIP = new Set(['at', 'ts', 'mode', 'event', 'name', 'batch',
+                             'label', 'text', 'tone', 'time', 'timing']);
+const TIMING_LABEL = { ingest:'인제스트', detect:'검출', track:'추적',
+                       render:'렌더', audio:'최종', total:'합계' };
+
+function detailHtml(k) {
+  const d = logDetails.get(k);
+  if (!d) return `<div class="ldet">불러오는 중…</div>`;
+  if (d.error) return `<div class="ldet">상세를 가져오지 못했습니다</div>`;
+  const r = d.raw || {};
+  const kv = Object.entries(r)
+    .filter(([key, v]) => !DETAIL_SKIP.has(key) && v !== null && v !== '')
+    .map(([key, v]) => {
+      let out = v;
+      if (key === 'detection_rate') out = (v * 100).toFixed(2) + '%';
+      else if (typeof v === 'boolean') out = v ? '예' : '아니오';
+      else if (Array.isArray(v)) out = v.join(', ') || '—';
+      else if (typeof v === 'object') return '';
+      return `<div><span>${DETAIL_LABEL[key] || key}</span>
+        <b title="${esc(out)}">${esc(out)}</b></div>`;
+    }).filter(Boolean).join('');
+  // 단계별 소요는 따로 — 어디가 느렸는지가 한눈에 보여야 한다.
+  const t = r.timing || {};
+  const timing = Object.keys(t).length
+    ? `<div class="kv">${Object.entries(t).map(([key, v]) =>
+        `<div><span>${TIMING_LABEL[key] || key}</span><b>${v}초</b></div>`
+      ).join('')}</div>` : '';
+  return `<div class="ldet">
+    ${kv ? `<div class="kv">${kv}</div>` : ''}${timing}
+    <pre>${esc(JSON.stringify(r, null, 1))}</pre></div>`;
+}
+
+async function toggleDetail(k) {
+  if (logOpenRows.has(k)) { logOpenRows.delete(k); return renderLogs(); }
+  logOpenRows.add(k);
+  renderLogs();
+  if (logDetails.has(k)) return;
+  const [ts, event, job] = k.split('|');
+  const p = ['ts=' + encodeURIComponent(ts)];
+  if (event) p.push('event=' + encodeURIComponent(event));
+  if (job) p.push('job=' + encodeURIComponent(job));
+  const r = await fetch('/api/events/detail?' + p.join('&'))
+    .then(r => r.ok ? r.json() : { error: true }).catch(() => ({ error: true }));
+  logDetails.set(k, r);
+  if (logOpenRows.has(k)) renderLogs();
 }
 
 // 작업 단위로 묶기. 같은 파일에 대한 사건이 시간순으로 흩어져 있으면 "이 파일이
@@ -894,7 +984,7 @@ function openLog(job) {
 // 옛 커서가 붙어서 중간부터 나온다.
 let logDebounce = null;
 function logFilterChanged(delay) {
-  logOpen = ''; logCursor = null;
+  logOpen = ''; logCursor = null; logOpenRows = new Set();
   clearTimeout(logDebounce);
   logDebounce = setTimeout(() => loadLogs(), delay || 0);
 }

@@ -1646,3 +1646,89 @@ def test_export_is_empty_but_valid_when_nothing_matches(client, tmp_path,
     body = client.get("/api/export.csv?q=없는파일").content.decode("utf-8-sig")
     assert body.splitlines()[0].startswith("시각,")
     assert len(body.splitlines()) == 1
+
+
+# ---------------------------------------------------------------------------
+# 목록은 가볍게, 상세는 펼칠 때
+
+
+def _fat_event(events, tmp_path, monkeypatch):
+    monkeypatch.setattr(events, "DIR", str(tmp_path / "ev"))
+    return events.emit(
+        "job.finished", job="a", name="뉴스.mp4", batch="kbs", seconds=40.7,
+        frames=1027, detected_frames=768, detection_rate=0.7478,
+        realtime_factor=4.7, raw_boxes=1842, filled_boxes=311, method="mosaic",
+        source_codec="av1", transcoded=True, attempts=1,
+        warnings=["decode-unverified"],
+        timing={"ingest": 12.6, "detect": 13.6, "track": 0.9,
+                "render": 13.0, "audio": 0.8},
+        video={"width": 1280, "height": 720, "fps": 29.97})
+
+
+def test_the_list_does_not_carry_what_only_the_detail_shows(client, tmp_path,
+                                                            monkeypatch):
+    """단계별 소요·경고 원문까지 60줄에 다 붙어 오면 한 쪽에 몇 배가 실린다.
+
+    사람이 펼치는 건 보통 한둘이라, 그 한둘만 따로 가져오는 편이 훨씬 싸다.
+    """
+    from face_anonymizer import events
+    _fat_event(events, tmp_path, monkeypatch)
+
+    row = client.get("/api/events?limit=1").json()["events"][0]
+    assert "timing" not in row and "video" not in row and "warnings" not in row
+    assert row["text"] and row["seconds"] == 40.7      # 그릴 것은 다 있다
+
+    full = client.get("/api/events?limit=1&full=true").json()["events"][0]
+    assert full["timing"]["detect"] == 13.6
+
+
+def test_one_line_can_be_fetched_in_full(client, tmp_path, monkeypatch):
+    """저널 줄에는 id 가 없다 — (시각, 사건, 작업) 셋으로 찾는다."""
+    from face_anonymizer import events
+    row = _fat_event(events, tmp_path, monkeypatch)
+
+    r = client.get(f"/api/events/detail?ts={row['ts']}&job=a&event=job.finished")
+    assert r.status_code == 200
+    raw = r.json()["raw"]
+    assert raw["timing"]["render"] == 13.0
+    assert raw["video"]["width"] == 1280
+    assert raw["warnings"] == ["decode-unverified"]
+
+
+def test_asking_for_a_line_that_is_not_there(client, tmp_path, monkeypatch):
+    from face_anonymizer import events
+    _fat_event(events, tmp_path, monkeypatch)
+    assert client.get("/api/events/detail?ts=1").status_code == 404
+
+
+def test_reading_a_big_journal_does_not_load_it_all(tmp_path, monkeypatch):
+    """예전에는 readlines() 로 하루치를 통째로 메모리에 얹었다.
+
+    최신 몇 줄을 보려고 그러는 셈인데, 900건짜리를 돌리면 하루에 수천 줄이
+    쌓이고 그게 폴링마다 반복된다. 뒤에서 필요한 만큼만 읽으면 비용이 같다.
+    """
+    from face_anonymizer import events
+    monkeypatch.setattr(events, "DIR", str(tmp_path / "ev"))
+    for i in range(3000):
+        events.emit("job.finished", job=f"j{i}", name=f"파일{i}.mp4", batch="kbs",
+                    seconds=40.0 + i)
+
+    rows = events.read(limit=5)
+    assert len(rows) == 5
+    assert rows[0]["job"] == "j2999"                  # 최신이 앞
+    # 뒤에서부터 읽으므로 파일 크기와 무관하게 5줄만 만들어진다
+    assert [r["job"] for r in rows] == [f"j{i}" for i in range(2999, 2994, -1)]
+
+
+def test_tail_reading_handles_multibyte_boundaries(tmp_path, monkeypatch):
+    """UTF-8 은 여러 바이트짜리 글자가 있다. 아무 데나 자르면 한글이 깨진다."""
+    from face_anonymizer import events
+    monkeypatch.setattr(events, "DIR", str(tmp_path / "ev"))
+    monkeypatch.setattr(events, "_TAIL_CHUNK", 64)     # 일부러 잘게 끊는다
+    names = [f"한글이름_{i}_아주아주긴이름입니다.mp4" for i in range(50)]
+    for i, n in enumerate(names):
+        events.emit("job.finished", job=f"j{i}", name=n, batch="kbs")
+
+    rows = events.read(limit=50)
+    assert len(rows) == 50
+    assert [r["name"] for r in rows] == list(reversed(names))
