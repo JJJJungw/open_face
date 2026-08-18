@@ -267,6 +267,17 @@ RFC 9457 `application/problem+json`. 사람이 읽는 문구와 별개로 `code`
 '작업 단위로 묶기' 는 같은 `job` 의 줄을 한 덩이로 접는다. 게시판의 '글' 이
 작업 하나이고, 그 안의 줄이 그 작업에 있었던 일이다.
 
+폴더 필터는 칩으로 고른다 — 아무것도 안 고르면 전체, 하나면 단일, 여럿이면
+다중. 목록은 **저널에서** 뽑는다(`GET /api/events/batches`). 작업은 TTL 로
+정리되므로 거기서 뽑으면 어제 돌린 폴더가 필터에서 사라진다 — 정작 저널에는 그
+줄들이 남아 있는데 걸러 볼 방법이 없어진다.
+
+`내보내기`(`GET /api/export.csv`)는 **화면에 걸린 조건 그대로** CSV 를 준다.
+전용 조건을 따로 두면 화면에서 거른 것과 파일에 담긴 것이 달라지고, 그걸
+알아채는 것은 파일을 연 뒤다. UTF-8 **BOM 과 CRLF** 를 붙인다 — 안 붙이면
+한국어 윈도우 엑셀이 파일명을 깨뜨린다. 요약 문장뿐 아니라 소요·프레임·검출률을
+**칸으로 따로** 넣는다. 엑셀에서 정렬·필터를 하려면 수치가 칸에 있어야 한다.
+
 ## 파일
 
 | 파일 | 하는 일 |
@@ -299,4 +310,6 @@ RFC 9457 `application/problem+json`. 사람이 읽는 문구와 별개로 `code`
 | GET | `/api/metrics` | 큐 지표 · GPU · 디스크 |
 | GET | `/api/s3/objects` `/api/s3/progress` | 버킷 나열 · 제출한 폴더의 진척률 |
 | DELETE | `/api/s3/progress?prefix=` | 진척률 목록에서 폴더 빼기 (버킷은 그대로) |
+| GET | `/api/events` `/api/events/batches` | 이벤트 저널 · 폴더 목록 |
+| GET | `/api/export.csv` | 화면 조건 그대로 CSV (BOM·CRLF) |
 | GET | `/api/defaults` `/api/problems` | 기본값 · 오류 카탈로그 |

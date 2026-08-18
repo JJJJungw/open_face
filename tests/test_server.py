@@ -1570,3 +1570,79 @@ def test_two_decisions_at_once_do_not_race(client, make_video, monkeypatch):
         t.join()
 
     assert sorted(codes) == [200, 409], codes      # 정확히 하나만 먹는다
+
+
+# ---------------------------------------------------------------------------
+# 내보내기
+
+
+def _events(events, tmp_path, monkeypatch):
+    monkeypatch.setattr(events, "DIR", str(tmp_path / "ev"))
+    events.emit("job.finished", job="a", name="뉴스.mp4", batch="kbs",
+                seconds=40.7, frames=1027, detected_frames=768,
+                detection_rate=0.7478, source_codec="av1", transcoded=True,
+                attempts=1, review_needed=True)
+    events.emit("job.failed", job="b", name="인터뷰.mp4", batch="mbc",
+                stage="download", transient=True, detail="HTTP 403")
+
+
+def test_export_carries_a_bom_so_excel_does_not_mangle_it(client, tmp_path,
+                                                          monkeypatch):
+    """BOM 이 없으면 한국어 윈도우 엑셀이 파일명을 깨뜨린다.
+
+    받아서 열었을 때 깨져 있으면 그게 첫인상이 된다.
+    """
+    from face_anonymizer import events
+    _events(events, tmp_path, monkeypatch)
+
+    r = client.get("/api/export.csv")
+    assert r.status_code == 200
+    assert r.content.startswith("﻿".encode()), "BOM 이 없다"
+    assert "attachment" in r.headers["content-disposition"]
+    body = r.content.decode("utf-8-sig")
+    assert body.startswith("시각,경로,사건,파일명,폴더")
+    assert "\r\n" in body                     # 엑셀은 CRLF 를 기대한다
+
+
+def test_export_carries_the_numbers_not_just_the_sentence(client, tmp_path,
+                                                          monkeypatch):
+    """엑셀에서 정렬·필터를 하려면 수치가 칸에 따로 있어야 한다."""
+    from face_anonymizer import events
+    _events(events, tmp_path, monkeypatch)
+
+    body = client.get("/api/export.csv").content.decode("utf-8-sig")
+    line = next(l for l in body.splitlines() if "뉴스.mp4" in l)
+    cells = line.split(",")
+    assert "40.7" in cells and "1027" in cells and "768" in cells
+    assert "74.78" in cells                   # 검출률은 % 로 편다
+    assert "예" in cells                       # 전사 · 검수 필요
+
+
+def test_export_follows_the_filters_on_screen(client, tmp_path, monkeypatch):
+    """**보이는 것과 받는 것이 같아야 한다.**
+
+    내보내기 전용 조건을 따로 두면 화면에서 거른 것과 파일에 담긴 것이 달라지고,
+    그걸 알아채는 것은 파일을 연 뒤다.
+    """
+    from face_anonymizer import events
+    _events(events, tmp_path, monkeypatch)
+
+    only_kbs = client.get("/api/export.csv?batch=kbs").content.decode("utf-8-sig")
+    assert "뉴스.mp4" in only_kbs and "인터뷰.mp4" not in only_kbs
+
+    both = client.get("/api/export.csv?batch=kbs&batch=mbc").content.decode("utf-8-sig")
+    assert "뉴스.mp4" in both and "인터뷰.mp4" in both
+
+    fails = client.get("/api/export.csv?event=job.failed").content.decode("utf-8-sig")
+    assert "인터뷰.mp4" in fails and "뉴스.mp4" not in fails
+
+
+def test_export_is_empty_but_valid_when_nothing_matches(client, tmp_path,
+                                                        monkeypatch):
+    """조건에 맞는 게 없어도 열 이름은 있어야 한다 — 빈 파일은 고장으로 읽힌다."""
+    from face_anonymizer import events
+    _events(events, tmp_path, monkeypatch)
+
+    body = client.get("/api/export.csv?q=없는파일").content.decode("utf-8-sig")
+    assert body.splitlines()[0].startswith("시각,")
+    assert len(body.splitlines()) == 1

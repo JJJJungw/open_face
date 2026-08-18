@@ -173,6 +173,11 @@
 
   /* 로그 게시판. 표가 아니라 줄이다 — 한 줄이 사건 하나이고, 눈이 시각을 따라
      세로로 내려가야 해서 앞 세 칸의 폭을 고정한다. */
+  .bchip{font-size:11.5px;padding:3px 9px;border-radius:20px;cursor:pointer;
+         border:1px solid var(--line);color:var(--dim);background:var(--surface)}
+  .bchip:hover{border-color:var(--accent);color:var(--accent-ink)}
+  .bchip.on{background:var(--accent-dim);border-color:var(--accent);
+            color:var(--accent-ink);font-weight:600}
   .lrow{display:flex;align-items:baseline;gap:10px;padding:7px 16px;
         border-bottom:1px solid var(--line);font-size:12.5px;cursor:pointer}
   .lrow:hover{background:var(--accent-sel)}
@@ -422,7 +427,13 @@
               <span>자동 갱신</span></label>
             <span class="n" id="lgnote"></span>
             <button class="ghost" onclick="loadLogs()">새로고침</button>
+            <button class="ghost" onclick="exportLogs()">내보내기</button>
           </div>
+          <!-- 폴더 고르기. 아무것도 안 고르면 전체, 하나면 단일, 여럿이면 다중.
+               따로 화면을 두지 않는 이유는 **보이는 것과 받는 것이 같아야** 해서다 —
+               내보내기는 이 필터를 그대로 따라간다. -->
+          <div class="bar" id="lgbatches" hidden
+               style="border-top:0;padding-top:0"></div>
           <div id="logs"><div class="empty">불러오는 중…</div></div>
         </section>
       </section>
@@ -721,7 +732,7 @@ function go2(v) {
   // 목록이 서로 다른 이야기를 해서 화면이 두 개인 것처럼 읽힌다.
   $('#kpis').hidden = v === 'overview' || v === 'logs';
   if (v === 'overview') loadOverview();
-  if (v === 'logs') loadLogs();
+  if (v === 'logs') { loadLogBatches(); loadLogs(); }
   poll();
 }
 
@@ -733,14 +744,54 @@ function go2(v) {
 const LOG_PAGE = 60;
 let logRows = [], logCursor = null, logMore = false, logTimer = null, logOpen = '';
 
-function logQuery(before) {
-  const p = ['limit=' + LOG_PAGE];
+let logBatches = [];          // 고른 폴더들. 비어 있으면 전체다.
+
+function logFilterParams() {
+  const p = [];
   const e = $('#lgevent').value, m = $('#lgmode').value, q = $('#lgq').value.trim();
   if (e) p.push('event=' + encodeURIComponent(e));
   if (m) p.push('mode=' + m);
   if (q) p.push('q=' + encodeURIComponent(q));
+  for (const b of logBatches) p.push('batch=' + encodeURIComponent(b));
+  return p;
+}
+
+function logQuery(before) {
+  const p = logFilterParams();
+  p.unshift('limit=' + LOG_PAGE);
   if (before) p.push('before=' + before);
   return p.join('&');
+}
+
+// 내보내기는 **화면에 걸린 조건 그대로** 나간다. 전용 조건을 따로 두면 화면에서
+// 거른 것과 파일에 담긴 것이 달라지고, 그걸 알아채는 건 파일을 연 뒤다.
+function exportLogs() {
+  location.href = '/api/export.csv?' + logFilterParams().join('&');
+}
+
+async function loadLogBatches() {
+  // 작업 목록이 아니라 **저널**에서 받는다. 작업은 TTL 로 정리되므로 거기서
+  // 뽑으면 어제 돌린 폴더가 필터에서 사라진다 — 저널엔 그 줄이 남아 있는데.
+  const r = await fetch('/api/events/batches').then(r => r.ok ? r.json() : null)
+    .catch(() => null);
+  const names = (r && r.batches || []).filter(Boolean);
+  const el = $('#lgbatches');
+  el.hidden = !names.length;                 // 폴더로 돌린 적이 없으면 줄 자체를 숨긴다
+  if (!names.length) return;
+  el.innerHTML = `<span class="n" style="margin:0 6px 0 0">폴더</span>` +
+    `<span class="bchip ${logBatches.length ? '' : 'on'}"
+           onclick="pickBatch('')">전체</span>` +
+    names.map(n => `<span class="bchip ${logBatches.includes(n) ? 'on' : ''}"
+        onclick="pickBatch('${n}')">${esc(n)}</span>`).join('');
+}
+
+function pickBatch(name) {
+  if (!name) logBatches = [];                          // '전체'
+  else if (logBatches.includes(name))
+    logBatches = logBatches.filter(b => b !== name);    // 다시 누르면 해제
+  else logBatches.push(name);
+  loadLogBatches();
+  logFilterChanged();
 }
 
 async function loadLogs(append) {

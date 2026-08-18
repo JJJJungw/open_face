@@ -168,6 +168,21 @@ def read(job=None, batch=None, event=None, since=None, limit=200,
     return out
 
 
+def batches(limit=None):
+    """저널에 나타난 폴더 이름들, 최근에 보인 것이 앞.
+
+    **작업 목록이 아니라 저널에서 뽑는다.** 작업은 TTL 로 정리되므로 거기서
+    뽑으면 어제 돌린 폴더가 필터 목록에서 사라진다 — 정작 저널에는 그 줄들이
+    그대로 남아 있는데 걸러 볼 방법이 없어진다.
+    """
+    seen = []
+    for row in read(limit=limit or READ_MAX):
+        b = row.get("batch")
+        if b and b not in seen:
+            seen.append(b)
+    return seen
+
+
 # ---------------------------------------------------------------------------
 # 읽는 쪽 — 줄 하나를 사람이 읽을 한 문장으로.
 #

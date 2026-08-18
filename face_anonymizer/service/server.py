@@ -23,6 +23,7 @@ import shutil
 import threading
 import time
 from contextlib import asynccontextmanager
+from urllib.parse import quote
 
 from fastapi import Body, FastAPI, Query, Request, Response
 from fastapi.responses import FileResponse, HTMLResponse, RedirectResponse
@@ -571,6 +572,84 @@ def list_events(job: str = None, batch: str = None, event: str = None,
             "has_more": more,
             "cursor": rows[-1].get("ts") if rows else None,
             "mode": events.MODE}
+
+
+# 내보내기 열 — **화면에서 보던 것과 같은 순서.** 파일을 열었을 때 화면과 다른
+# 순서면 대조가 안 된다. 사건 종류가 섞이므로 해당 없는 칸은 비워 둔다.
+EXPORT_COLUMNS = (
+    ("시각", lambda r: r.get("at") or ""),
+    ("경로", lambda r: r.get("mode") or ""),
+    ("사건", lambda r: r.get("label") or r.get("event") or ""),
+    ("파일명", lambda r: r.get("name") or ""),
+    ("폴더", lambda r: r.get("batch") or ""),
+    ("요약", lambda r: r.get("text") or ""),
+    ("소요(초)", lambda r: r.get("seconds") if r.get("seconds") is not None
+     else r.get("elapsed_s", "")),
+    ("프레임", lambda r: r.get("frames", "")),
+    ("검출 프레임", lambda r: r.get("detected_frames", "")),
+    ("검출률(%)", lambda r: round(r["detection_rate"] * 100, 2)
+     if isinstance(r.get("detection_rate"), (int, float)) else ""),
+    ("원본 코덱", lambda r: r.get("source_codec") or ""),
+    ("전사", lambda r: "예" if r.get("transcoded") else ""),
+    ("시도", lambda r: r.get("attempts", "")),
+    ("검수 필요", lambda r: "예" if r.get("review_needed") else ""),
+    ("단계", lambda r: r.get("stage") or ""),
+    ("작업 id", lambda r: r.get("job") or ""),
+)
+
+
+@app.get("/api/events/batches")
+def event_batches():
+    """로그 화면의 폴더 필터 목록. **저널에서 뽑는다**(events.batches 주석 참고)."""
+    return {"batches": events.batches()}
+
+
+@app.get("/api/export.csv")
+def export_csv(job: str = None, batch: list[str] = Query(default=[]),
+               event: str = None, mode: str = None, since: float = None,
+               before: float = None, q: str = None, limit: int = 5000):
+    """지금 화면에 걸린 조건 그대로 내보낸다.
+
+    **보이는 것과 받는 것이 같아야 한다.** 내보내기 전용 조건을 따로 두면 화면
+    에서 거른 것과 파일에 담긴 것이 달라지고, 그걸 알아채는 것은 파일을 연 뒤다.
+
+    폴더는 여럿 줄 수 있다(``?batch=kbs&batch=mbc``). 아무것도 안 주면 전부다.
+
+    **UTF-8 BOM 을 붙인다.** 안 붙이면 한국어 윈도우 엑셀이 파일명을 깨뜨린다 —
+    받아서 열었을 때 깨져 있으면 그게 첫인상이 된다.
+    """
+    import csv
+    import io
+
+    picked = [b for b in (batch or []) if b]
+    rows = []
+    if picked:
+        # 폴더별로 따로 읽고 합친다. events.read 는 폴더 하나만 받는다.
+        for b in picked:
+            rows += events.read(job=job, batch=b, event=event, mode=mode,
+                                since=since, before=before, q=q, limit=limit)
+        rows.sort(key=lambda r: -(r.get("ts") or 0))
+        rows = rows[:limit]
+    else:
+        rows = events.read(job=job, event=event, mode=mode, since=since,
+                           before=before, q=q, limit=limit)
+
+    buf = io.StringIO()
+    w = csv.writer(buf, lineterminator="\r\n")     # 엑셀은 CRLF 를 기대한다
+    w.writerow([name for name, _get in EXPORT_COLUMNS])
+    for raw in rows:
+        r = events.decorate(raw)
+        w.writerow([get(r) for _name, get in EXPORT_COLUMNS])
+
+    stamp = (timefmt.iso(time.time()) or "")[:16].replace(":", "").replace("-", "")
+    tag = "-".join(picked) if picked and len(picked) <= 3 else ""
+    name = f"face-anonymizer-log-{tag + '-' if tag else ''}{stamp}.csv"
+    return Response(
+        content="\ufeff" + buf.getvalue(),
+        media_type="text/csv; charset=utf-8",
+        headers={"Content-Disposition":
+                 f'attachment; filename="{name}"; '
+                 f"filename*=UTF-8''{quote(name)}"})
 
 
 @app.get("/api/jobs")
