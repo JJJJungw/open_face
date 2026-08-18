@@ -145,24 +145,41 @@ def credential_source():
 def editable(config=None):
     """화면에서 저장소를 바꿀 수 있나. (가능?, 사유)
 
-    **화면이 보고 있는 설정으로 판단한다.** 모듈 설정만 보면, 스토어가 다른
-    값으로 만들어졌을 때 "버킷 있음" 과 "아직 첫 실행" 이 같이 뜬다.
+    **연결하고 끊는 것은 화면이 한다.** 처음에는 첫 실행에만 열고 그 뒤로는
+    잠갔는데, 그러면 다른 버킷으로 옮기려고 서버를 다시 띄워야 했다. 도구를
+    쓰는 사람 입장에서 그건 "고를 수 있다" 가 아니다.
 
-    **첫 실행에만 연다.** 아직 아무것도 안 정해졌으면 화면에서 정할 수 있고,
-    한 번 정해지면 잠긴다. 남이 이걸 가져다 공인 IP 에 그냥 띄우는 일이 반드시
-    생기는데, 그때 설정 화면이 열려 있으면 서버에 닿는 누구나 저장소를 갈아
-    치울 수 있다. 우리 API 에는 아직 인증이 없다.
+    잠금을 푼 대가는 분명히 적어 둔다. **이 API 에는 인증이 없다.** 공인 IP 에
+    띄우면 서버에 닿는 누구나 저장소를 자기 것으로 바꿀 수 있다 — 다만 그 사람은
+    이미 작업을 넣고 지우고 결과 주소를 받아 갈 수도 있다. 즉 저장소 설정만
+    잠가 두는 것은 문 하나만 잠그고 나머지를 다 열어 두는 일이었다. 진짜 답은
+    인증이고, 그때까지 이 도구는 **믿을 수 있는 망 안에서** 띄우는 물건이다.
 
-    잠긴 뒤에도 바꿔야 하면 띄우는 사람이 ``FA_ALLOW_STORAGE_EDIT=1`` 로
-    **명시적으로** 연다. 기본이 잠김이라 모르고 노출될 일이 없다.
+    잠가야 하는 배포는 ``FA_ALLOW_STORAGE_EDIT=0`` 으로 띄운다.
     """
     v = os.environ.get("FA_ALLOW_STORAGE_EDIT", "").strip().lower()
-    if v not in ("", "0", "false", "no"):
-        return True, ""
-    if not (config or CONFIG).bucket:
-        return True, ""                            # 첫 실행 — 정할 게 남았다
-    return False, ("이미 설정되어 있습니다. 바꾸시려면 FA_ALLOW_STORAGE_EDIT=1 "
-                   "로 서버를 다시 띄우거나 .env 를 고쳐 주세요.")
+    if v in ("0", "false", "no", "off"):
+        if not (config or CONFIG).bucket:
+            return True, ""                        # 첫 실행은 그래도 열어 준다
+        return False, ("이 서버는 화면에서 저장소를 바꿀 수 없게 띄워져 "
+                       "있습니다. .env 를 고치고 다시 띄워 주세요.")
+    return True, ""
+
+
+def disconnect():
+    """붙어 있던 곳에서 떨어진다. 저장해 둔 설정과 메모리의 열쇠를 같이 지운다.
+
+    **버킷은 건드리지 않는다.** 파일은 그대로 있고 우리가 안 볼 뿐이다.
+    """
+    global _creds
+    _creds = None
+    path = providers.saved_path()
+    try:
+        os.remove(path)
+    except OSError:
+        pass
+    reconfigure(providers.StorageConfig(provider=CONFIG.provider, bucket=""))
+    return path
 
 
 def client_config():

@@ -95,8 +95,7 @@ def test_write_only_failure_also_blocks_the_save(fresh, monkeypatch):
     assert not (fresh.jobs_dir / providers.SAVED_NAME).exists()
 
 
-def test_saving_locks_the_door(fresh):
-    """한 번 정해지면 닫힌다. 우리 API 에는 인증이 없다."""
+def test_saving_connects(fresh):
     r = fresh.post("/api/storage", json={"provider": "ncp", "bucket": GOOD,
                                          "root_prefix": "v1/input/"})
     assert r.status_code == 200, r.text
@@ -106,23 +105,55 @@ def test_saving_locks_the_door(fresh):
     assert cur["region"] == "kr-standard"
 
     d = fresh.get("/api/storage").json()
-    assert d["editable"] is False and d["first_run"] is False
-    assert "FA_ALLOW_STORAGE_EDIT" in d["lock_reason"]
+    assert d["first_run"] is False and d["current"]["ready"] is True
 
-    r2 = fresh.post("/api/storage", json={"provider": "s3",
-                                          "bucket": "someone-elses"})
-    assert r2.status_code == 409
-    assert r2.json()["code"] == "storage_locked"
-    # 잠긴 뒤에도 원래 값이 그대로여야 한다 — 거절만 하고 바꿔 놓으면 최악이다.
+
+def test_a_locked_down_server_refuses_to_change(fresh, monkeypatch):
+    """공개된 자리에 띄우는 배포는 화면에서 못 바꾸게 잠글 수 있어야 한다."""
+    fresh.post("/api/storage", json={"provider": "s3", "bucket": GOOD})
+    monkeypatch.setenv("FA_ALLOW_STORAGE_EDIT", "0")
+
+    d = fresh.get("/api/storage").json()
+    assert d["editable"] is False and d["lock_reason"]
+
+    r = fresh.post("/api/storage", json={"provider": "s3",
+                                         "bucket": "someone-elses"})
+    assert r.status_code == 409 and r.json()["code"] == "storage_locked"
+    assert fresh.delete("/api/storage").status_code == 409
+    # 거절만 하고 바꿔 놓으면 최악이다.
     assert s3mod.CONFIG.bucket == GOOD
 
 
-def test_the_switch_opens_it_again(fresh, monkeypatch):
-    """잠긴 뒤에도 바꿔야 하면 **띄우는 사람이 명시적으로** 연다."""
+def test_disconnect_goes_back_to_the_first_screen(fresh):
+    """다른 버킷으로 옮기려고 서버를 다시 띄워야 한다면 '고를 수 있다' 가 아니다."""
+    fresh.post("/api/storage", json={"provider": "ncp", "bucket": GOOD,
+                                     "access_key": "AKIAEXAMPLE",
+                                     "secret_key": "s3cr3t"})
+    assert (fresh.jobs_dir / providers.SAVED_NAME).exists()
+
+    r = fresh.delete("/api/storage")
+    assert r.status_code == 200, r.text
+
+    d = fresh.get("/api/storage").json()
+    assert d["first_run"] is True and d["editable"] is True
+    # 남겨 둔 설정도 메모리의 열쇠도 같이 지운다.
+    assert not (fresh.jobs_dir / providers.SAVED_NAME).exists()
+    assert s3mod.credentials() is None
+    # 그리고 곧바로 다른 곳에 붙을 수 있어야 한다.
+    assert fresh.post("/api/storage",
+                      json={"provider": "s3", "bucket": GOOD}).status_code == 200
+
+
+def test_disconnect_waits_for_work_in_flight(fresh, monkeypatch):
+    """돌고 있는 작업 밑에서 저장소를 빼면 그 작업은 결과를 올릴 곳을 잃는다."""
+    from face_anonymizer.service import jobs as jobsmod
     fresh.post("/api/storage", json={"provider": "s3", "bucket": GOOD})
-    assert fresh.get("/api/storage").json()["editable"] is False
-    monkeypatch.setenv("FA_ALLOW_STORAGE_EDIT", "1")
-    assert fresh.get("/api/storage").json()["editable"] is True
+    monkeypatch.setattr(jobsmod, "counts",
+                        lambda: {"running": 1, "queued": 0, "review": 0})
+
+    r = fresh.delete("/api/storage")
+    assert r.status_code == 409 and r.json()["code"] == "storage_busy"
+    assert s3mod.CONFIG.bucket == GOOD           # 그대로 붙어 있어야 한다
 
 
 def test_what_gets_saved_has_no_secrets_in_it(fresh):

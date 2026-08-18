@@ -62,6 +62,20 @@
   .badge{display:inline-flex;align-items:center;gap:6px;font-size:11.5px;
          color:var(--dim);background:var(--surface);border:1px solid var(--line);
          border-radius:20px;padding:3px 11px;white-space:nowrap}
+  /* 연결 표시 — 평소에는 한 줄, 누르면 자세히. */
+  .conn{display:inline-flex;align-items:center;gap:7px;font-size:11.5px;
+        font-weight:500;color:var(--dim);background:var(--surface);
+        border:1px solid var(--line);border-radius:20px;padding:3px 11px;
+        white-space:nowrap;cursor:pointer}
+  .conn:hover:not(:disabled){background:var(--raise);color:var(--accent-ink);
+        border-color:#cfe0f6}
+  .conn .dot{width:7px;height:7px;border-radius:50%;background:var(--good);
+        box-shadow:0 0 0 3px rgba(12,163,12,.16)}
+  .conn.off .dot{background:var(--faint);box-shadow:none}
+  #connpop{position:absolute;right:24px;top:56px;z-index:20;width:380px;
+        background:var(--surface);border:1px solid var(--line);border-radius:12px;
+        box-shadow:0 10px 34px rgba(15,23,42,.13);padding:16px 18px}
+  #connpop .kv{margin:0}
   .content{padding:20px 24px 32px;display:flex;flex-direction:column;gap:18px}
 
   /* ── KPI 타일 ───────────────────────────────────────────────────────── */
@@ -431,8 +445,13 @@
   <main>
     <div class="top">
       <h1 id="page">파일 브라우저</h1>
+      <!-- 어디에 붙어 있나. **카드 하나를 통째로 쓸 일이 아니다** — 평소에는
+           "어디에 붙어 있는지" 한 줄이면 되고, 자세한 것은 눌렀을 때 나오면
+           된다. 현황 화면에 카드로 두면 그 화면에서만 보이는 것도 문제였다. -->
+      <button class="conn" id="conn" onclick="toggleConn()" hidden></button>
       <span class="badge" id="dev">—</span>
     </div>
+    <div id="connpop" hidden></div>
 
     <div class="content">
       <div class="kpis" id="kpis"></div>
@@ -450,16 +469,6 @@
             <div id="opsbody" class="pad"></div>
           </section>
         </div>
-        <!-- 어디에 붙어 있나. 지금은 읽기 전용이다 — 화면에서 키를 받으려면
-             API 인증이 먼저다(지금은 인증이 없어서, 서버에 닿는 누구나 키를
-             심거나 볼 수 있게 된다). -->
-        <section class="card" id="card-storage" style="margin-top:14px">
-          <h2>저장소
-            <button class="ghost" onclick="testStorage()"
-                    style="margin-left:auto">연결 확인</button>
-            <span class="cnt" id="storagesum"></span></h2>
-          <div id="storage" class="pad"><div class="empty">불러오는 중…</div></div>
-        </section>
 
         <!-- 폴더 단위 시작·종료. 파일 카드에서는 읽어 낼 수 없는 값이다. -->
         <section class="card" id="card-batches" hidden style="margin-top:14px">
@@ -1213,23 +1222,69 @@ let STORAGE = null;
 async function loadStorage() {
   const d = await fetch('/api/storage').then(r => r.ok ? r.json() : null)
     .catch(() => null);
-  const el = $('#storage');
-  if (!d) { el.innerHTML = '<div class="empty">불러오지 못했습니다</div>'; return; }
+  if (!d) { $('#conn').hidden = true; return; }
   STORAGE = d;
-  const c = d.current;
-  $('#storagesum').textContent = c.ready ? c.name
-    : (d.first_run ? '설정하기' : (d.reason || '설정 필요'));
-  // 아직 정한 게 없는데 '연결 확인' 을 누르면 확인할 것이 없다.
-  $('#card-storage .ghost').hidden = !!d.first_run;
-  // **폴링이 입력을 지우면 안 된다.** 현황 화면은 주기적으로 다시 그리는데,
-  // 그때마다 폼을 새로 만들면 버킷 이름을 치는 도중에 글자가 사라진다.
-  // 한 번 열린 폼은 저장에 성공할 때까지 그대로 둔다.
-  if (d.editable && $('#stsave')) return;
-  el.innerHTML = d.editable ? storageForm(d) : storageView(d);
-  if (d.editable) fillProvider(c.provider, c);
+  paintConn(d);
+  // 팝오버가 열려 있으면 그 안도 같이 새로 그린다 — 열어 둔 채 폴링이 돌면
+  // 화면과 실제가 조용히 갈린다.
+  if (!$('#connpop').hidden) $('#connpop').innerHTML = connPanel(d);
 }
 
-// 이미 정해진 뒤 — 보여 주기만 한다.
+// 상단 한 줄. **평소에 필요한 건 '어디에 붙어 있나' 뿐이다.**
+function paintConn(d) {
+  const b = $('#conn'), c = d.current;
+  b.hidden = false;
+  b.classList.toggle('off', !c.ready);
+  b.innerHTML = c.ready
+    ? `<span class="dot"></span>${esc(c.name)} 연결됨
+       <span style="color:var(--faint)">${esc(c.bucket)}</span>`
+    : `<span class="dot"></span>연결 안 됨`;
+}
+
+function toggleConn() {
+  const el = $('#connpop');
+  el.hidden = !el.hidden;
+  if (!el.hidden) el.innerHTML = connPanel(STORAGE);
+}
+
+// 눌렀을 때 나오는 자세한 내용. 예전의 저장소 카드가 여기로 들어왔다.
+function connPanel(d) {
+  const c = d.current, w = d.weights || {};
+  return storageView(d) + `
+    <div style="margin-top:14px;display:flex;gap:8px;align-items:center">
+      <button class="ghost" onclick="testStorage()">연결 확인</button>
+      ${d.editable
+        ? `<button class="ghost" onclick="disconnectStorage()"
+                   style="color:var(--critical-ink);border-color:#f2c9c9">
+             연결 해제</button>`
+        : ''}
+      <span class="meta" style="margin-left:auto">${
+        w.present ? '모델 준비됨' : '모델 미준비'}</span>
+    </div>`;
+}
+
+// **연결을 끊는 것은 되돌리기 어려운 일이 아니다** — 버킷은 그대로다. 다만
+// 무엇이 끊기는지는 먼저 말한다. '이미 처리했나' 판정이 결과 버킷 대조라,
+// 다른 곳에 붙으면 처리한 것이 전부 미처리로 보인다.
+async function disconnectStorage() {
+  const c = STORAGE.current;
+  if (!confirm(
+      `${c.name} / ${c.bucket} 연결을 끊을까요?\n\n` +
+      `버킷의 파일은 그대로 있습니다. 끊으면 처음 화면으로 돌아가서 다른 ` +
+      `클라우드나 다른 버킷에 붙을 수 있습니다.\n\n` +
+      `다만 '이미 처리했나' 판정은 결과 버킷을 대조해서 하기 때문에, 다른 ` +
+      `곳에 붙으면 여기서 처리한 것들이 전부 미처리로 보입니다.`))
+    return;
+  const r = await fetch('/api/storage', { method: 'DELETE' });
+  const j = await r.json().catch(() => ({}));
+  if (!r.ok) { alert(problemText(j) || '연결을 끊지 못했습니다'); return; }
+  $('#connpop').hidden = true;
+  const d = await fetch('/api/storage').then(x => x.json());
+  document.querySelector('.app').hidden = true;    // 처음 화면으로 되돌아간다
+  openSetup(d);
+}
+
+// 자세히 — 지금 붙어 있는 곳의 값들.
 function storageView(d) {
   const c = d.current;
   const rows = [
@@ -1240,18 +1295,15 @@ function storageView(d) {
     ['입력 프리픽스', c.root_prefix || '(최상위)'],
     ['결과 프리픽스', c.output_prefix || '—'],
     ['자격 증명', (d.credentials || {}).source || '—'],
+    ['모델 가중치', (d.weights || {}).present
+      ? `있음 (${d.weights.size_mb} MB)` : ((d.weights || {}).detail || '—')],
   ];
-  const chips = (d.providers || []).map(p =>
-    `<span class="bchip ${p.id === c.provider ? 'on' : ''}"
-           title="${esc(p.note || '')}">${esc(p.name)}${
-             p.supported ? '' : ' <small>준비 중</small>'}</span>`).join('');
   return `
     <div class="kv">${rows.map(([k, v]) =>
       `<div><span>${k}</span><b title="${esc(v)}">${esc(v)}</b></div>`).join('')}</div>
     ${d.reason ? `<div class="warn" style="margin-top:10px">${esc(d.reason)}</div>` : ''}
-    <div style="margin-top:12px;display:flex;gap:6px;flex-wrap:wrap;align-items:center">
-      <span class="n" style="margin:0 4px 0 0">붙을 수 있는 곳</span>${chips}</div>
-    <div class="meta" style="margin-top:10px">${esc(d.lock_reason || d.note || '')}</div>`;
+    ${d.lock_reason ? `<div class="meta" style="margin-top:10px">${
+      esc(d.lock_reason)}</div>` : ''}`;
 }
 
 // 첫 실행 — 여기서 정한다. 열쇠 칸은 **이미 있으면 안 보여 준다.** 대부분은
@@ -1271,18 +1323,20 @@ function storageForm(d, opts) {
     <div style="display:flex;gap:6px;flex-wrap:wrap;margin-bottom:14px">${chips}</div>
     <div class="stgrid">
       <div class="wide"><label>버킷 이름</label>
-        <input class="stin" id="stbucket" placeholder="my-bucket" autocomplete="off"></div>
+        <input class="stin" id="stbucket" placeholder="예: my-bucket" autocomplete="off"></div>
       <div class="wide" id="stendrow"><label>엔드포인트 <span id="stendreq"></span></label>
         <input class="stin" id="stendpoint" placeholder="https://…" autocomplete="off"></div>
       <div><label>리전</label>
-        <input class="stin" id="stregion" placeholder="us-east-1" autocomplete="off"></div>
-      <div><label>입력 프리픽스</label>
-        <input class="stin" id="stroot" placeholder="v1/input/" autocomplete="off"></div>
+        <input class="stin" id="stregion" placeholder="예: us-east-1" autocomplete="off"></div>
+      <div><label>입력 프리픽스 <span style="color:var(--faint)">(선택)</span></label>
+        <input class="stin" id="stroot" placeholder="예: v1/input/ · 비우면 최상위"
+               autocomplete="off"></div>
       <div class="wide"><label>결과 프리픽스</label>
-        <input class="stin" id="stout" placeholder="v1/results/face/" autocomplete="off"></div>
+        <input class="stin" id="stout" placeholder="예: v1/results/face/" autocomplete="off"></div>
     </div>
     <div class="meta" style="margin-top:12px">
       자격 증명 — <b>${esc(cr.source || '확인 중')}</b></div>
+    ${weightsLine(d)}
     ${cr.present ? `<div class="meta" style="margin-top:4px">
         이미 있어서 따로 넣지 않으셔도 됩니다.</div>`
       : `<div class="stgrid" style="margin-top:8px">
@@ -1301,6 +1355,19 @@ function storageForm(d, opts) {
       <span class="meta" id="ststat"></span></div>`;
 }
 
+// 모델 가중치는 저장소와 **별개**다. 남의 버킷에는 우리 가중치가 없는 것이
+// 정상이라, 없으면 공개 릴리스에서 받는다. 그 사실을 통과 전에 말해 준다 —
+// 40MB 를 받는 것이 첫 영상에서 갑자기 일어나면 사람은 그걸 고장으로 읽는다.
+function weightsLine(d) {
+  const w = d.weights || {};
+  if (w.present)
+    return `<div class="meta" style="margin-top:4px">모델 가중치 —
+      <b>준비됨</b> (${w.size_mb} MB)</div>`;
+  return `<div class="meta" style="margin-top:4px">모델 가중치 —
+    <b>아직 없습니다.</b> ${esc(w.detail || '')}${
+      w.url ? `<br><span style="color:var(--faint)">${esc(w.url)}</span>` : ''}</div>`;
+}
+
 // 제공자를 고르면 그 기본값을 채운다 — NCP 를 고르면 주소·리전이 알아서 들어간다.
 function fillProvider(pid, cur) {
   const p = (STORAGE.providers || []).find(x => x.id === pid);
@@ -1313,7 +1380,10 @@ function fillProvider(pid, cur) {
   // 고른 제공자의 기본 주소로 갈아 준다. 이미 손으로 고친 값이 있어도
   // 제공자를 바꾼 이상 옛 주소가 남아 있는 편이 더 위험하다.
   set('stendpoint', p.endpoint || (cur ? (c.endpoint || '') : ''));
-  set('stregion', p.region || (cur ? (c.region || '') : ''));
+  // **회색 예시는 값이 아니다.** 예전에는 리전 칸에 us-east-1 이 흐리게 떠
+  // 있어서 채워진 것처럼 보였고, 그대로 누르면 빈 값이 갔다. 아는 값은 진짜로
+  // 채운다 — 제공자가 정해 주는 것(NCP) 이거나, AWS 의 기본 리전이거나.
+  set('stregion', p.region || (cur && c.region) || (pid === 's3' ? 'us-east-1' : ''));
   if (cur) { set('stroot', c.root_prefix || ''); set('stout', c.output_prefix || ''); }
   const req = $('#stendreq');
   if (req) req.textContent = p.needs_endpoint ? '(필요합니다)' : '(비우면 기본값)';
@@ -1333,9 +1403,18 @@ function openSetup(d) {
 function enterApp() {
   $('#setup').hidden = true;
   document.querySelector('.app').hidden = false;
+  loadStorage();                           // 상단 연결 표시를 채운다
   go2('browser');
   loadObjects();
 }
+
+// 팝오버는 바깥을 누르면 닫힌다. 열어 둔 채 다른 걸 누르면 화면을 가린다.
+document.addEventListener('click', e => {
+  const pop = $('#connpop');
+  if (!pop || pop.hidden) return;
+  if (e.target.closest('#connpop') || e.target.closest('#conn')) return;
+  pop.hidden = true;
+});
 
 async function saveStorage() {
   const pid = document.querySelector('.bchip[data-pid].on')?.dataset.pid || 's3';
@@ -1372,10 +1451,8 @@ async function saveStorage() {
     ? `\n\n키는 메모리에만 있습니다. 계속 쓰시려면 환경에 넣어 주세요:\n${
         j.persist_hint.join('\n')}`
     : '';
-  alert(`저장했습니다 — ${j.detail}\n버킷 ${j.current.bucket}${hint}`);
-  if (!$('#setup').hidden) { enterApp(); return; }
-  $('#storage').innerHTML = '';            // 폼을 닫아야 다시 그려진다
-  loadOverview();
+  alert(`연결했습니다 — ${j.detail}\n버킷 ${j.current.bucket}${hint}`);
+  enterApp();
 }
 
 async function testStorage() {

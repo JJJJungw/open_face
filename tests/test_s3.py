@@ -853,9 +853,7 @@ def test_storage_info_never_leaks_credentials(s3client):
     d = s3client.get("/api/storage").json()
     body = str(d).lower()
     assert "secret" not in body and "access_key" not in body
-    # 이미 정해져 있으면 화면에서 못 바꾼다 — 첫 실행에만 열린다.
-    assert d["current"]["bucket"] and d["editable"] is False
-    assert d["first_run"] is False and d["lock_reason"]
+    assert d["current"]["bucket"] and d["first_run"] is False
     # 어디서 왔는지는 말하되 값은 절대 안 말한다.
     assert "source" in d["credentials"]
     ids = {p["id"] for p in d["providers"]}

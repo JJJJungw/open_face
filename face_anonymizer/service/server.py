@@ -234,6 +234,9 @@ def storage_info():
     current = getattr(store, "config", None) or s3mod.CONFIG
     ok, why = s3mod.editable(current)
     src, has = s3mod.credential_source()
+    # **모델도 같이 말한다.** 저장소만 정해 주고 통과시키면, 가중치가 없는
+    # 사람은 첫 영상에서야 그걸 안다 — 그때는 이미 900건을 넣은 뒤일 수 있다.
+    from ..storage import weights as weights_store   # noqa: PLC0415
     return {"current": current.as_dict(),
             "providers": providers.listing(),
             "reason": s3mod.unavailable_reason(),
@@ -241,6 +244,7 @@ def storage_info():
             "lock_reason": why,
             "first_run": not current.bucket,
             "credentials": {"source": src, "present": has},
+            "weights": weights_store.status(),
             "note": ("아직 정해진 곳이 없습니다. 어디에 붙일지 골라 주세요."
                      if not current.bucket else
                      "설정은 .env 로도 정할 수 있습니다. 환경 변수가 이깁니다.")}
@@ -313,6 +317,33 @@ def storage_set(body: dict = Body(default={})):
             # 알게 하지 않는다 — 알려 줄 자리는 지금 여기뿐이다.
             "persist_hint": ([f"AWS_ACCESS_KEY_ID={ak[:4]}…",
                               "AWS_SECRET_ACCESS_KEY=…"] if ak and sk else [])}
+
+
+@app.delete("/api/storage")
+def storage_disconnect():
+    """붙어 있던 곳에서 떨어진다. 화면은 다시 첫 관문으로 돌아간다.
+
+    **버킷은 건드리지 않는다** — 파일은 그대로 있고 우리가 안 볼 뿐이다.
+    지워지는 것은 우리가 남겨 둔 설정과 메모리에 든 열쇠뿐이다.
+
+    돌고 있는 작업이 있으면 거절한다. 그 밑에서 저장소를 빼면 그 작업은 결과를
+    올릴 곳을 잃는다 — 몇 분 뒤에 실패로 남고, 그때 나는 오류는 원인이 전혀
+    드러나지 않는다. 검수 대기도 마찬가지다. 판정하면 결과물을 옮겨야 한다.
+    """
+    ok, why = s3mod.editable()
+    if not ok:
+        raise errors.STORAGE_LOCKED(why)
+    c = jobs.counts()
+    busy = c.get("running", 0) + c.get("queued", 0) + c.get("review", 0)
+    if busy:
+        raise errors.STORAGE_BUSY(
+            f"진행 {c.get('running', 0)}건 · 대기 {c.get('queued', 0)}건 · "
+            f"검수 대기 {c.get('review', 0)}건")
+    was = s3mod.CONFIG.bucket
+    s3mod.disconnect()
+    log.info("저장소 연결 해제: %s", was)
+    events.emit("storage.disconnected", bucket=was)
+    return {"ok": True, "detail": "연결을 끊었습니다. 버킷의 파일은 그대로 있습니다."}
 
 
 @app.post("/api/storage/test")

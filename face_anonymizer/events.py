@@ -301,7 +301,7 @@ EVENT_LABEL = {
     "job.review": "검수 대기", "job.reviewed": "검수 판정",
     "job.progress": "진행", "worker.ready": "워커 준비",
     "worker.stopped": "워커 종료", "server.started": "서버 기동",
-    "storage.configured": "저장소 설정",
+    "storage.configured": "저장소 설정", "storage.disconnected": "저장소 해제",
 }
 
 # 화면이 색을 고르는 근거. 이름을 색으로 두지 않은 것은, 색은 화면 사정이고
@@ -311,7 +311,7 @@ EVENT_TONE = {
     "job.review": "warn", "job.reviewed": "ok",
     "job.retry": "warn", "job.started": "run", "job.progress": "run",
     "job.queued": "muted", "worker.ready": "muted", "worker.stopped": "muted",
-    "storage.configured": "warn",
+    "storage.configured": "warn", "storage.disconnected": "warn",
 }
 
 
