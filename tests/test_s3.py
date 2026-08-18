@@ -817,6 +817,22 @@ def test_the_endpoint_reaches_boto3(monkeypatch):
     assert "endpoint_url" not in seen           # AWS 는 리전으로 알아서 간다
 
 
+def test_checksums_are_off_by_default():
+    """NCP 는 botocore 가 붙이는 CRC32 를 AccessDenied 로 거절한다.
+
+    권한 문제가 아니라 체크섬 문제인데 **돌아오는 말이 똑같다.** 그대로 두면
+    이관 당일에 키·IAM·버킷 정책을 며칠 뒤지게 된다. 저쪽 레포도 같은 이유로
+    같은 설정을 쓴다(rebornstudio 의 media/storage.py 주석).
+    """
+    pytest.importorskip("botocore")
+    from face_anonymizer.storage import s3 as s3mod
+    cfg = s3mod.client_config()
+    assert cfg is not None and cfg.signature_version == "s3v4"
+    # 낡은 botocore 에는 속성 자체가 없다 — 있을 때만 본다.
+    if hasattr(cfg, "request_checksum_calculation"):
+        assert cfg.request_checksum_calculation == "when_required"
+
+
 def test_connection_check_separates_read_from_write(s3client):
     """**읽기만 되는 자격 증명이 흔하다.** 그걸 '연결됨' 이라고 하면 안 된다.
 

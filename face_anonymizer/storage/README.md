@@ -4,6 +4,8 @@
 
 | 파일 | 하는 일 |
 |---|---|
+| `base.py` | **저장소 계약** — 갈아 끼우려면 무엇을 지켜야 하는지 |
+| `providers.py` | 어디에 붙을지. 제공자 등록표와 `StorageConfig` |
 | `s3.py` | 목록·다운로드·업로드·presigned URL. boto3 는 함수 안에서 지연 임포트 |
 | `transfer.py` | **서명된 URL 로만** 주고받기 — 자격 증명 0. MSA 워커 경로 |
 | `naming.py` | 데이터셋 파일 이름 규칙과 입력→결과 키 변환 |
@@ -56,6 +58,32 @@ Wasabi 는 전부 S3 API 를 그대로 쓴다 — 코드가 달라질 게 없고
 없는 것을 목록에 두는 이유는 "이건 되나?" 를 묻지 않게 하려는 것이다. 조용히
 안 되는 것이 제일 나쁘다 — GCS 를 골라 뒀는데 "S3 미설정" 으로 보이면 사람이
 엉뚱한 데를 고친다.
+
+## 집안 밖을 붙이려면 — `base.py`
+
+위의 표는 전부 S3 집안이라 주소만 다르다. GCS · Azure 처럼 **말이 아예 다른**
+곳은 구현을 하나 써서 꽂아야 한다. 그때 "무엇을 쓰면 되나" 에 답하는 것이
+`base.py` 다. 값 셋과 동작 열, 그게 전부다.
+
+```
+bucket  root_prefix  output_prefix
+check  list  list_all  output_key  processed_keys
+exists  size_of  download  upload  presigned_url
+```
+
+붙이는 일은 두 단계로 끝난다.
+
+1. 계약을 지키는 클래스를 하나 쓴다
+2. `providers.PROVIDERS[...]["store"]` 한 줄을 그 클래스로 바꾼다
+
+부르는 쪽 열다섯 군데가 전부 `s3.get_store()` 하나를 지나가므로 고칠 데가 없다.
+지원 여부(`supported`)도 그 한 줄에서 파생된다 — 따로 관리하는 목록이 없으니
+둘이 어긋날 수가 없다. 이 파일조차 안 고치려면 `FA_STORAGE_STORE=모듈:클래스`
+로 직접 꽂는다(등록표보다 이게 이긴다). **우리 레포를 포크할 필요가 없다.**
+
+계약을 지켰는지는 `tests/test_storage_contract.py` 가 본다. 등록표의 모든
+제공자를 실제로 불러와 만들어 본다 — 오타는 **그 제공자를 고른 날** 드러나는데
+그날은 대개 이관 당일이다.
 
 ## 설정은 객체다 — `StorageConfig`
 

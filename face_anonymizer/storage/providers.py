@@ -9,9 +9,26 @@
 Cloudflare R2 · MinIO · Wasabi. 전부 S3 API 를 그대로 쓴다. 코드가 달라질 게
 없고 **엔드포인트 주소만 다르다.** 실제로 붙을 대상의 대부분이 여기 있다.
 
-**프로토콜이 다른 것** — GCS · Azure Blob. API 모양 자체가 달라서 어댑터가
-필요하다. 목록에는 두되 **고르면 분명하게 거절한다.** 조용히 안 되는 것보다
-"아직 지원하지 않습니다" 가 낫다 — 붙일 대상이 정해지면 그때 만든다.
+**프로토콜이 다른 것** — GCS · Azure Blob. API 모양 자체가 달라서 구현을 하나
+더 써서 꽂아야 한다. 목록에는 두되 **고르면 분명하게 거절한다.** 조용히 안 되는
+것보다 "아직 지원하지 않습니다" 가 낫다 — 붙일 대상이 정해지면 그때 만든다.
+
+꽂는 자리
+---------
+제공자마다 ``store`` 에 **어느 구현을 쓸지**가 적혀 있다(``"모듈:클래스"``).
+그래서 새 저장소를 붙이는 일은 이렇게 끝난다.
+
+1. `storage/base.py` 의 계약(``CONTRACT``)을 지키는 클래스를 하나 쓴다
+2. 여기 ``store`` 한 줄을 그 클래스로 바꾼다
+
+**그게 전부다.** 부르는 쪽은 전부 `s3.get_store()` 하나만 지나가므로
+(`service/` · `job_runner` · `weights`) 고칠 데가 없고, 지원 여부(``supported``)
+도 이 한 줄에서 저절로 따라온다 — 따로 관리하는 목록이 없으니 둘이 어긋날 수가
+없다. 계약을 지켰는지는 `tests/test_storage_contract.py` 가 본다.
+
+이 파일조차 안 고치고 싶으면 ``FA_STORAGE_STORE=내모듈:내클래스`` 로 직접
+꽂는다. 등록표보다 이게 이긴다 — 우리가 모르는 저장소를 쓰게 될 쪽이 우리
+레포를 포크하지 않아도 되게 하려는 것이다.
 
 바꿀 때 주의
 ------------
@@ -33,6 +50,7 @@ PROVIDERS = {
         "endpoint": None,               # boto3 가 리전으로 정한다
         "region": None,                 # 기본 체인
         "needs_endpoint": False,
+        "store": "face_anonymizer.storage.s3:S3Store",
         "note": "자격 증명은 EC2 인스턴스 역할이면 자동으로 잡힌다.",
     },
     "ncp": {
@@ -41,6 +59,7 @@ PROVIDERS = {
         "endpoint": "https://kr.object.ncloudstorage.com",
         "region": "kr-standard",
         "needs_endpoint": False,
+        "store": "face_anonymizer.storage.s3:S3Store",
         "note": "S3 API 를 그대로 쓴다. 액세스 키가 필요하다.",
     },
     "s3compat": {
@@ -49,6 +68,7 @@ PROVIDERS = {
         "endpoint": "",                 # 사람이 넣는다
         "region": None,
         "needs_endpoint": True,
+        "store": "face_anonymizer.storage.s3:S3Store",
         "note": "엔드포인트 주소를 직접 넣는다.",
     },
     # ── 아직 없는 것들 ──────────────────────────────────────────────────────
@@ -58,13 +78,15 @@ PROVIDERS = {
         "name": "Google Cloud Storage",
         "s3_compatible": False,
         "endpoint": None, "region": None, "needs_endpoint": False,
-        "note": "아직 지원하지 않는다. API 모양이 달라 어댑터가 필요하다.",
+        "store": "face_anonymizer.storage.base:NotImplementedStore",
+        "note": "아직 지원하지 않는다. 구현을 하나 써서 store 를 바꾸면 된다.",
     },
     "azure": {
         "name": "Azure Blob Storage",
         "s3_compatible": False,
         "endpoint": None, "region": None, "needs_endpoint": False,
-        "note": "아직 지원하지 않는다. API 모양이 달라 어댑터가 필요하다.",
+        "store": "face_anonymizer.storage.base:NotImplementedStore",
+        "note": "아직 지원하지 않는다. 구현을 하나 써서 store 를 바꾸면 된다.",
     },
 }
 
@@ -77,10 +99,36 @@ def get(name=None):
                          PROVIDERS[DEFAULT])
 
 
+STUB = "face_anonymizer.storage.base:NotImplementedStore"
+
+
+def store_class(name=None):
+    """이 제공자를 실제로 다룰 클래스. **꽂는 자리는 여기 하나뿐이다.**
+
+    문자열로 적어 두고 부를 때 불러온다 — 임포트 시점에 모든 구현을 끌어오면
+    S3 만 쓰는 사람이 GCS 라이브러리를 깔아야 한다. 새 저장소가 무거운
+    의존성을 들고 와도 고른 사람만 그 값을 치른다.
+    """
+    from importlib import import_module              # noqa: PLC0415
+    mod, _, cls = get(name).get("store", STUB).partition(":")
+    return getattr(import_module(mod), cls)
+
+
+def is_supported(name=None):
+    """진짜 구현이 붙어 있나. **목록을 따로 관리하지 않는다.**
+
+    예전에는 ``s3_compatible`` 로 판단했다. 그러면 GCS 구현을 넣는 날 고칠
+    자리가 둘이 되고(구현 등록 + 지원 목록), 하나를 빠뜨리면 "지원 안 함" 인데
+    동작하거나 그 반대가 된다. ``store`` 한 줄에서 파생시키면 어긋날 수가 없다.
+    """
+    return get(name).get("store", STUB) != STUB
+
+
 def listing():
     """화면이 그릴 목록. 지원 여부까지 같이 준다."""
-    return [{"id": k, **{kk: vv for kk, vv in v.items() if kk != "endpoint"},
-             "endpoint": v["endpoint"], "supported": v["s3_compatible"]}
+    return [{"id": k, **{kk: vv for kk, vv in v.items()
+                         if kk not in ("endpoint", "store")},
+             "endpoint": v["endpoint"], "supported": is_supported(k)}
             for k, v in PROVIDERS.items()]
 
 
@@ -93,12 +141,15 @@ class StorageConfig:
     """
 
     __slots__ = ("provider", "bucket", "region", "endpoint",
-                 "root_prefix", "output_prefix")
+                 "root_prefix", "output_prefix", "store")
 
     def __init__(self, provider=None, bucket=None, region=None, endpoint=None,
-                 root_prefix=None, output_prefix=None):
+                 root_prefix=None, output_prefix=None, store=None):
         p = get(provider)
         self.provider = (provider or DEFAULT).strip().lower()
+        # 등록표를 안 거치고 직접 꽂는 길. **우리 저장소를 고치지 않아도 된다.**
+        # 아무도 안 쓰면 None 이고 그때는 제공자 이름이 클래스를 정한다.
+        self.store = (store or "").strip() or None
         self.bucket = bucket or ""
         # 제공자 기본값 위에 준 값만 덮는다 — NCP 를 고르면 엔드포인트·리전이
         # 알아서 채워지고, 그래도 다르면 직접 넣을 수 있다.
@@ -118,6 +169,7 @@ class StorageConfig:
             root_prefix=os.environ.get("FA_S3_ROOT_PREFIX", ""),
             output_prefix=os.environ.get("FA_S3_OUTPUT_PREFIX",
                                          "v1/results/face/"),
+            store=os.environ.get("FA_STORAGE_STORE"),
         )
 
     @property
@@ -126,7 +178,17 @@ class StorageConfig:
 
     @property
     def supported(self):
-        return bool(self.info["s3_compatible"])
+        """구현이 꽂혀 있나. `store` 한 줄에서 따라온다(is_supported 주석)."""
+        return bool(self.store) or is_supported(self.provider)
+
+    @property
+    def store_class(self):
+        """이 설정을 다룰 클래스. 직접 꽂은 것이 있으면 그게 이긴다."""
+        if self.store:
+            from importlib import import_module      # noqa: PLC0415
+            mod, _, cls = self.store.partition(":")
+            return getattr(import_module(mod), cls)
+        return store_class(self.provider)
 
     @property
     def ready(self):
@@ -138,8 +200,12 @@ class StorageConfig:
     def as_dict(self):
         """화면에 보여 줄 것. **자격 증명은 여기 없다** — 애초에 안 들고 있다."""
         return {"provider": self.provider, "name": self.info["name"],
+                "store": self.store,
                 "bucket": self.bucket, "region": self.region,
                 "endpoint": self.endpoint, "root_prefix": self.root_prefix,
                 "output_prefix": self.output_prefix,
                 "supported": self.supported, "ready": self.ready,
-                "note": self.info["note"]}
+                # 직접 꽂았으면 제공자 설명이 거짓말이 된다 — '아직 지원하지
+                # 않는다' 옆에 '연결됨' 이 같이 떠 있으면 둘 다 못 믿게 된다.
+                "note": (f"직접 꽂은 구현으로 돕니다 ({self.store})"
+                         if self.store else self.info["note"])}

@@ -78,6 +78,29 @@ def wrap(e, what):
     return err
 
 
+def client_config():
+    """botocore 설정. **체크섬 한 줄이 NCP 이관을 좌우한다.**
+
+    botocore 1.36 부터 PutObject 에 CRC32 체크섬을 기본으로 붙이는데 **NCP 가
+    이걸 AccessDenied 로 거절한다.** 같은 키로 체크섬만 빼면 200 이다 — 권한
+    문제가 아니라 체크섬 문제인데 돌아오는 말은 똑같이 "AccessDenied" 라서,
+    이관 당일에 키·IAM·버킷 정책을 며칠 뒤지게 된다. 미리 막아 둔다.
+
+    ``when_required`` 는 1.36 이전의 동작이다 — AWS S3 에서도 그대로 안전하다.
+    옵션을 모르는 낡은 botocore 는 TypeError 를 내므로 그때는 빼고 만든다.
+    """
+    try:
+        from botocore.client import Config         # noqa: PLC0415 — 지연 임포트
+    except ImportError:                            # boto3 가 없는 환경(테스트)
+        return None
+    try:
+        return Config(signature_version="s3v4",
+                      request_checksum_calculation="when_required",
+                      response_checksum_validation="when_required")
+    except TypeError:                              # botocore < 1.36
+        return Config(signature_version="s3v4")
+
+
 def make_client(config=None):
     """boto3 클라이언트. **엔드포인트를 넘길 수 있다.**
 
@@ -92,6 +115,9 @@ def make_client(config=None):
     import boto3                                   # noqa: PLC0415 — 지연 임포트
     c = config or CONFIG
     kw = {"region_name": c.region}
+    cfg = client_config()
+    if cfg is not None:
+        kw["config"] = cfg
     if c.endpoint:
         kw["endpoint_url"] = c.endpoint
     return boto3.client("s3", **kw)
@@ -328,7 +354,11 @@ _store = None
 
 
 def get_store():
-    """붙을 수 있으면 S3Store, 아니면 None.
+    """붙을 수 있으면 스토어, 아니면 None.
+
+    **어느 클래스를 쓸지는 여기서 정하지 않는다.** 제공자 등록표가 정한다
+    (`providers.store_class`). 그래서 GCS 구현을 넣는 날 이 함수는 안 고친다 —
+    부르는 쪽 열다섯 군데도 마찬가지다. 전부 이 한 줄을 지나가기 때문이다.
 
     지원하지 않는 제공자(GCS·Azure)를 골라 두면 **조용히 None 이 되지 않고**
     라우트가 그 사유를 돌려준다 — 설정이 잘못됐는데 "S3 미설정" 으로 보이면
@@ -338,7 +368,7 @@ def get_store():
     if not CONFIG.ready:
         return None
     if _store is None:
-        _store = S3Store(config=CONFIG)
+        _store = CONFIG.store_class(config=CONFIG)
     return _store
 
 
