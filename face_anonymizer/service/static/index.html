@@ -351,7 +351,6 @@
       <a onclick="go2('logs')" id="tab-logs">로그</a>
       <div class="grp st">작업 상태</div>
       <a onclick="setFilter('active')" id="nav-active" class="st on">진행중<span class="c"></span></a>
-      <a onclick="setFilter('running')" id="nav-running" class="st">수행중<span class="c"></span></a>
       <a onclick="setFilter('queued')" id="nav-queued" class="st">대기<span class="c"></span></a>
       <a onclick="setFilter('review')" id="nav-review" class="st">검수<span class="c"></span></a>
       <a onclick="setFilter('done')" id="nav-done" class="st">완료<span class="c"></span></a>
@@ -693,9 +692,14 @@ function paramObject() {
 }
 $('#q').addEventListener('input', renderBrowser);
 
-const FILTER_TEXT = { active:'진행중', running:'수행중', queued:'대기',
+// '수행중' 은 따로 두지 않는다. **진행중 = 수행중 + 대기** 라서 바로 밑 두
+// 항목의 합일 뿐이고, GPU 를 직렬화하므로 수행중은 **항상 0 아니면 1건**이다.
+// 탭 하나가 카드 한 장을 보여 주는 셈인데, 그 한 장은 진행중 목록 맨 위에 이미
+// 있고 지금 도는 작업의 진행률·단계·속도는 사이드바 HUD 가 항상 띄운다.
+// 상태 자체는 남아 있다 — API 는 ?status=running 을 그대로 받는다.
+const FILTER_TEXT = { active:'진행중', queued:'대기',
                       review:'검수 필요', done:'완료', failed:'실패' };
-const NAV_KEYS = ['active', 'running', 'queued', 'review', 'done', 'failed', ''];
+const NAV_KEYS = ['active', 'queued', 'review', 'done', 'failed', ''];
 const VIEW_TITLE = { overview:'현황', browser:'파일 브라우저', jobs:'작업',
                      logs:'로그' };
 const VIEWS = ['overview', 'browser', 'jobs', 'logs'];
@@ -1042,21 +1046,7 @@ function kpis(jobs, st) {
     ? `디스크 여유 ${(st.free_mb/1024).toFixed(1)} GB` : '';
   let t;
 
-  if (filter === 'running') {
-    t = running ? [
-      tile('진행률', `${Math.round(running.overall)}<small>%</small>`,
-           `${STAGE_TEXT[running.stage] || '준비'} ${running.percent}%`, 'hero'),
-      tile('이 작업 남은 시간', fmt(running.job_eta),
-           `경과 ${fmt(running.job_elapsed)}`),
-      tile('속도', `${running.fps.toFixed(0)}<small> f/s</small>`,
-           running.name),
-      tile('뒤에 대기', `${queued}<small>건</small>`, disk),
-    ] : [tile('수행중', '없음', queued ? '곧 시작합니다' : '처리할 작업이 없습니다', 'hero'),
-         tile('대기', `${queued}<small>건</small>`, ''),
-         tile('완료', `${done}<small>건</small>`, avg ? `평균 ${fmt(avg)}` : ''),
-         tile('자원', '—', disk)];
-
-  } else if (filter === 'queued') {
+  if (filter === 'queued') {
     t = [
       tile('대기', `${queued}<small>건</small>`,
            queued ? `가장 오래 기다린 건 ${fmt(q.latency || 0)}` : '큐가 비었습니다', 'hero'),
@@ -1126,8 +1116,13 @@ function kpis(jobs, st) {
       tile('전체 남은 시간',
            etaAll != null ? fmt(etaAll) : (remain ? '계산 중' : '없음'),
            remain ? `남은 작업 ${remain}건` : '처리할 작업이 없습니다', 'hero'),
+      // 수행중 탭을 없앴으므로 '이 한 건이 어디까지 왔나' 를 여기서 답한다.
       tile('수행중 · 대기', `${running ? 1 : 0}<small>/</small>${queued}`,
-           running ? running.name : '유휴'),
+           running ? `${STAGE_TEXT[running.stage] || '준비'} ${Math.round(running.overall)}%`
+                     // 초반 5% 아래에서는 서버가 추정을 안 내놓는다(progress.py).
+                     // 그때 0 을 그대로 그리면 '0:00' 이 되어 다 끝난 것처럼 읽힌다.
+                     + (running.job_eta ? ` · 남은 ${fmt(running.job_eta)}` : '')
+                   : '유휴'),
       tile('완료', `${done}${failed
              ? `<small style="color:var(--critical)"> · 실패 ${failed}</small>` : ''}`,
            avg ? `평균 ${fmt(avg)}` : (per ? `추정 ${fmt(per)}` : '기록 없음')),
@@ -1388,7 +1383,7 @@ function renderCancelAll(st) {
   const el = $('#jobsact');
   // 끝난 것을 보는 화면(완료·실패·전체 기록)에는 두지 않는다. 그 화면의 카드는
   // 취소할 수 있는 것이 아니라서, 버튼이 무엇을 멈추는지 읽히지 않는다.
-  const here = ['active', 'running', 'queued'].includes(filter);
+  const here = ['active', 'queued'].includes(filter);
   if (!n || !here) { confirming = false; el.innerHTML = ''; return; }
   el.innerHTML = confirming
     ? `<span class="confirm">진행중 ${n}건을 전부 멈춥니다. S3 파일은 그대로입니다.
