@@ -416,6 +416,17 @@
             <div id="opsbody" class="pad"></div>
           </section>
         </div>
+        <!-- 어디에 붙어 있나. 지금은 읽기 전용이다 — 화면에서 키를 받으려면
+             API 인증이 먼저다(지금은 인증이 없어서, 서버에 닿는 누구나 키를
+             심거나 볼 수 있게 된다). -->
+        <section class="card" id="card-storage" style="margin-top:14px">
+          <h2>저장소
+            <button class="ghost" onclick="testStorage()"
+                    style="margin-left:auto">연결 확인</button>
+            <span class="cnt" id="storagesum"></span></h2>
+          <div id="storage" class="pad"><div class="empty">불러오는 중…</div></div>
+        </section>
+
         <!-- 폴더 단위 시작·종료. 파일 카드에서는 읽어 낼 수 없는 값이다. -->
         <section class="card" id="card-batches" hidden style="margin-top:14px">
           <h2>폴더별 처리 시각</h2>
@@ -1128,6 +1139,7 @@ async function untrackFolder(prefix) {
 
 async function loadOverview() {
   lastOverview = Date.now();
+  loadStorage();
   const [m, p, b] = await Promise.all([
     fetch('/api/metrics').then(r => r.json()).catch(() => null),
     fetch('/api/s3/progress').then(r => r.ok ? r.json() : null).catch(() => null),
@@ -1156,6 +1168,45 @@ function renderBatches(b) {
       <div class="meta">전체 ${r.total}건 · 완료 ${r.done}${
         r.failed ? ` · 실패 ${r.failed}` : ''}${r.remain ? ` · 남음 ${r.remain}` : ''}</div>
     </div>`).join('');
+}
+
+// 저장소 — **지금 어디에 붙어 있나.** 자격 증명은 여기 없다. 우리가 애초에
+// 안 들고 있고(boto3 기본 체인), 화면에서 받는 것은 인증을 정한 뒤의 일이다.
+async function loadStorage() {
+  const d = await fetch('/api/storage').then(r => r.ok ? r.json() : null)
+    .catch(() => null);
+  const el = $('#storage');
+  if (!d) { el.innerHTML = '<div class="empty">불러오지 못했습니다</div>'; return; }
+  const c = d.current;
+  $('#storagesum').textContent = c.ready ? c.name : (d.reason || '설정 필요');
+  const rows = [
+    ['제공자', c.name],
+    ['버킷', c.bucket || '—'],
+    ['엔드포인트', c.endpoint || '기본 (리전으로 정해짐)'],
+    ['리전', c.region || '기본'],
+    ['입력 프리픽스', c.root_prefix || '(최상위)'],
+    ['결과 프리픽스', c.output_prefix || '—'],
+  ];
+  // 붙을 수 있는 곳들. 아직 안 되는 것도 보여 준다 — "이건 되나?" 를 묻지
+  // 않게 하려고 둔 것이고, 고르면 분명하게 거절한다.
+  const chips = (d.providers || []).map(p =>
+    `<span class="bchip ${p.id === c.provider ? 'on' : ''}"
+           title="${esc(p.note || '')}">${esc(p.name)}${
+             p.supported ? '' : ' <small>준비 중</small>'}</span>`).join('');
+  el.innerHTML = `
+    <div class="kv">${rows.map(([k, v]) =>
+      `<div><span>${k}</span><b title="${esc(v)}">${esc(v)}</b></div>`).join('')}</div>
+    ${d.reason ? `<div class="warn" style="margin-top:10px">${esc(d.reason)}</div>` : ''}
+    <div style="margin-top:12px;display:flex;gap:6px;flex-wrap:wrap;align-items:center">
+      <span class="n" style="margin:0 4px 0 0">붙을 수 있는 곳</span>${chips}</div>
+    <div class="meta" style="margin-top:10px">${esc(d.note || '')}</div>`;
+}
+
+async function testStorage() {
+  const r = await fetch('/api/storage/test', { method: 'POST' });
+  const d = await r.json().catch(() => ({}));
+  alert(r.ok ? `연결됨 — ${d.detail}\n버킷 ${d.bucket}`
+             : (problemText(d) || '연결하지 못했습니다'));
 }
 
 function renderProgress(p) {

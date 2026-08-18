@@ -21,14 +21,20 @@ import os
 from urllib.parse import quote
 import time
 
-from . import naming
+from . import naming, providers
 
 log = logging.getLogger(__name__)
 
-BUCKET = os.environ.get("FA_S3_BUCKET") or ""
-REGION = os.environ.get("FA_S3_REGION") or None
-ROOT_PREFIX = os.environ.get("FA_S3_ROOT_PREFIX", "")
-OUTPUT_PREFIX = os.environ.get("FA_S3_OUTPUT_PREFIX", "v1/results/face/")
+# 지금 어디에 붙어 있나. **객체 하나로 모아 둔다** — 예전에는 모듈 상수라
+# 임포트할 때 한 번 읽고 끝이어서, 설정을 바꾸려면 서버를 다시 띄워야 했고
+# 화면에서 고르게 하는 길이 아예 막혀 있었다(providers.StorageConfig 주석).
+CONFIG = providers.StorageConfig.from_env()
+
+# 옛 이름들. 여기저기서 읽고 있어 한 번에 걷어내지 않는다.
+BUCKET = CONFIG.bucket
+REGION = CONFIG.region
+ROOT_PREFIX = CONFIG.root_prefix
+OUTPUT_PREFIX = CONFIG.output_prefix
 LIST_TTL = int(os.environ.get("FA_S3_LIST_TTL", 30))
 URL_TTL = int(os.environ.get("FA_S3_URL_TTL", 3600))
 
@@ -72,29 +78,64 @@ def wrap(e, what):
     return err
 
 
-def make_client():
+def make_client(config=None):
+    """boto3 클라이언트. **엔드포인트를 넘길 수 있다.**
+
+    NCP Object Storage · Cloudflare R2 · MinIO · Wasabi 는 전부 S3 API 를 그대로
+    쓴다. 코드가 달라질 게 없고 이 주소 하나만 다르다 — 그래서 어댑터가 아니라
+    설정으로 푼다(storage/providers.py).
+
+    자격 증명은 boto3 기본 체인이다. EC2 인스턴스 역할이 있으면 그대로 잡히고,
+    다른 제공자는 환경 변수(AWS_ACCESS_KEY_ID / AWS_SECRET_ACCESS_KEY)를 쓴다 —
+    **우리가 키를 파일에 들고 있지 않는다.**
+    """
     import boto3                                   # noqa: PLC0415 — 지연 임포트
-    return boto3.client("s3", region_name=REGION)
+    c = config or CONFIG
+    kw = {"region_name": c.region}
+    if c.endpoint:
+        kw["endpoint_url"] = c.endpoint
+    return boto3.client("s3", **kw)
 
 
 class S3Store:
     """버킷 하나를 다루는 얇은 래퍼."""
 
     def __init__(self, bucket=None, client=None, output_prefix=None,
-                 root_prefix=None):
-        self.bucket = bucket or BUCKET
+                 root_prefix=None, config=None):
+        self.config = config or CONFIG
+        self.bucket = bucket or self.config.bucket
         self.output_prefix = (output_prefix if output_prefix is not None
-                              else OUTPUT_PREFIX)
+                              else self.config.output_prefix)
         self.root_prefix = (root_prefix if root_prefix is not None
-                            else ROOT_PREFIX)
+                            else self.config.root_prefix)
         self._client = client
         self._out_cache = (0.0, set())
 
     @property
     def client(self):
         if self._client is None:
-            self._client = make_client()
+            self._client = make_client(self.config)
         return self._client
+
+    def check(self):
+        """지금 설정으로 **실제로 붙는지** 본다. 되면 (True, 설명).
+
+        잘못된 버킷에 900건을 넣고 나서 아는 것보다, 넣기 전에 아는 편이 낫다.
+        읽기와 쓰기를 따로 본다 — 읽기만 되는 자격 증명이 흔하다.
+        """
+        try:
+            self.client.list_objects_v2(Bucket=self.bucket,
+                                        Prefix=self.root_prefix, MaxKeys=1)
+        except Exception as e:                      # noqa: BLE001
+            raise wrap(e, f"버킷을 읽지 못했습니다 ({self.bucket})") from e
+        probe = self.output_prefix + ".fa-write-check"
+        try:
+            self.client.put_object(Bucket=self.bucket, Key=probe, Body=b"ok")
+            self.client.delete_object(Bucket=self.bucket, Key=probe)
+        except Exception as e:                      # noqa: BLE001
+            raise wrap(e, "읽기는 되지만 결과물을 쓰지 못합니다 "
+                          f"({self.output_prefix})") from e
+        return True
 
     # ── 조회 ──────────────────────────────────────────────────────────────
 
@@ -287,10 +328,40 @@ _store = None
 
 
 def get_store():
-    """설정돼 있으면 S3Store, 아니면 None."""
+    """붙을 수 있으면 S3Store, 아니면 None.
+
+    지원하지 않는 제공자(GCS·Azure)를 골라 두면 **조용히 None 이 되지 않고**
+    라우트가 그 사유를 돌려준다 — 설정이 잘못됐는데 "S3 미설정" 으로 보이면
+    사람이 엉뚱한 데를 고친다.
+    """
     global _store
-    if not BUCKET:
+    if not CONFIG.ready:
         return None
     if _store is None:
-        _store = S3Store()
+        _store = S3Store(config=CONFIG)
     return _store
+
+
+def unavailable_reason():
+    """왜 못 붙는지 한 줄. 붙을 수 있으면 빈 문자열."""
+    if CONFIG.ready:
+        return ""
+    if not CONFIG.supported:
+        return f"{CONFIG.info['name']} 는 아직 지원하지 않습니다"
+    if not CONFIG.bucket:
+        return "버킷이 설정되어 있지 않습니다"
+    return "엔드포인트 주소가 필요합니다"
+
+
+def reconfigure(config):
+    """설정을 갈아 끼운다. 다음 get_store() 부터 새 곳을 본다.
+
+    **이미 처리한 기록과의 연결이 끊긴다.** '이미 처리했나' 판정은 결과 버킷
+    대조이고, 진척률 폴더와 저널의 폴더 이름도 옛 저장소 기준이다. 사실상 새
+    작업 공간을 여는 일이라, 부르는 쪽이 그걸 사람에게 먼저 알려야 한다.
+    """
+    global CONFIG, _store, BUCKET, REGION, ROOT_PREFIX, OUTPUT_PREFIX
+    CONFIG, _store = config, None
+    BUCKET, REGION = config.bucket, config.region
+    ROOT_PREFIX, OUTPUT_PREFIX = config.root_prefix, config.output_prefix
+    return CONFIG

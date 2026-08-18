@@ -344,6 +344,8 @@ RFC 9457 `application/problem+json`. 사람이 읽는 문구와 별개로 `code`
 | GET | `/api/status` | 폴링 한 번에 필요한 전부 — 상태별 집계·수행중·최근 기록 |
 | GET | `/api/health` | 오케스트레이터용 (준비 전 503) |
 | GET | `/api/metrics` | 큐 지표 · GPU · 디스크 |
+| GET | `/api/storage` | 지금 어디에 붙어 있나 + 붙을 수 있는 곳 목록 (읽기 전용) |
+| POST | `/api/storage/test` | 실제로 붙는지 확인 (읽기·쓰기 따로) |
 | GET | `/api/s3/objects` `/api/s3/progress` | 버킷 나열 · 제출한 폴더의 진척률 |
 | DELETE | `/api/s3/progress?prefix=` | 진척률 목록에서 폴더 빼기 (버킷은 그대로) |
 | GET | `/api/events` `/api/events/batches` | 이벤트 저널(목록용 슬림) · 폴더 목록 |

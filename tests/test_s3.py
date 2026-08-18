@@ -6,6 +6,7 @@ boto3 없이, 네트워크 없이 돈다 — 가짜 클라이언트를 주입한
 
 import datetime as dt
 import os
+import time
 
 import pytest
 
@@ -75,6 +76,14 @@ class FakeS3Client:
             from urllib.parse import quote as _q
             extra = "&response-content-disposition=" + _q(cd)
         return f"https://signed/{Params['Key']}?e={ExpiresIn}{extra}"
+
+    def put_object(self, Bucket, Key, Body=b""):
+        self.objects[Key] = (Body, NOW)
+        return {}
+
+    def delete_object(self, Bucket, Key):
+        self.objects.pop(Key, None)
+        return {}
 
     def head_object(self, Bucket, Key):
         if Key not in self.objects:
@@ -203,7 +212,10 @@ def s3client(tmp_path, monkeypatch, make_video):
                           client=FakeS3Client({
                               "videos/2026-08/f_00001_00_0000000_0042000_raw.mp4": (data, NOW),
                               "videos/2026-08/notes.txt": (b"hi", NOW)}),
-                          output_prefix="v1/results/face/", root_prefix="")
+                          output_prefix="v1/results/face/", root_prefix="",
+                          config=s3mod.providers.StorageConfig(
+                              provider="s3", bucket="ax-mbc-label-data-storage",
+                              output_prefix="v1/results/face/"))
     monkeypatch.setattr(s3mod, "get_store", lambda: store)
     monkeypatch.setattr(config, "JOBS_DIR", str(tmp_path / "jobs"))
     monkeypatch.setattr(jobsmod, "JOBS", {})
@@ -719,7 +731,113 @@ def test_review_does_not_hold_the_local_copy_hostage(s3client, monkeypatch):
     s = wait(s3client, jid, timeout=60)
 
     assert s["status"] == "review"
+    # 정리는 상태가 바뀐 **뒤에** 돈다. 바로 보면 아직 파일이 남아 있을 수 있어
+    # 테스트가 들쭉날쭉해진다 — 다운로드가 500 나던 것과 같은 틈이다.
+    for _ in range(100):
+        if workdir_files(s3client, jid) == ["job.json"]:
+            break
+        time.sleep(0.05)
     assert workdir_files(s3client, jid) == ["job.json"]
     # 그래도 볼 수 있어야 판정할 수 있다 — 버킷의 서명된 주소로 안내한다
     d = s3client.get(f"/api/jobs/{jid}/result").json()
     assert d["via"] == "s3" and d["download_url"].startswith("https://signed/")
+
+
+# ---------------------------------------------------------------------------
+# 어디에 붙을지 — 제공자
+
+
+def test_s3_compatible_providers_need_no_adapter(monkeypatch):
+    """NCP·R2·MinIO 는 **엔드포인트 주소만 다르다.**
+
+    S3 API 를 그대로 쓰므로 어댑터가 아니라 설정으로 푼다. 이걸 어댑터로 만들면
+    똑같은 코드를 제공자 수만큼 복사하게 된다.
+    """
+    from face_anonymizer.storage import providers
+
+    ncp = providers.StorageConfig(provider="ncp", bucket="b")
+    assert ncp.supported and ncp.ready
+    assert ncp.endpoint == "https://kr.object.ncloudstorage.com"
+    assert ncp.region == "kr-standard"          # 제공자 기본값이 채워진다
+
+    aws = providers.StorageConfig(provider="s3", bucket="b")
+    assert aws.endpoint is None                 # boto3 가 리전으로 정한다
+
+
+def test_a_custom_endpoint_wins_over_the_provider_default(monkeypatch):
+    """같은 NCP 라도 리전이 다르면 주소가 다르다. 직접 넣은 값이 이긴다."""
+    from face_anonymizer.storage import providers
+    c = providers.StorageConfig(provider="ncp", bucket="b",
+                                endpoint="https://sg.object.ncloudstorage.com")
+    assert c.endpoint == "https://sg.object.ncloudstorage.com"
+
+
+def test_an_s3_compatible_provider_must_be_told_where(monkeypatch):
+    """R2·MinIO 는 기본 주소가 없다. 주소 없이 준비됐다고 하면 안 된다."""
+    from face_anonymizer.storage import providers
+    c = providers.StorageConfig(provider="s3compat", bucket="b")
+    assert c.supported and not c.ready
+    assert providers.StorageConfig(provider="s3compat", bucket="b",
+                                   endpoint="https://x").ready
+
+
+def test_unsupported_providers_are_refused_out_loud(monkeypatch):
+    """**조용히 안 되는 것이 제일 나쁘다.**
+
+    GCS 를 골라 뒀는데 "S3 미설정" 으로 보이면 사람이 엉뚱한 데를 고친다.
+    """
+    from face_anonymizer.storage import providers, s3 as s3mod
+    c = providers.StorageConfig(provider="gcs", bucket="b")
+    assert not c.supported and not c.ready
+
+    monkeypatch.setattr(s3mod, "CONFIG", c)
+    monkeypatch.setattr(s3mod, "_store", None)
+    assert s3mod.get_store() is None
+    assert "지원하지 않습니다" in s3mod.unavailable_reason()
+
+
+def test_the_endpoint_reaches_boto3(monkeypatch):
+    """설정에 넣어 놓고 클라이언트에 안 넘기면 그 제공자가 통째로 못 쓰게 된다."""
+    from face_anonymizer.storage import providers, s3 as s3mod
+    seen = {}
+
+    class FakeBoto:
+        @staticmethod
+        def client(name, **kw):
+            seen.update(name=name, **kw)
+            return object()
+
+    monkeypatch.setitem(__import__("sys").modules, "boto3", FakeBoto)
+    s3mod.make_client(providers.StorageConfig(provider="ncp", bucket="b"))
+    assert seen["endpoint_url"] == "https://kr.object.ncloudstorage.com"
+    assert seen["region_name"] == "kr-standard"
+
+    seen.clear()
+    s3mod.make_client(providers.StorageConfig(provider="s3", bucket="b"))
+    assert "endpoint_url" not in seen           # AWS 는 리전으로 알아서 간다
+
+
+def test_connection_check_separates_read_from_write(s3client):
+    """**읽기만 되는 자격 증명이 흔하다.** 그걸 '연결됨' 이라고 하면 안 된다.
+
+    잘못된 버킷에 900건을 넣고 나서 아는 것보다 넣기 전에 아는 편이 낫다.
+    """
+    assert s3client.post("/api/storage/test").json()["ok"] is True
+
+    def no_write(**kw):
+        raise RuntimeError("AccessDenied")
+    s3client.store.client.put_object = no_write
+    r = s3client.post("/api/storage/test")
+    assert r.status_code >= 400
+    assert "쓰지 못" in r.json()["detail"]
+
+
+def test_storage_info_never_leaks_credentials(s3client):
+    """우리는 키를 애초에 안 들고 있다. 응답에도 없어야 한다."""
+    d = s3client.get("/api/storage").json()
+    body = str(d).lower()
+    assert "secret" not in body and "access_key" not in body
+    assert d["current"]["bucket"] and d["editable"] is False
+    ids = {p["id"] for p in d["providers"]}
+    assert {"s3", "ncp", "gcs"} <= ids
+    assert next(p for p in d["providers"] if p["id"] == "gcs")["supported"] is False

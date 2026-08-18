@@ -31,7 +31,7 @@ from fastapi.responses import FileResponse, HTMLResponse, RedirectResponse
 from .. import events, logsetup, timefmt
 from ..core.anonymize import METHODS
 from ..core.pipeline import parse_bitrate
-from ..storage import naming
+from ..storage import naming, providers
 from ..storage import s3 as s3mod
 from . import config, errors, jobs, metrics, worker
 from .config import JOB_DEFAULTS
@@ -217,6 +217,49 @@ def defaults():
     바꿔도 화면은 옛 값을 보내서 둘이 조용히 어긋난다.
     """
     return dict(JOB_DEFAULTS)
+
+
+@app.get("/api/storage")
+def storage_info():
+    """지금 어디에 붙어 있나, 그리고 붙을 수 있는 곳들.
+
+    **자격 증명은 여기 없다.** 우리가 애초에 들고 있지 않다 — boto3 기본
+    체인(EC2 인스턴스 역할 또는 환경 변수)을 쓴다. 화면에서 키를 받는 설정은
+    **API 인증을 정한 뒤**의 일이다. 지금 상태로 열면 서버에 닿을 수 있는
+    누구나 키를 심거나 볼 수 있다.
+    """
+    # **실제로 붙은 것**을 말한다. 모듈 설정만 보면, 스토어가 다른 값으로
+    # 만들어졌을 때 화면과 실제가 다른 말을 한다.
+    # get_store() 는 갈아 끼울 수 있다(테스트·주입). 설정을 안 들고 있는
+    # 스토어가 와도 화면이 깨지면 안 된다.
+    store = s3mod.get_store()
+    current = getattr(store, "config", None) or s3mod.CONFIG
+    return {"current": current.as_dict(),
+            "providers": providers.listing(),
+            "reason": s3mod.unavailable_reason(),
+            "editable": False,
+            "note": "설정은 환경 변수로 정한다(.env). 화면에서 바꾸려면 "
+                    "API 인증이 먼저 필요하다."}
+
+
+@app.post("/api/storage/test")
+def storage_test():
+    """지금 설정으로 **실제로 붙는지** 확인한다.
+
+    잘못된 버킷에 900건을 넣고 나서 아는 것보다 넣기 전에 아는 편이 낫다.
+    읽기와 쓰기를 따로 본다 — 읽기만 되는 자격 증명이 흔하다.
+    """
+    store = s3mod.get_store()
+    if store is None:
+        raise errors.S3_NOT_CONFIGURED(s3mod.unavailable_reason())
+    try:
+        store.check()
+    except s3mod.S3Error as e:
+        raise (e.problem or errors.S3_UPSTREAM)(str(e)) from e
+    return {"ok": True, "bucket": store.bucket,
+            "endpoint": s3mod.CONFIG.endpoint,
+            "provider": s3mod.CONFIG.provider,
+            "detail": "읽기와 쓰기 모두 확인했습니다"}
 
 
 @app.get("/api/s3/objects")
