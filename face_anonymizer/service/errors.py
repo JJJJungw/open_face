@@ -170,10 +170,15 @@ REVIEW_ACTION_INVALID = _p(
     "review_action_invalid", 400, "알 수 없는 검수 판정입니다",
     "approve(승인) 또는 reject(반려) 중 하나여야 합니다.")
 
+STORAGE_LOCKED = _p(
+    "storage_locked", 409, "저장소 설정이 잠겨 있습니다",
+    "처음 한 번만 화면에서 정할 수 있습니다. 바꾸시려면 "
+    "FA_ALLOW_STORAGE_EDIT=1 로 서버를 다시 띄우거나 .env 를 고쳐 주세요.")
+
 # ── S3 (404/502) ──────────────────────────────────────────────────────────
 S3_NOT_CONFIGURED = _p(
     "s3_not_configured", 404, "S3 가 설정되어 있지 않습니다",
-    "FA_S3_BUCKET 을 설정하고 서버를 다시 띄우면 됩니다. "
+    "화면에서 정하시거나 FA_S3_BUCKET 을 설정하고 서버를 다시 띄우면 됩니다. "
     "직접 업로드는 설정 없이도 쓰실 수 있습니다.")
 S3_OBJECT_NOT_FOUND = _p(
     "s3_object_not_found", 404, "S3 에서 해당 파일을 찾지 못했습니다",

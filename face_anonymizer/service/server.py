@@ -223,10 +223,8 @@ def defaults():
 def storage_info():
     """지금 어디에 붙어 있나, 그리고 붙을 수 있는 곳들.
 
-    **자격 증명은 여기 없다.** 우리가 애초에 들고 있지 않다 — boto3 기본
-    체인(EC2 인스턴스 역할 또는 환경 변수)을 쓴다. 화면에서 키를 받는 설정은
-    **API 인증을 정한 뒤**의 일이다. 지금 상태로 열면 서버에 닿을 수 있는
-    누구나 키를 심거나 볼 수 있다.
+    **열쇠 자체는 절대 안 나간다.** 어디서 왔는지(인스턴스 역할·환경 변수·
+    화면)만 말한다. 그게 없으면 왜 되는지 왜 안 되는지를 아무도 모른다.
     """
     # **실제로 붙은 것**을 말한다. 모듈 설정만 보면, 스토어가 다른 값으로
     # 만들어졌을 때 화면과 실제가 다른 말을 한다.
@@ -234,12 +232,87 @@ def storage_info():
     # 스토어가 와도 화면이 깨지면 안 된다.
     store = s3mod.get_store()
     current = getattr(store, "config", None) or s3mod.CONFIG
+    ok, why = s3mod.editable(current)
+    src, has = s3mod.credential_source()
     return {"current": current.as_dict(),
             "providers": providers.listing(),
             "reason": s3mod.unavailable_reason(),
-            "editable": False,
-            "note": "설정은 환경 변수로 정한다(.env). 화면에서 바꾸려면 "
-                    "API 인증이 먼저 필요하다."}
+            "editable": ok,
+            "lock_reason": why,
+            "first_run": not current.bucket,
+            "credentials": {"source": src, "present": has},
+            "note": ("아직 정해진 곳이 없습니다. 어디에 붙일지 골라 주세요."
+                     if not current.bucket else
+                     "설정은 .env 로도 정할 수 있습니다. 환경 변수가 이깁니다.")}
+
+
+@app.post("/api/storage")
+def storage_set(body: dict = Body(default={})):
+    """화면에서 저장소를 정한다. **첫 실행에만 열린다**(`s3.editable`).
+
+    **연결이 되는 것을 확인한 뒤에만 저장한다.** 첫 실행에만 열리는 문이라,
+    오타 하나로 잠겨 버리면 고치러 들어갈 길이 같이 막힌다. 읽기·쓰기가 실제로
+    되는 것을 보고 나서 저장하면 그 사고가 성립하지 않는다.
+
+    열쇠를 같이 보내면 **메모리에만** 둔다. 파일에 안 쓰고 돌려주지도 않는다.
+    영구히 두려면 인스턴스 역할이나 `aws configure` 로 옮겨야 하고, 응답이 그
+    두 줄을 같이 알려 준다.
+    """
+    ok, why = s3mod.editable()
+    if not ok:
+        raise errors.STORAGE_LOCKED(why)
+
+    cand = providers.StorageConfig(
+        provider=(body.get("provider") or "").strip() or None,
+        bucket=(body.get("bucket") or "").strip(),
+        region=(body.get("region") or "").strip() or None,
+        endpoint=(body.get("endpoint") or "").strip() or None,
+        root_prefix=(body.get("root_prefix") or "").strip(),
+        output_prefix=body.get("output_prefix"),
+        store=(body.get("store") or "").strip() or None,
+    )
+    if not cand.bucket:
+        raise errors.INVALID_INPUT("버킷 이름이 필요합니다")
+    if not cand.supported:
+        raise errors.S3_NOT_CONFIGURED(
+            f"{cand.info['name']} 는 아직 지원하지 않습니다")
+    if cand.info["needs_endpoint"] and not cand.endpoint:
+        raise errors.INVALID_INPUT("엔드포인트 주소가 필요합니다")
+
+    # 되돌릴 수 있게 지금 것을 쥐고 시작한다. 시험은 실제 연결이므로 잠깐
+    # 진짜로 갈아 끼워야 하고, 실패하면 있던 자리로 돌려놓는다.
+    prev_cfg, prev_creds = s3mod.CONFIG, s3mod.credentials()
+    ak, sk = body.get("access_key"), body.get("secret_key")
+    try:
+        if ak and sk:
+            s3mod.set_credentials(ak, sk, body.get("session_token"))
+        s3mod.reconfigure(cand)
+        store = s3mod.get_store()
+        if store is None:
+            raise errors.S3_NOT_CONFIGURED(s3mod.unavailable_reason())
+        store.check()
+    except errors.ProblemError:
+        s3mod.restore(prev_cfg, prev_creds)
+        raise
+    except s3mod.S3Error as e:
+        s3mod.restore(prev_cfg, prev_creds)
+        raise (e.problem or errors.S3_UPSTREAM)(str(e)) from e
+    except Exception as e:                          # noqa: BLE001
+        s3mod.restore(prev_cfg, prev_creds)
+        raise errors.S3_UPSTREAM(str(e)) from e
+
+    path = providers.save(cand)
+    log.info("저장소 설정: %s / %s (%s)", cand.provider, cand.bucket, path)
+    events.emit("storage.configured", provider=cand.provider,
+                bucket=cand.bucket, endpoint=cand.endpoint or "")
+    src, _ = s3mod.credential_source()
+    return {"ok": True, "current": cand.as_dict(), "saved_to": path,
+            "credentials": {"source": src, "present": True},
+            "detail": "읽기와 쓰기 모두 확인했습니다",
+            # 메모리에 든 열쇠는 재시작하면 사라진다. 그 사실을 나중에
+            # 알게 하지 않는다 — 알려 줄 자리는 지금 여기뿐이다.
+            "persist_hint": ([f"AWS_ACCESS_KEY_ID={ak[:4]}…",
+                              "AWS_SECRET_ACCESS_KEY=…"] if ak and sk else [])}
 
 
 @app.post("/api/storage/test")

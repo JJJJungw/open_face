@@ -39,6 +39,7 @@ Cloudflare R2 · MinIO · Wasabi. 전부 S3 API 를 그대로 쓴다. 코드가 
 한다(docs/issues 참고).
 """
 
+import json
 import os
 
 # 제공자 정의. endpoint 가 None 이면 그 제공자의 기본 엔드포인트를 쓴다는 뜻이고
@@ -132,6 +133,47 @@ def listing():
             for k, v in PROVIDERS.items()]
 
 
+# ── 화면에서 정한 것을 어디에 두나 ──────────────────────────────────────────
+# 파일 하나. **여기 들어가는 것 중에 비밀은 없다** — 제공자·버킷·주소·프리픽스
+# 뿐이고 열쇠는 애초에 안 받는다(s3.set_credentials 주석). 그래서 파일로 남겨도
+# 되고, 남겨야 서버를 다시 띄워도 설정이 살아 있다.
+SAVED_NAME = "_storage.json"
+SAVED_FIELDS = ("provider", "bucket", "region", "endpoint",
+                "root_prefix", "output_prefix", "store")
+
+
+def saved_path():
+    """작업 디렉터리 밑. `service.config` 를 임포트하지 않으려고 환경을 직접 본다
+    — storage 가 service 를 알면 의존이 거꾸로 돈다."""
+    return os.path.join(os.environ.get("FA_JOBS_DIR", "jobs"), SAVED_NAME)
+
+
+def load_saved():
+    """저장해 둔 설정. 없거나 깨졌으면 빈 dict.
+
+    **깨졌다고 기동을 막지 않는다.** 설정 파일 하나 때문에 서버가 안 뜨면
+    고치러 들어갈 화면도 같이 없어진다.
+    """
+    try:
+        with open(saved_path(), encoding="utf-8") as f:
+            d = json.load(f)
+        return d if isinstance(d, dict) else {}
+    except (OSError, ValueError):
+        return {}
+
+
+def save(cfg):
+    """설정을 남긴다. 원자적으로 — 쓰다 만 파일이 남으면 다음 기동이 막힌다."""
+    p = saved_path()
+    os.makedirs(os.path.dirname(p) or ".", exist_ok=True)
+    tmp = p + ".tmp"
+    with open(tmp, "w", encoding="utf-8") as f:
+        json.dump({k: getattr(cfg, k) for k in SAVED_FIELDS},
+                  f, ensure_ascii=False, indent=2)
+    os.replace(tmp, p)
+    return p
+
+
 class StorageConfig:
     """지금 어디에 붙어 있나. **모듈 상수가 아니라 객체다.**
 
@@ -161,15 +203,27 @@ class StorageConfig:
 
     @classmethod
     def from_env(cls):
+        """환경 변수 → 저장해 둔 것 → 제공자 기본값 순으로 채운다.
+
+        **환경 변수가 이긴다.** 띄우는 사람이 명시적으로 준 값이 화면에서
+        예전에 눌러 둔 것보다 뒤에 오면, `.env` 를 고쳐도 안 바뀌는 것처럼
+        보인다 — 그때 사람은 있지도 않은 문제를 찾게 된다.
+        """
+        s = load_saved()
+
+        def pick(env, key, default=None):
+            v = os.environ.get(env)
+            return v if v not in (None, "") else s.get(key, default)
+
         return cls(
-            provider=os.environ.get("FA_STORAGE_PROVIDER"),
-            bucket=os.environ.get("FA_S3_BUCKET"),
-            region=os.environ.get("FA_S3_REGION"),
-            endpoint=os.environ.get("FA_S3_ENDPOINT"),
-            root_prefix=os.environ.get("FA_S3_ROOT_PREFIX", ""),
-            output_prefix=os.environ.get("FA_S3_OUTPUT_PREFIX",
-                                         "v1/results/face/"),
-            store=os.environ.get("FA_STORAGE_STORE"),
+            provider=pick("FA_STORAGE_PROVIDER", "provider"),
+            bucket=pick("FA_S3_BUCKET", "bucket"),
+            region=pick("FA_S3_REGION", "region"),
+            endpoint=pick("FA_S3_ENDPOINT", "endpoint"),
+            root_prefix=pick("FA_S3_ROOT_PREFIX", "root_prefix", ""),
+            output_prefix=pick("FA_S3_OUTPUT_PREFIX", "output_prefix",
+                               "v1/results/face/"),
+            store=pick("FA_STORAGE_STORE", "store"),
         )
 
     @property

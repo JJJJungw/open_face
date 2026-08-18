@@ -78,6 +78,93 @@ def wrap(e, what):
     return err
 
 
+# 화면에서 받은 열쇠. **메모리에만 있다.**
+#
+# 파일에 안 쓰고, 어떤 라우트로도 돌려주지 않는다. 서버를 다시 띄우면 사라진다
+# — 그게 이 방식의 값이자 대가다. 값은 웹 화면이 있는 도구인데 시작하려고
+# 터미널을 먼저 치지 않아도 된다는 것이고, 대가는 영구히 두려면 결국 환경
+# (인스턴스 역할 · aws configure · 환경 변수)으로 옮겨야 한다는 것이다.
+#
+# 대부분은 여기까지 안 온다. EC2 인스턴스 역할이 붙어 있거나 `aws configure`
+# 가 되어 있으면 boto3 기본 체인이 알아서 잡는다.
+_creds = None
+
+
+def set_credentials(access_key=None, secret_key=None, session_token=None):
+    """화면에서 받은 열쇠를 메모리에 둔다. 비우려면 인자 없이 부른다."""
+    global _creds, _store
+    _creds = ({"aws_access_key_id": access_key,
+               "aws_secret_access_key": secret_key,
+               **({"aws_session_token": session_token} if session_token else {})}
+              if access_key and secret_key else None)
+    _store = None                                  # 다음 get_store 부터 새 열쇠
+    return _creds is not None
+
+
+def credentials():
+    """지금 메모리에 든 열쇠. **되돌리기용이다** — 화면에 보내지 않는다."""
+    return _creds
+
+
+def restore(config, creds):
+    """시험에 실패했을 때 있던 자리로. 설정과 열쇠를 같이 돌려놓는다."""
+    global _creds, _store
+    _creds = creds
+    reconfigure(config)
+    _store = None
+    return CONFIG
+
+
+def credential_source():
+    """열쇠가 **어디서** 오고 있나. (설명, 있나)
+
+    이게 없으면 왜 되는지 왜 안 되는지를 아무도 모른다. 되는 날에는 아무래도
+    좋지만 안 되는 날에는 이 한 줄이 없어서 엉뚱한 데를 뒤지게 된다.
+    """
+    if _creds:
+        return "화면에서 받음 (메모리 — 서버를 다시 띄우면 사라집니다)", True
+    try:
+        import boto3                               # noqa: PLC0415
+        c = boto3.Session().get_credentials()
+    except Exception:                              # noqa: BLE001
+        return "확인할 수 없습니다", False
+    if c is None:
+        return "없습니다", False
+    m = getattr(c, "method", "") or ""
+    return {
+        "iam-role": "EC2 인스턴스 역할",
+        "env": "환경 변수 (AWS_ACCESS_KEY_ID)",
+        "shared-credentials-file": "~/.aws/credentials",
+        "config-file": "~/.aws/config",
+        "container-role": "컨테이너 역할",
+        "assume-role": "역할 위임 (assume-role)",
+        "sso": "AWS SSO",
+    }.get(m, m or "알 수 없는 경로"), True
+
+
+def editable(config=None):
+    """화면에서 저장소를 바꿀 수 있나. (가능?, 사유)
+
+    **화면이 보고 있는 설정으로 판단한다.** 모듈 설정만 보면, 스토어가 다른
+    값으로 만들어졌을 때 "버킷 있음" 과 "아직 첫 실행" 이 같이 뜬다.
+
+    **첫 실행에만 연다.** 아직 아무것도 안 정해졌으면 화면에서 정할 수 있고,
+    한 번 정해지면 잠긴다. 남이 이걸 가져다 공인 IP 에 그냥 띄우는 일이 반드시
+    생기는데, 그때 설정 화면이 열려 있으면 서버에 닿는 누구나 저장소를 갈아
+    치울 수 있다. 우리 API 에는 아직 인증이 없다.
+
+    잠긴 뒤에도 바꿔야 하면 띄우는 사람이 ``FA_ALLOW_STORAGE_EDIT=1`` 로
+    **명시적으로** 연다. 기본이 잠김이라 모르고 노출될 일이 없다.
+    """
+    v = os.environ.get("FA_ALLOW_STORAGE_EDIT", "").strip().lower()
+    if v not in ("", "0", "false", "no"):
+        return True, ""
+    if not (config or CONFIG).bucket:
+        return True, ""                            # 첫 실행 — 정할 게 남았다
+    return False, ("이미 설정되어 있습니다. 바꾸시려면 FA_ALLOW_STORAGE_EDIT=1 "
+                   "로 서버를 다시 띄우거나 .env 를 고쳐 주세요.")
+
+
 def client_config():
     """botocore 설정. **체크섬 한 줄이 NCP 이관을 좌우한다.**
 
@@ -110,11 +197,12 @@ def make_client(config=None):
 
     자격 증명은 boto3 기본 체인이다. EC2 인스턴스 역할이 있으면 그대로 잡히고,
     다른 제공자는 환경 변수(AWS_ACCESS_KEY_ID / AWS_SECRET_ACCESS_KEY)를 쓴다 —
-    **우리가 키를 파일에 들고 있지 않는다.**
+    **우리가 키를 파일에 들고 있지 않는다.** 첫 실행 화면에서 받은 것이 있으면
+    그게 이기는데, 그것도 메모리에만 있다(`set_credentials`).
     """
     import boto3                                   # noqa: PLC0415 — 지연 임포트
     c = config or CONFIG
-    kw = {"region_name": c.region}
+    kw = {"region_name": c.region, **(_creds or {})}
     cfg = client_config()
     if cfg is not None:
         kw["config"] = cfg

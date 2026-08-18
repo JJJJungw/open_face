@@ -289,6 +289,14 @@
   button.ghost:hover:not(:disabled){background:var(--raise);color:var(--accent-ink);
     border-color:#cfe0f6}
   input[type=checkbox]{accent-color:var(--accent);width:14px;height:14px;cursor:pointer}
+  /* 첫 실행 설정 — 아직 아무것도 없는 사람이 처음 보는 화면이다. */
+  .stin{width:100%;background:var(--surface);color:var(--fg);
+    border:1px solid var(--line);border-radius:7px;padding:6px 8px;
+    font-size:12.5px;font-family:inherit}
+  .stin:focus{outline:none;border-color:var(--accent);
+    box-shadow:0 0 0 3px var(--accent-dim)}
+  .stgrid{display:grid;grid-template-columns:1fr 1fr;gap:10px 12px}
+  .stgrid .wide{grid-column:1/-1}
 
   /* ── 작업 목록 ──────────────────────────────────────────────────────── */
   .job{padding:13px 16px;border-bottom:1px solid #f1f5f9}
@@ -1170,15 +1178,41 @@ function renderBatches(b) {
     </div>`).join('');
 }
 
-// 저장소 — **지금 어디에 붙어 있나.** 자격 증명은 여기 없다. 우리가 애초에
-// 안 들고 있고(boto3 기본 체인), 화면에서 받는 것은 인증을 정한 뒤의 일이다.
+// 저장소 — **지금 어디에 붙어 있나.** 열쇠 값은 여기 절대 안 온다. 어디서
+// 왔는지만 온다(인스턴스 역할·환경 변수·화면). 아직 아무것도 안 정해졌으면
+// 읽기 전용 표 대신 **고르는 화면**이 나온다 — 처음 들어온 사람이 터미널을
+// 먼저 쳐야 한다면 그건 가져다 쓸 수 있는 물건이 아니다.
+let STORAGE = null;
+
 async function loadStorage() {
   const d = await fetch('/api/storage').then(r => r.ok ? r.json() : null)
     .catch(() => null);
   const el = $('#storage');
   if (!d) { el.innerHTML = '<div class="empty">불러오지 못했습니다</div>'; return; }
+  STORAGE = d;
   const c = d.current;
-  $('#storagesum').textContent = c.ready ? c.name : (d.reason || '설정 필요');
+  $('#storagesum').textContent = c.ready ? c.name
+    : (d.first_run ? '설정하기' : (d.reason || '설정 필요'));
+  // 아직 아무것도 없는 사람에게 진척률·큐 카드를 먼저 보여 줄 이유가 없다.
+  // 지금 할 수 있는 일이 하나뿐이면 그게 맨 위에 있어야 한다.
+  const card = $('#card-storage');
+  if (d.first_run) {
+    card.parentNode.prepend(card);
+    card.style.marginTop = '0';
+  }
+  // 아직 정한 게 없는데 '연결 확인' 을 누르면 확인할 것이 없다.
+  $('#card-storage .ghost').hidden = !!d.first_run;
+  // **폴링이 입력을 지우면 안 된다.** 현황 화면은 주기적으로 다시 그리는데,
+  // 그때마다 폼을 새로 만들면 버킷 이름을 치는 도중에 글자가 사라진다.
+  // 한 번 열린 폼은 저장에 성공할 때까지 그대로 둔다.
+  if (d.editable && $('#stsave')) return;
+  el.innerHTML = d.editable ? storageForm(d) : storageView(d);
+  if (d.editable) fillProvider(c.provider, c);
+}
+
+// 이미 정해진 뒤 — 보여 주기만 한다.
+function storageView(d) {
+  const c = d.current;
   const rows = [
     ['제공자', c.name],
     ['버킷', c.bucket || '—'],
@@ -1186,20 +1220,125 @@ async function loadStorage() {
     ['리전', c.region || '기본'],
     ['입력 프리픽스', c.root_prefix || '(최상위)'],
     ['결과 프리픽스', c.output_prefix || '—'],
+    ['자격 증명', (d.credentials || {}).source || '—'],
   ];
-  // 붙을 수 있는 곳들. 아직 안 되는 것도 보여 준다 — "이건 되나?" 를 묻지
-  // 않게 하려고 둔 것이고, 고르면 분명하게 거절한다.
   const chips = (d.providers || []).map(p =>
     `<span class="bchip ${p.id === c.provider ? 'on' : ''}"
            title="${esc(p.note || '')}">${esc(p.name)}${
              p.supported ? '' : ' <small>준비 중</small>'}</span>`).join('');
-  el.innerHTML = `
+  return `
     <div class="kv">${rows.map(([k, v]) =>
       `<div><span>${k}</span><b title="${esc(v)}">${esc(v)}</b></div>`).join('')}</div>
     ${d.reason ? `<div class="warn" style="margin-top:10px">${esc(d.reason)}</div>` : ''}
     <div style="margin-top:12px;display:flex;gap:6px;flex-wrap:wrap;align-items:center">
       <span class="n" style="margin:0 4px 0 0">붙을 수 있는 곳</span>${chips}</div>
-    <div class="meta" style="margin-top:10px">${esc(d.note || '')}</div>`;
+    <div class="meta" style="margin-top:10px">${esc(d.lock_reason || d.note || '')}</div>`;
+}
+
+// 첫 실행 — 여기서 정한다. 열쇠 칸은 **이미 있으면 안 보여 준다.** 대부분은
+// 인스턴스 역할이나 aws configure 로 이미 있어서, 물어보면 오히려 헷갈린다.
+function storageForm(d) {
+  const c = d.current, cr = d.credentials || {};
+  const chips = (d.providers || []).map(p =>
+    `<span class="bchip ${p.id === c.provider ? 'on' : ''}" data-pid="${p.id}"
+           title="${esc(p.note || '')}"
+           onclick="fillProvider('${p.id}')">${esc(p.name)}${
+             p.supported ? '' : ' <small>준비 중</small>'}</span>`).join('');
+  return `
+    ${d.first_run ? `<div class="meta" style="margin-bottom:10px">
+      아직 붙을 곳이 정해지지 않았습니다. 아래에서 고르고 저장하시면
+      바로 쓰실 수 있습니다. <b>연결이 되는 것을 확인한 뒤에만 저장됩니다.</b>
+    </div>` : ''}
+    <div style="display:flex;gap:6px;flex-wrap:wrap;margin-bottom:14px">${chips}</div>
+    <div class="stgrid">
+      <div class="wide"><label>버킷 이름</label>
+        <input class="stin" id="stbucket" placeholder="my-bucket" autocomplete="off"></div>
+      <div class="wide" id="stendrow"><label>엔드포인트 <span id="stendreq"></span></label>
+        <input class="stin" id="stendpoint" placeholder="https://…" autocomplete="off"></div>
+      <div><label>리전</label>
+        <input class="stin" id="stregion" placeholder="us-east-1" autocomplete="off"></div>
+      <div><label>입력 프리픽스</label>
+        <input class="stin" id="stroot" placeholder="v1/input/" autocomplete="off"></div>
+      <div class="wide"><label>결과 프리픽스</label>
+        <input class="stin" id="stout" placeholder="v1/results/face/" autocomplete="off"></div>
+    </div>
+    <div class="meta" style="margin-top:12px">
+      자격 증명 — <b>${esc(cr.source || '확인 중')}</b></div>
+    ${cr.present ? `<div class="meta" style="margin-top:4px">
+        이미 있어서 따로 넣지 않으셔도 됩니다.</div>`
+      : `<div class="stgrid" style="margin-top:8px">
+      <div><label>액세스 키</label>
+        <input class="stin" id="stak" autocomplete="off"></div>
+      <div><label>시크릿 키</label>
+        <input class="stin" id="stsk" type="password" autocomplete="new-password"></div>
+      <div class="wide meta">넣으신 키는 <b>메모리에만</b> 둡니다. 파일에 쓰지
+        않고 다시 돌려주지도 않습니다 — 서버를 다시 띄우면 사라지니, 계속
+        쓰시려면 저장 뒤에 안내해 드리는 두 줄을 환경에 넣어 주세요.</div>
+    </div>`}
+    <div id="sterr"></div>
+    <div style="margin-top:14px;display:flex;gap:8px;align-items:center">
+      <button id="stsave" onclick="saveStorage()">연결 확인하고 저장</button>
+      <span class="meta" id="ststat"></span></div>`;
+}
+
+// 제공자를 고르면 그 기본값을 채운다 — NCP 를 고르면 주소·리전이 알아서 들어간다.
+function fillProvider(pid, cur) {
+  const p = (STORAGE.providers || []).find(x => x.id === pid);
+  if (!p) return;
+  document.querySelectorAll('#storage .bchip').forEach(el =>
+    el.classList.toggle('on', el.dataset.pid === pid));
+  const c = cur || {};
+  const set = (id, v) => { const el = $('#' + id); if (el && v != null) el.value = v; };
+  set('stbucket', c.bucket || $('#stbucket')?.value || '');
+  // 고른 제공자의 기본 주소로 갈아 준다. 이미 손으로 고친 값이 있어도
+  // 제공자를 바꾼 이상 옛 주소가 남아 있는 편이 더 위험하다.
+  set('stendpoint', p.endpoint || (cur ? (c.endpoint || '') : ''));
+  set('stregion', p.region || (cur ? (c.region || '') : ''));
+  if (cur) { set('stroot', c.root_prefix || ''); set('stout', c.output_prefix || ''); }
+  const req = $('#stendreq');
+  if (req) req.textContent = p.needs_endpoint ? '(필요합니다)' : '(비우면 기본값)';
+  $('#stsave').disabled = !p.supported;
+  $('#ststat').textContent = p.supported ? '' : (p.note || '아직 지원하지 않습니다');
+}
+
+async function saveStorage() {
+  const pid = document.querySelector('#storage .bchip.on')?.dataset.pid || 'ncp';
+  const body = {
+    provider: pid,
+    bucket: $('#stbucket').value.trim(),
+    endpoint: $('#stendpoint').value.trim(),
+    region: $('#stregion').value.trim(),
+    root_prefix: $('#stroot').value.trim(),
+    output_prefix: $('#stout').value.trim(),
+  };
+  if ($('#stak')?.value) {
+    body.access_key = $('#stak').value.trim();
+    body.secret_key = $('#stsk').value;
+  }
+  const btn = $('#stsave');
+  btn.disabled = true;
+  $('#ststat').textContent = '연결을 확인하는 중…';
+  $('#sterr').innerHTML = '';
+  const r = await fetch('/api/storage', {
+    method: 'POST', headers: { 'Content-Type': 'application/json' },
+    body: JSON.stringify(body),
+  });
+  const j = await r.json().catch(() => ({}));
+  btn.disabled = false;
+  $('#ststat').textContent = '';
+  if (!r.ok) {
+    // **저장은 안 됐다.** 실패했는데 화면만 넘어가면 다음 900건이 허공으로 간다.
+    $('#sterr').innerHTML =
+      `<div class="warn" style="margin-top:12px">${esc(problemText(j) || '연결하지 못했습니다')}</div>`;
+    return;
+  }
+  const hint = (j.persist_hint || []).length
+    ? `\n\n키는 메모리에만 있습니다. 계속 쓰시려면 환경에 넣어 주세요:\n${
+        j.persist_hint.join('\n')}`
+    : '';
+  alert(`저장했습니다 — ${j.detail}\n버킷 ${j.current.bucket}${hint}`);
+  $('#storage').innerHTML = '';            // 폼을 닫아야 다시 그려진다
+  loadOverview();
 }
 
 async function testStorage() {
@@ -1825,8 +1964,15 @@ fetch('/api/defaults').then(r => r.json()).then(d => {
 
 loadCols();
 setFilter('active');
-go2('browser');
-loadObjects();
+
+// **처음 들어온 사람을 파일 브라우저로 보내지 않는다.** 붙을 곳이 아직
+// 없으면 그 화면은 빈 목록과 404 뿐이고, 무엇을 해야 하는지가 어디에도
+// 안 적혀 있다. 그럴 때는 설정할 수 있는 화면으로 연다.
+fetch('/api/storage').then(r => r.ok ? r.json() : null).then(d => {
+  if (d && d.first_run) return go2('overview');
+  go2('browser');
+  loadObjects();
+}).catch(() => { go2('browser'); loadObjects(); });
 </script>
 </body>
 </html>
