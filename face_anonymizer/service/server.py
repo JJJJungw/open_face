@@ -100,6 +100,9 @@ def status():
     return {"ready": worker.is_ready(), "busy": worker.is_busy(),
             "queued": jobs.queue_depth(), "free_mb": jobs.free_mb(),
             "model_error": worker.model_error,
+            # 'ready' 하나로는 화면이 문구를 못 만든다 — 지연 로딩이면 받을
+            # 수는 있는데 아직 안 올라와 있다(worker.model_status 주석).
+            "model": worker.model_status(),
             "counts": jobs.counts(), "running": jobs.running_snapshot(),
             "recent": jobs.recent_stats(), "next_up": jobs.next_up(),
             # 큐 화면이 쓰는 값들(대기 지연·처리량·재시도). GPU 는 여기서 안
@@ -190,7 +193,8 @@ def health(response: Response):
     info = {"status": "ok" if ready else "not-ready",
             "ready": ready, "busy": worker.is_busy(), "queued": jobs.queue_depth(),
             "free_mb": jobs.free_mb(),
-            "model_loaded": worker._anonymizer is not None, "model_error": worker.model_error,
+            "model_loaded": worker._anonymizer is not None,
+            "model": worker.model_status(), "model_error": worker.model_error,
             "device": config.DEVICE or "auto", "imgsz": config.IMGSZ,
             "methods": list(METHODS)}
     loaded = worker._anonymizer is not None

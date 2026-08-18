@@ -38,7 +38,8 @@ EXEC = ThreadPoolExecutor(max_workers=1, thread_name_prefix="anon")
 
 _anonymizer = None
 _anon_lock = threading.Lock()
-model_error = None       # 기동 시 모델 로드 실패 사유
+model_error = None       # 모델 로드 실패 사유
+loading = False          # 지금 실제로 올리고 있는 중인가 (화면 문구용)
 current = None           # 이 프로세스가 지금 붙잡고 있는 작업 id
 
 
@@ -49,7 +50,7 @@ def get_anonymizer():
     이미 통과한 상태라, 오케스트레이터가 보낸 첫 요청이 모델 로딩 수십 초를
     기다리게 된다.
     """
-    global _anonymizer
+    global _anonymizer, loading
     with _anon_lock:
         if _anonymizer is None:
             from ..core.paths import DEFAULT_WEIGHTS
@@ -59,16 +60,45 @@ def get_anonymizer():
             # 새 EC2 나 컨테이너에서는 여기서 처음 받는다. 이미 있으면 네트워크
             # 호출조차 없다. 검출기(core)가 S3 를 모르게 하려고 만드는 쪽에서
             # 갖춰 놓고 넘긴다.
-            weights_store.ensure(DEFAULT_WEIGHTS)
-            log.info("검출기 로드 중 (device=%s imgsz=%d)", config.DEVICE, config.IMGSZ)
-            _anonymizer = VideoAnonymizer(device=config.DEVICE, imgsz=config.IMGSZ)
-            log.info("검출기 준비 완료")
+            loading = True
+            try:
+                weights_store.ensure(DEFAULT_WEIGHTS)
+                log.info("검출기 로드 중 (device=%s imgsz=%d)",
+                         config.DEVICE, config.IMGSZ)
+                _anonymizer = VideoAnonymizer(device=config.DEVICE,
+                                              imgsz=config.IMGSZ)
+                log.info("검출기 준비 완료")
+            finally:
+                loading = False
         return _anonymizer
 
 
 def is_ready():
-    """추론을 받을 수 있는 상태인가."""
-    return _anonymizer is not None and model_error is None
+    """작업을 **받을 수 있는** 상태인가.
+
+    모델이 올라와 있는가와 **다른 질문이다.** ``FA_PRELOAD=0`` 은 "첫 요청 때
+    올린다" 는 뜻인데, 예전에는 이 함수가 모델 객체의 유무만 봤다. 그래서
+    받는 문(``check_admission``)이 닫히고 → 작업이 안 들어오고 → 모델을 올릴
+    계기가 영영 없고 → 화면은 "모델 올리는 중" 을 영원히 띄웠다. **실제로는
+    아무것도 올리고 있지 않았다.** 지연 로딩이 아니라 그냥 죽은 서버였다.
+
+    지금은 이렇게 답한다. 로드가 실패했으면 못 받는다. 이미 올라와 있으면
+    받는다. 아직 안 올라왔어도 **지연 로딩 설정이면 받는다** — 실제 로드는
+    워커 스레드가 첫 작업에서 한다.
+    """
+    if model_error is not None:
+        return False
+    return _anonymizer is not None or not config.PRELOAD
+
+
+def model_status():
+    """모델에 관한 사실들. **화면이 문구를 만들 재료다.**
+
+    'ready' 하나로는 표현이 안 된다 — 지연 로딩이면 받을 수는 있는데 아직
+    안 올라와 있다. 그 상태를 "올리는 중" 이라고 부르면 거짓말이 된다.
+    """
+    return {"loaded": _anonymizer is not None, "loading": loading,
+            "error": model_error, "preload": bool(config.PRELOAD)}
 
 
 def is_busy():

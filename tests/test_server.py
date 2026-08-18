@@ -1825,3 +1825,62 @@ def test_the_folder_filter_follows_the_date_range(tmp_path, monkeypatch):
     # 전 기간을 보면 둘 다 — 옛 기록을 지우자는 게 아니다
     assert set(events.batches(from_day="2000-01-01", to_day="2026-08-18")) \
         == {"kbs", "2026-08"}
+
+
+# ── 지연 로딩이 지연이 아니라 정지였다 ──────────────────────────────────────
+#
+# FA_PRELOAD=0 은 "첫 요청 때 올린다" 는 뜻으로 문서에 적혀 있었다. 그런데
+# 받는 문이 '모델이 올라와 있나' 로 잠겨 있어서 첫 요청이 영원히 안 들어오고,
+# 그래서 모델도 영원히 안 올라갔다. 화면은 "모델 올리는 중" 을 계속 띄웠는데
+# 실제로는 아무것도 올리고 있지 않았다.
+
+def test_lazy_loading_can_actually_receive_the_first_job(monkeypatch):
+    """받는 문이 닫혀 있으면 지연 로딩은 성립하지 않는다."""
+    from face_anonymizer.service import config as cfg, worker as w
+    monkeypatch.setattr(w, "_anonymizer", None)
+    monkeypatch.setattr(w, "model_error", None)
+    monkeypatch.setattr(cfg, "PRELOAD", 0)
+
+    assert w.is_ready() is True                  # 아직 안 올라왔지만 받을 수 있다
+    from face_anonymizer.service import server as srv
+    srv.check_admission()                        # 예외가 나면 안 된다
+
+
+def test_preload_mode_still_refuses_until_it_is_up(monkeypatch):
+    """미리 올리기로 했으면 올라오기 전에는 받지 않는다 — 첫 요청이 로딩을
+    통째로 기다리게 하지 않으려고 미리 올리는 것이다."""
+    from face_anonymizer.service import config as cfg, worker as w
+    monkeypatch.setattr(w, "_anonymizer", None)
+    monkeypatch.setattr(w, "model_error", None)
+    monkeypatch.setattr(cfg, "PRELOAD", 1)
+
+    assert w.is_ready() is False
+
+
+def test_a_failed_load_is_never_ready(monkeypatch):
+    from face_anonymizer.service import config as cfg, worker as w
+    monkeypatch.setattr(w, "_anonymizer", None)
+    monkeypatch.setattr(w, "model_error", "가중치가 없습니다")
+    monkeypatch.setattr(cfg, "PRELOAD", 0)
+
+    assert w.is_ready() is False
+
+
+def test_status_separates_loaded_from_loading(monkeypatch):
+    """'아직 안 올라왔다' 와 '지금 올리고 있다' 는 다른 사실이다.
+
+    둘을 한 값으로 뭉치면 화면이 아무것도 안 하고 있는 상태를 '올리는 중'
+    이라고 부르게 된다(docs/issues/013).
+    """
+    from face_anonymizer.service import config as cfg, worker as w
+    monkeypatch.setattr(w, "_anonymizer", None)
+    monkeypatch.setattr(w, "loading", False)
+    monkeypatch.setattr(w, "model_error", None)
+    monkeypatch.setattr(cfg, "PRELOAD", 0)
+
+    m = w.model_status()
+    assert m == {"loaded": False, "loading": False, "error": None,
+                 "preload": False}
+
+    monkeypatch.setattr(w, "loading", True)
+    assert w.model_status()["loading"] is True

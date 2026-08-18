@@ -1753,9 +1753,16 @@ let LAST_STATUS = null;
 
 function modelState(st) {
   if (!st) return { text: '서버 연결 끊김', ok: false };
-  if (st.model_error) return { text: '모델 로드 실패', ok: false };
-  if (!st.ready) return { text: '모델 올리는 중', ok: false };
-  return { text: '모델 준비됨', ok: true };
+  const m = st.model || {};
+  if (m.error || st.model_error) return { text: '모델 로드 실패', ok: false };
+  if (m.loading) return { text: '모델 올리는 중', ok: false };
+  if (m.loaded) return { text: '모델 준비됨', ok: true };
+  // **아직 안 올라왔다고 다 '올리는 중' 은 아니다.** 지연 로딩이면 아무것도
+  // 하고 있지 않은 것이 정상이고, 그걸 '올리는 중' 이라고 쓰면 거짓말이다 —
+  // 실제로 그 문구가 영원히 떠 있는 것을 보고 이 구멍을 찾았다.
+  if (m.preload === false)
+    return { text: '모델 대기 · 첫 작업 때 올립니다', ok: true, lazy: true };
+  return { text: st.ready ? '모델 준비됨' : '모델 올리는 중', ok: !!st.ready };
 }
 
 let DEV_SHOWN = false;
@@ -1764,7 +1771,7 @@ function paintDev(st) {
   const el = $('#dev');
   if (!el) return;
   const m = modelState(st);
-  if (!m.ok) { el.textContent = m.text; DEV_SHOWN = false; return; }
+  if (!m.ok || m.lazy) { el.textContent = m.text; DEV_SHOWN = false; return; }
   if (DEV_SHOWN) return;                   // 장치 정보는 한 번만 받아 온다
   DEV_SHOWN = true;
   fetch('/api/health').then(r => r.json()).then(h => {
