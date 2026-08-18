@@ -1259,7 +1259,7 @@ function connPanel(d) {
              연결 해제</button>`
         : ''}
       <span class="meta" style="margin-left:auto">${
-        w.present ? '모델 준비됨' : '모델 미준비'}</span>
+        esc(modelState(LAST_STATUS).text)}</span>
     </div>`;
 }
 
@@ -1295,7 +1295,7 @@ function storageView(d) {
     ['입력 프리픽스', c.root_prefix || '(최상위)'],
     ['결과 프리픽스', c.output_prefix || '—'],
     ['자격 증명', (d.credentials || {}).source || '—'],
-    ['모델 가중치', (d.weights || {}).present
+    ['가중치 파일', (d.weights || {}).present
       ? `있음 (${d.weights.size_mb} MB)` : ((d.weights || {}).detail || '—')],
   ];
   return `
@@ -1737,6 +1737,42 @@ function renderQueue(st) {
           st.next_up.map(n => `<span>${n}</span>`).join('')}</div>` : ''}`;
 }
 
+// 모델에 관한 사실은 **둘이고 서로 다르다.**
+//
+//   가중치 파일 — 디스크에 있나 (storage/weights)
+//   모델        — 메모리에 올라와서 지금 처리할 수 있나 (worker)
+//
+// 이 둘을 섞어 쓰다가 화면 세 군데가 서로 다른 말을 했다. 팝오버는 "모델
+// 준비됨"(사실은 가중치 파일이 있다는 뜻), 상단 배지는 "모델 준비 중"(기동
+// 때 한 번 그린 뒤로 안 바뀜), 사이드바는 "모델을 올리는 중"(이게 맞았다).
+// 셋 다 자기 딴에는 맞는 말이라 더 나빴다 — 어느 것을 믿어야 할지가 없다.
+//
+// 그래서 문구를 여기서 한 번만 정한다. 가중치 파일은 '파일' 이라고 부르고,
+// '모델' 이라는 말은 메모리에 올라온 것에만 쓴다.
+let LAST_STATUS = null;
+
+function modelState(st) {
+  if (!st) return { text: '서버 연결 끊김', ok: false };
+  if (st.model_error) return { text: '모델 로드 실패', ok: false };
+  if (!st.ready) return { text: '모델 올리는 중', ok: false };
+  return { text: '모델 준비됨', ok: true };
+}
+
+let DEV_SHOWN = false;
+
+function paintDev(st) {
+  const el = $('#dev');
+  if (!el) return;
+  const m = modelState(st);
+  if (!m.ok) { el.textContent = m.text; DEV_SHOWN = false; return; }
+  if (DEV_SHOWN) return;                   // 장치 정보는 한 번만 받아 온다
+  DEV_SHOWN = true;
+  fetch('/api/health').then(r => r.json()).then(h => {
+    el.textContent = h.model_loaded
+      ? `${h.device} · half=${h.half} · imgsz ${h.imgsz}` : m.text;
+  }).catch(() => { DEV_SHOWN = false; });
+}
+
 function hud(jobs, st) {
   const dot = $('#hdot'), title = $('#htitle'), body = $('#hbody');
   if (!st) {
@@ -1744,8 +1780,11 @@ function hud(jobs, st) {
     body.innerHTML = '<div class="idle">응답이 없습니다</div>'; return;
   }
   if (!st.ready) {
-    dot.className = 'dot err'; title.textContent = '준비 중';
-    body.innerHTML = `<div class="idle">${st.model_error || '모델을 올리는 중'}</div>`; return;
+    // 같은 어휘를 쓴다 — 상단 배지와 여기가 다른 말을 하면 어느 쪽을 믿어야
+    // 할지가 없어진다.
+    dot.className = 'dot err'; title.textContent = modelState(st).text;
+    body.innerHTML = `<div class="idle">${
+      st.model_error || '가중치를 올리고 있습니다'}</div>`; return;
   }
   const c = counts(st);
   const running = st.running || jobs.find(j => j.status === 'running');
@@ -2021,7 +2060,11 @@ async function poll() {
   ]);
   // 그 사이 탭이나 쪽이 바뀌었다 — 새 폴링이 그린다
   if (asked !== filter || askedPage !== page) return;
+  LAST_STATUS = st;
+  paintDev(st);
   hud(jobs || [], st);
+  // 팝오버가 열려 있으면 그 안의 모델 상태도 같이 따라간다.
+  if (!$('#connpop').hidden && STORAGE) $('#connpop').innerHTML = connPanel(STORAGE);
   if (!jobs) return;
   kpis(jobs, st);
   navCounts(st);
@@ -2055,10 +2098,8 @@ async function poll() {
   timer = setTimeout(poll, busy ? 700 : 5000);
 }
 
-fetch('/api/health').then(r => r.json()).then(h => {
-  $('#dev').textContent = h.model_loaded
-    ? `${h.device} · half=${h.half} · imgsz ${h.imgsz}` : '모델 준비 중';
-}).catch(() => $('#dev').textContent = '연결 실패');
+// 배지는 폴링에서 그린다(paintDev). 예전에는 기동 때 딱 한 번 그려서,
+// 모델이 다 올라온 뒤에도 '모델 준비 중' 이 영원히 붙어 있었다.
 
 // 컨트롤 초깃값은 서버에서 받는다. 화면에 박아 두면 서버 설정을 바꿔도
 // 화면은 옛 값을 보내서 둘이 조용히 어긋난다.
