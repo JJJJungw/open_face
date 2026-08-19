@@ -115,12 +115,36 @@ NVENC 는 `-rc cbr` 이다. 그때 비로소 정지 화면도 3173 kbps 로 나�
 `test_audio_longer_than_video_is_not_rejected` 가 잡았다. 그 테스트가 없었으면
 "마이크가 늦게 끊긴 녹화물" 이 전부 실패로 떨어질 뻔했다.
 
-## 남은 것 — GPU 에서 다시 재야 한다
+## GPU 에서도 확인했다 — 그리고 더 나빴다
 
-**여기서 잰 것은 전부 libx264 다.** 운영 EC2 는 NVENC 를 쓰고, 그쪽 rate control
-은 구현이 다르다. 코드는 `-rc cbr` 로 갈라 두었지만 **이 기계에 GPU 가 없어
-확인하지 못했다.** 납품 전에 실제 장비에서 한 편 돌려 재 봐야 한다.
+위의 실측은 전부 libx264 다. 운영 EC2 는 NVENC 를 쓰고 rate control 구현이
+달라서, 같은 실험을 실제 장비(L40S)에서 다시 돌렸다. 30초짜리 단색 화면 —
+인코더가 제일 아끼고 싶어 하는 입력이다.
 
 ```
-ffprobe -v error -show_entries format=bit_rate -of default=nw=1 <결과물>
+vbr  (-rc vbr  -b:v 3500k -maxrate 4000k -bufsize 8000k)      27 kbps
+cbr  (-rc vbr -rc cbr -b:v 3200k -maxrate 3200k -bufsize 3200k)   3203 kbps
 ```
+
+**27 kbps.** libx264 에서 본 14 kbps 가 CPU 인코더 특유의 현상이 아니었다는
+뜻이고, 더 중요하게는 **납품을 실제로 수행하는 장비에서 그러고 있었다**는
+뜻이다. 정지에 가까운 컷 — 자막 화면, 정지 사진, 고정 카메라 — 은 규격 미달
+정도가 아니라 사실상 화질이 없는 파일로 나가고 있었다.
+
+`-rc vbr` 뒤에 `-rc cbr` 을 붙여 뒤엣것이 이기는 것도 같이 확인했다. 우리 코드가
+후보 표의 옵션 뒤에 rate control 을 붙이는 구조라 그 순서에 기대고 있다.
+
+재현은 이 한 줄이다.
+
+```
+ffmpeg -y -v error -f lavfi -i color=c=navy:s=1280x720:r=30:d=30 \
+  -c:v h264_nvenc -preset p4 -rc vbr -b:v 3500k -maxrate 4000k -bufsize 8000k \
+  -pix_fmt yuv420p /tmp/nv.mp4
+ffprobe -v error -show_entries format=bit_rate -of default=nw=1 /tmp/nv.mp4
+```
+
+## 남은 것
+
+**실제 방송 클립으로는 아직 안 쟀다.** 여기 숫자는 전부 합성 영상(단색·노이즈·
+testsrc)이라 실물의 압축 특성과 다르다. 대역 안에 들어오는 것은 CBR 이 보장하지만,
+그 대역에서 **화질이 납품 기준을 만족하는지**는 다른 질문이고 눈으로 봐야 한다.
