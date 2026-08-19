@@ -1,12 +1,13 @@
 """작업 상태 — 만들고, 디스크에 남기고, 다시 찾고, 정리한다.
 
-**작업 상태는 디스크에 있다.** 전역 dict 에만 두면 (a) 재시작 시 전부 사라져
-폴링 중인 클라이언트가 404 를 받고, (b) ``--workers 2`` 로 띄우는 순간 업로드는
-A 프로세스, 폴링은 B 프로세스로 가서 계속 404 가 난다. 작업별 디렉터리에
-``job.json`` 을 두면 둘 다 해결된다.
+**작업 상태는 디스크에 있다.** 전역 dict 에만 두면 재시작할 때 전부 사라져
+폴링 중인 클라이언트가 404 를 받는다. 작업별 디렉터리에 ``job.json`` 을 두면
+상태가 재시작을 건너서 산다. 메모리의 ``JOBS`` 는 그 캐시다.
 
-메모리의 ``JOBS`` 는 그 캐시다. 이 프로세스가 만든 작업은 여기 있고, 다른
-프로세스가 만든 것은 디스크에서 읽는다.
+**작업 폴더 하나에 서버 하나다.** 디스크에 상태를 둔다고 해서 여러 프로세스가
+같은 폴더를 나눠 쓸 수 있게 되는 것은 아니다 — 그건 별개의 문제이고 지금은
+안전하지 않다(docs/issues/017). ``claim_jobs_dir()`` 가 기동할 때 그것을
+확정한다.
 
 **작업 파일은 작업별 디렉터리에.** 원본과 결과가 섞이지 않고, 삭제가 디렉터리
 하나 지우는 것으로 끝난다.
@@ -22,6 +23,11 @@ from dataclasses import asdict, dataclass, field, fields
 
 from .. import progress, timefmt
 from . import config
+
+try:
+    import fcntl
+except ImportError:                             # pragma: no cover — 윈도우
+    fcntl = None
 
 log = logging.getLogger(__name__)
 
@@ -96,6 +102,92 @@ def save_job(j, force=True):
         log.warning("작업 상태를 쓰지 못했다 (%s): %s", j.id, e)
 
 
+# ── 작업 폴더의 주인은 하나다 ────────────────────────────────────────────────
+#
+# 재시작을 무중단으로 굴리면 내려가는 프로세스와 올라오는 프로세스가 잠깐 겹친다.
+# 그건 정상이므로 조금 기다려 준다. 이 시간을 넘겨도 안 놓으면 진짜로 둘이 같이
+# 살려는 것이다.
+CLAIM_WAIT_SEC = 5.0
+_dir_lock = None
+
+
+def claim_jobs_dir(path=None):
+    """**이 프로세스가 작업 폴더의 유일한 주인임을 확정한다.**
+
+    ``--workers N`` 이나 서버 두 개를 같은 ``FA_JOBS_DIR`` 로 띄우면 조용히
+    망가진다. 실패 방식이 전부 소리가 없다는 것이 문제다 —
+
+    - 정리 스레드가 **다른 프로세스가 렌더 중인 임시 폴더를 지운다.** 살아
+      있는지를 자기 메모리(``JOBS``)로만 판단하는데, 남의 작업은 거기 없다.
+    - ``/cancel`` 이 남의 작업에 대해 **200 을 주면서 아무 일도 안 한다.**
+      취소 표시는 디스크에 찍히지만 그 작업을 든 프로세스는 자기 메모리만 보고,
+      0.5초 뒤 진행률을 흘려 쓰면서 그 표시를 **덮어 지운다.**
+    - 기동 복구가 모든 프로세스에서 동시에 돌아 같은 작업을 N번 처리한다.
+
+    잠금은 ``flock`` 이다. 프로세스가 어떻게 죽든 커널이 놓아 주므로 죽은
+    서버의 잠금 파일이 남아 다음 기동을 막는 일이 없다.
+
+    돌려주는 값은 실제로 잠갔는지다. 잠글 **수단**이 없으면(윈도우, 읽기 전용
+    볼륨) 경고만 남기고 ``False`` 로 지나간다 — 잠글 수 없다는 이유로 서버를
+    못 뜨게 하는 것은 과하다. 다른 프로세스가 이미 들고 있으면 ``RuntimeError``
+    를 던진다. 그건 지나가면 안 되는 상황이다.
+    """
+    global _dir_lock
+    # 같은 프로세스가 다시 부르면(테스트가 앱을 여러 번 띄운다) 앞의 것을 먼저
+    # 놓는다. 안 놓으면 열린 파일이 그만큼 쌓인다.
+    release_jobs_dir()
+    if fcntl is None:                           # pragma: no cover — 윈도우
+        log.warning("이 플랫폼에는 flock 이 없다 — 작업 폴더를 잠그지 못한다. "
+                    "서버를 하나만 띄워야 한다.")
+        return False
+
+    p = path or os.path.join(config.JOBS_DIR, config.SERVER_LOCK_FILE)
+    try:
+        # 자르지 않고 연다. ``w`` 로 열면 잠금을 잡기도 전에 남이 적어 둔 pid 를
+        # 지워서, 정작 거절할 때 누구 때문인지 말해 줄 수 없다.
+        fh = os.fdopen(os.open(p, os.O_RDWR | os.O_CREAT, 0o644), "r+")
+    except OSError as e:
+        log.warning("작업 폴더를 잠글 수 없다 (%s) — 서버를 하나만 띄워야 한다", e)
+        return False
+
+    deadline = time.time() + CLAIM_WAIT_SEC
+    while True:
+        try:
+            fcntl.flock(fh, fcntl.LOCK_EX | fcntl.LOCK_NB)
+            break
+        except OSError:
+            if time.time() >= deadline:
+                held = fh.read().strip() or "?"
+                fh.close()
+                raise RuntimeError(
+                    f"작업 폴더를 다른 서버가 쓰고 있습니다 (pid {held}): "
+                    f"{config.JOBS_DIR}\n"
+                    "이 서비스는 작업 폴더 하나에 프로세스 하나만 지원합니다. "
+                    "uvicorn 을 --workers 없이 띄우거나, 두 번째 서버에는 "
+                    "FA_JOBS_DIR 로 다른 폴더를 주세요 "
+                    "(이유: docs/issues/017)."
+                ) from None
+            fh.seek(0)
+            time.sleep(0.25)
+
+    fh.seek(0)
+    fh.truncate()
+    fh.write(str(os.getpid()))
+    fh.flush()
+    _dir_lock = fh                              # 프로세스가 살아 있는 동안 붙든다
+    return True
+
+
+def release_jobs_dir():
+    """잠금을 놓는다. 테스트와 종료 정리용."""
+    global _dir_lock
+    if _dir_lock is not None:
+        try:
+            _dir_lock.close()                   # 닫으면 flock 도 풀린다
+        finally:
+            _dir_lock = None
+
+
 def load_job_file(jid):
     """디스크에서 작업 상태를 읽는다. 없거나 깨졌으면 None."""
     try:
@@ -113,8 +205,8 @@ def load_job_file(jid):
 def find_job(jid):
     """작업 조회. 이 프로세스가 돌리는 중이면 메모리 값이 최신이다.
 
-    다른 프로세스(``--workers N``)가 만든 작업은 메모리에 없으므로 디스크에서
-    읽는다. 이게 없으면 업로드와 폴링이 다른 워커로 갈 때 계속 404 가 난다.
+    **재시작 전에 만들어진 작업은 메모리에 없으므로 디스크에서 읽는다.** 이게
+    없으면 배포 한 번에 폴링 중인 클라이언트가 전부 404 를 받는다.
     """
     if not jid or "/" in jid or "\\" in jid or jid.startswith("."):
         return None
@@ -337,9 +429,8 @@ def recover_orphans():
     재큐한 작업은 ``JOBS`` 에 넣어 돌려준다 — 실제로 워커에 제출하는 것은
     호출하는 쪽 몫이다. 이 모듈이 워커를 임포트하면 의존이 순환한다.
 
-    ``FA_RECOVER=0`` 이면 아무것도 하지 않는다. ``--workers N`` 으로 여러 개를
-    띄울 때는 **한 프로세스만 켜 두어야 한다** — 그렇지 않으면 각자 같은 작업을
-    재큐해 중복 처리한다.
+    ``FA_RECOVER=0`` 이면 아무것도 하지 않는다 — 무엇이 끊겼는지 손으로 보고
+    싶을 때 쓴다.
 
     Returns 다시 돌려야 할 Job 목록 (오래된 순).
     """

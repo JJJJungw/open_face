@@ -173,9 +173,8 @@ def test_full_lifecycle_and_no_leak(client, tmp_path, make_video, monkeypatch):
 
 # ── 상태 영속화 ──────────────────────────────────────────────────────────────
 #
-# 작업 상태를 전역 dict 에만 두면 (a) 재시작 시 전부 사라져 폴링 중인 클라이언트가
-# 404 를 받고, (b) --workers 2 로 띄우면 업로드와 폴링이 다른 프로세스로 가서
-# 계속 404 가 난다. 아래가 그 회귀다.
+# 작업 상태를 전역 dict 에만 두면 재시작할 때 전부 사라져 폴링 중인 클라이언트가
+# 404 를 받는다. 아래가 그 회귀다.
 
 def test_job_state_is_written_to_disk(client, tmp_path, make_video):
     path, n, size = make_video(frames=10)
@@ -271,7 +270,7 @@ def test_requeue_does_not_burn_a_retry(client, tmp_path, monkeypatch):
 
 
 def test_recovery_can_be_turned_off(client, tmp_path, monkeypatch):
-    """--workers N 이면 한 프로세스만 복구해야 중복 처리가 안 생긴다."""
+    """끊긴 것을 손으로 보고 싶을 때 복구를 꺼 둘 수 있어야 한다."""
     monkeypatch.setattr(config, "JOBS_DIR", str(tmp_path))
     monkeypatch.setattr(jobsmod, "JOBS", {})
     monkeypatch.setattr(config, "RECOVER", False)
@@ -2077,3 +2076,91 @@ def test_the_progress_folder_list_does_not_hold_the_job_lock(tmp_path,
         assert "v1/input/kbs/" in jobsmod.tracked_prefixes()
         jobsmod.untrack_prefix("v1/input/kbs/")
     assert jobsmod.tracked_prefixes() == []
+
+
+# ── 작업 폴더의 주인은 하나다 (docs/issues/017) ──────────────────────────────
+
+def test_a_second_server_on_the_same_jobs_dir_is_refused(tmp_path, monkeypatch):
+    """**두 프로세스가 같은 작업 폴더를 나눠 쓰면 조용히 망가진다.**
+
+    셋 다 소리가 없다 — 정리가 남이 렌더 중인 임시 폴더를 지우고, /cancel 이
+    200 을 주면서 아무 일도 안 하고, 복구가 같은 작업을 N번 처리한다. 조용한
+    고장을 시끄러운 거절로 바꾼다.
+    """
+    from face_anonymizer.service import jobs as jobsmod
+    monkeypatch.setattr(config, "JOBS_DIR", str(tmp_path))
+    monkeypatch.setattr(jobsmod, "CLAIM_WAIT_SEC", 0.0)   # 겹침 대기는 여기선 무의미
+
+    lock = str(tmp_path / ".server.lock")
+    assert jobsmod.claim_jobs_dir(lock) is True
+
+    # flock 은 열린 파일 서술자 단위라, 같은 프로세스에서 따로 열어도 남이다.
+    import fcntl
+    other = open(lock, "r+")
+    with pytest.raises(OSError):
+        fcntl.flock(other, fcntl.LOCK_EX | fcntl.LOCK_NB)
+    other.close()
+
+    jobsmod.release_jobs_dir()
+    assert jobsmod.claim_jobs_dir(lock) is True           # 놓으면 다시 잡힌다
+    jobsmod.release_jobs_dir()
+
+
+def test_the_refusal_says_who_is_holding_it(tmp_path, monkeypatch):
+    """'폴더가 잠겼다' 만으로는 무엇을 끄라는 건지 알 수 없다."""
+    import fcntl
+    from face_anonymizer.service import jobs as jobsmod
+    monkeypatch.setattr(config, "JOBS_DIR", str(tmp_path))
+    monkeypatch.setattr(jobsmod, "CLAIM_WAIT_SEC", 0.0)
+
+    lock = str(tmp_path / ".server.lock")
+    holder = open(lock, "w")
+    fcntl.flock(holder, fcntl.LOCK_EX | fcntl.LOCK_NB)
+    holder.write("4242"); holder.flush()
+
+    with pytest.raises(RuntimeError) as e:
+        jobsmod.claim_jobs_dir(lock)
+    msg = str(e.value)
+    assert "4242" in msg, "누가 들고 있는지 pid 를 말해야 한다"
+    assert "FA_JOBS_DIR" in msg and "workers" in msg, "무엇을 하라는지 말해야 한다"
+    holder.close()
+
+
+def test_a_restart_that_overlaps_briefly_still_comes_up(tmp_path, monkeypatch):
+    """무중단 재시작은 내려가는 쪽과 올라오는 쪽이 잠깐 겹친다.
+
+    그때마다 거절하면 배포할 때마다 서버가 안 뜬다. 겹침은 정상이므로 잠깐
+    기다려 주고, 그 시간을 넘겨도 안 놓을 때만 진짜 동시 실행으로 본다.
+    """
+    import fcntl
+    import threading as _th
+    from face_anonymizer.service import jobs as jobsmod
+    monkeypatch.setattr(config, "JOBS_DIR", str(tmp_path))
+    monkeypatch.setattr(jobsmod, "CLAIM_WAIT_SEC", 5.0)
+
+    lock = str(tmp_path / ".server.lock")
+    leaving = open(lock, "w")
+    fcntl.flock(leaving, fcntl.LOCK_EX | fcntl.LOCK_NB)
+    _th.Timer(0.4, leaving.close).start()        # 0.4초 뒤 내려간다
+
+    t0 = time.time()
+    assert jobsmod.claim_jobs_dir(lock) is True
+    # **기다렸다가** 잡은 것이어야 한다. 곧바로 성공했다면 잠금을 무시한 것이고,
+    # 그건 이 테스트가 막으려는 바로 그 상태다.
+    assert time.time() - t0 >= 0.3
+    jobsmod.release_jobs_dir()
+
+
+def test_no_lock_is_a_warning_not_a_dead_server(tmp_path, monkeypatch, caplog):
+    """잠글 **수단**이 없는 것과 남이 들고 있는 것은 다르다.
+
+    읽기 전용 볼륨이나 윈도우에서 서버를 못 뜨게 하는 것은 과하다 — 그건
+    "둘이 돌고 있다" 가 아니라 "확인할 방법이 없다" 이다.
+    """
+    from face_anonymizer.service import jobs as jobsmod
+    monkeypatch.setattr(config, "JOBS_DIR", str(tmp_path))
+    monkeypatch.setattr(jobsmod, "fcntl", None)
+
+    with caplog.at_level("WARNING"):
+        assert jobsmod.claim_jobs_dir(str(tmp_path / ".server.lock")) is False
+    assert any("하나만" in r.message for r in caplog.records)

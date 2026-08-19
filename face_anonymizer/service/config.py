@@ -102,8 +102,8 @@ MAX_ATTEMPTS = int(os.environ.get("FA_MAX_ATTEMPTS", 4))
 # 이미 "로컬에 없으면 S3 로 302" 이므로 들고 있을 이유가 없고, 안 지우면
 # 대량 처리에서 디스크가 먼저 찬다(docs/issues/001). 1 이면 예전처럼 남긴다.
 KEEP_LOCAL = _bool_env("FA_KEEP_LOCAL_RESULT", False)
-# 기동 시 중단된 작업 정리. --workers N 으로 띄울 때는 한 프로세스만 켜 둔다 —
-# 여럿이 켜면 각자 같은 작업을 재큐해 중복 처리한다.
+# 기동 시 중단된 작업 정리. 끄면 재시작 전에 대기·수행 중이던 것이 그 상태로
+# 남는다 — 무엇이 끊겼는지 손으로 보고 싶을 때 쓴다.
 RECOVER = _bool_env("FA_RECOVER", True)
 
 # 재시도 간격. 세 번을 같은 순간에 시도하면 세 번 다 같은 세상을 본다 —
@@ -143,5 +143,7 @@ JOB_DEFAULTS = dict(params.DEFAULTS)
 PERMANENT_ERRORS = (VideoOpenError, VideoWriteError, ValueError, FileNotFoundError)
 STATE_FILE = "job.json"
 GPU_LOCK_FILE = ".gpu.lock"
+# 작업 폴더의 주인이 하나임을 확정하는 잠금(jobs.claim_jobs_dir).
+SERVER_LOCK_FILE = ".server.lock"
 PROGRESS_FLUSH_SEC = 0.5      # 진행률을 디스크에 쓰는 최소 간격
 VIDEO_EXT = {".mp4", ".mov", ".mkv", ".avi", ".webm", ".m4v"}

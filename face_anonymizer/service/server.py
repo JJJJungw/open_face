@@ -48,6 +48,10 @@ async def lifespan(_app):
     # 여기서 안 하면 우리 INFO 는 전부 버려진다 — uvicorn 은 루트를 안 건드린다.
     logsetup.setup()
     os.makedirs(config.JOBS_DIR, exist_ok=True)
+    # **다른 것을 건드리기 전에** 이 폴더의 주인임을 확정한다. 바로 아래
+    # 복구와 정리 스레드는 둘 다 남의 작업을 망가뜨릴 수 있는 동작이라,
+    # 순서를 뒤로 미루면 확인했을 때는 이미 늦다.
+    jobs.claim_jobs_dir()
     log.info("서버 기동 — 작업 폴더 %s", config.JOBS_DIR)
     events.emit("server.started", jobs_dir=config.JOBS_DIR)
     worker.resume_orphans()
@@ -63,7 +67,12 @@ async def lifespan(_app):
         except Exception as e:                  # noqa: BLE001
             worker.model_error = f"{type(e).__name__}: {e}"
             log.exception("모델 로드 실패 — 준비되지 않은 상태로 뜬다")
-    yield
+    try:
+        yield
+    finally:
+        # 곱게 내려가면 여기서 놓는다. 강제로 죽으면 커널이 놓아 주므로 어느
+        # 쪽이든 잠금 파일이 남아 다음 기동을 막는 일은 없다.
+        jobs.release_jobs_dir()
 
 
 app = FastAPI(title="face-anonymizer", version="0.3.0", lifespan=lifespan)
