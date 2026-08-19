@@ -645,11 +645,11 @@ function crumbs() {
   if (!S3.bucket) { el.innerHTML = '<span class="cur">S3</span>'; return; }
   const parts = S3.prefix.split('/').filter(Boolean);
   let acc = '';
-  const items = [`<a onclick="loadObjects('')">${S3.bucket}</a>`];
+  const items = [`<a data-go="">${esc(S3.bucket)}</a>`];
   parts.forEach((p, i) => {
     acc += p + '/'; const path = acc;
-    items.push(i === parts.length - 1 ? `<span class="cur">${p}</span>`
-                                      : `<a onclick="loadObjects('${path}')">${p}</a>`);
+    items.push(i === parts.length - 1 ? `<span class="cur">${esc(p)}</span>`
+                                      : `<a data-go="${esc(path)}">${esc(p)}</a>`);
   });
   el.innerHTML = items.join('<span class="sep">/</span>');
 }
@@ -687,9 +687,9 @@ function renderBrowser() {
     const sel = S3.selected.has(f);
     return `<tr class="${sel ? 'sel' : ''}">
       <td><input type="checkbox" ${sel ? 'checked' : ''}
-            onchange="toggle('${f}', this.checked)"></td>
+            data-pick="${esc(f)}"></td>
       <td><div class="key"><span class="ico">▸</span>
-        <span class="nm"><a onclick="loadObjects('${f}')">${name}/</a></span></div></td>
+        <span class="nm"><a data-go="${esc(f)}">${esc(name)}/</a></span></div></td>
       <td class="num">—</td><td class="when">—</td>
       <td><span class="tag plain">폴더</span></td></tr>`;
   }).concat(objects.map(o => {
@@ -699,9 +699,9 @@ function renderBrowser() {
               : (isVideo ? '' : '<span class="tag plain">영상 아님</span>');
     return `<tr class="${sel ? 'sel' : ''}">
       <td>${isVideo ? `<input type="checkbox" ${sel ? 'checked' : ''}
-            onchange="toggle('${o.key}', this.checked)">` : ''}</td>
+            data-pick="${esc(o.key)}">` : ''}</td>
       <td><div class="key"><span class="ico">▤</span>
-        <span class="nm" title="${o.key}">${name}</span></div></td>
+        <span class="nm" title="${esc(o.key)}">${esc(name)}</span></div></td>
       <td class="num">${humanSize(o.size)}</td>
       <td class="when">${humanTime(o.modified)}</td>
       <td>${tag}</td></tr>`;
@@ -710,12 +710,26 @@ function renderBrowser() {
   el.innerHTML = `<table><thead><tr>
       <th style="width:38px">${selectable.length
         ? `<input type="checkbox" ${allSel ? 'checked' : ''}
-             onchange="toggleAll(this.checked)">` : ''}</th>
+             data-pick-all>` : ''}</th>
       <th>이름</th><th style="width:88px;text-align:right">크기</th>
       <th style="width:132px">마지막 수정</th><th style="width:86px"></th>
     </tr></thead><tbody>${rows.join('')}</tbody></table>`;
   updatePicked();
 }
+
+// **이름을 코드가 아니라 데이터로 넘긴다.** 예전에는 onclick="toggle('<이름>')"
+// 처럼 파일 이름을 JS 문자열 안에 끼워 넣었는데, 그러면 이름이 곧 코드가 된다.
+// 작은따옴표 하나로 구문이 깨지고(O'Brien 같은 정상적인 이름), 꾸며 낸 이름은
+// 그대로 실행됐다. data-* 는 브라우저가 속성 값으로만 다루므로 그 길이 없다.
+$('#browser').addEventListener('click', e => {
+  const go = e.target.closest('[data-go]');
+  if (go) { e.preventDefault(); loadObjects(go.dataset.go); }
+});
+$('#browser').addEventListener('change', e => {
+  if (e.target.matches('[data-pick-all]')) return toggleAll(e.target.checked);
+  const box = e.target.closest('[data-pick]');
+  if (box) toggle(box.dataset.pick, box.checked);
+});
 
 const isFolder = k => k.endsWith('/');
 function toggle(key, on) { on ? S3.selected.add(key) : S3.selected.delete(key); renderBrowser(); }
@@ -931,11 +945,16 @@ async function loadLogBatches() {
   el.hidden = !names.length;                 // 폴더로 돌린 적이 없으면 줄 자체를 숨긴다
   if (!names.length) return;
   el.innerHTML = `<span class="n" style="margin:0 6px 0 0">폴더</span>` +
-    `<span class="bchip ${logBatches.length ? '' : 'on'}"
-           onclick="pickBatch('')">전체</span>` +
+    `<span class="bchip ${logBatches.length ? '' : 'on'}" data-batch="">전체</span>` +
     names.map(n => `<span class="bchip ${logBatches.includes(n) ? 'on' : ''}"
-        onclick="pickBatch('${n}')">${esc(n)}</span>`).join('');
+        data-batch="${esc(n)}">${esc(n)}</span>`).join('');
 }
+
+// 폴더 이름도 버킷에서 온다 — 파일 브라우저와 같은 이유로 data-* 로 넘긴다.
+$('#lgbatches').addEventListener('click', e => {
+  const chip = e.target.closest('[data-batch]');
+  if (chip) pickBatch(chip.dataset.batch);
+});
 
 function pickBatch(name) {
   if (!name) logBatches = [];                          // '전체'
@@ -972,9 +991,13 @@ function norm(s) {
   return String(s || '').normalize('NFC').toLowerCase();
 }
 
+// **작은따옴표까지 바꾼다.** 예전에는 & < > " 만 처리했는데, 값이
+// onclick="f('...')" 안에 들어가는 자리가 많아서 ' 하나로 그대로 뚫렸다.
+// 지금은 그런 자리를 data-* 로 걷어냈지만(아래 이벤트 위임), 이스케이프가
+// 좁으면 다음에 누가 인라인 핸들러를 하나 추가할 때 같은 구멍이 다시 생긴다.
 function esc(s) {
-  return String(s == null ? '' : s).replace(/[&<>"]/g,
-    c => ({ '&':'&amp;', '<':'&lt;', '>':'&gt;', '"':'&quot;' }[c]));
+  return String(s == null ? '' : s).replace(/[&<>"']/g,
+    c => ({ '&':'&amp;', '<':'&lt;', '>':'&gt;', '"':'&quot;', "'":'&#39;' }[c]));
 }
 
 function rowKey(r) { return `${r.ts}|${r.event}|${r.job || ''}`; }
@@ -1494,15 +1517,20 @@ function renderProgress(p) {
   el.innerHTML = p.folders.map(f => {
     const pc = f.percent;
     return `<div class="prow">
-      <div class="t"><b>${f.name}</b>
+      <div class="t"><b>${esc(f.name)}</b>
         <span>${f.done} / ${f.total} · 남음 ${f.remain}
-          <a onclick="untrackFolder('${f.prefix}')" title="진척률 목록에서 뺍니다"
+          <a data-untrack="${esc(f.prefix)}" title="진척률 목록에서 뺍니다"
              style="cursor:pointer;color:var(--faint);margin-left:8px">&times;</a>
         </span></div>
       <div class="track ${pc >= 100 ? 'full' : ''}"><i style="width:${pc}%"></i></div>
     </div>`;
   }).join('');
 }
+
+$('#prog').addEventListener('click', e => {
+  const x = e.target.closest('[data-untrack]');
+  if (x) { e.preventDefault(); untrackFolder(x.dataset.untrack); }
+});
 
 function renderOps(m) {
   const el = $('#opsbody');
