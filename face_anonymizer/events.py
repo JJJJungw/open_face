@@ -173,7 +173,8 @@ def tail_lines(path):
 # 펼쳐야 보이는 것까지 60줄에 다 붙어 오는 셈이라, 목록 한 번에 몇 배가 실렸다.
 LIST_FIELDS = ("at", "ts", "mode", "event", "job", "name", "batch",
                "seconds", "pipeline_s", "elapsed_s", "frames", "detection_rate",
-               "review_needed", "transcoded", "source_codec", "stage",
+               "review_needed", "transcoded", "source_codec",
+               "stage", "stage_label",
                "transient", "detail", "attempts", "percent", "eta_s",
                "action", "note", "codes", "done", "failed", "avg_elapsed_s",
                "cold_s", "queue")

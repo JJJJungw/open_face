@@ -129,3 +129,35 @@ def test_one_flag_parser_for_every_switch():
         assert env.flag("FA_TEST_FLAG", False) is True, word
     del os.environ["FA_TEST_FLAG"]
     assert env.flag("FA_TEST_FLAG", True) is True
+
+
+def test_stage_names_come_from_one_table():
+    """화면이 자기 단계 이름표를 들고 있으면 갈라진다 — 실제로 갈라져 있었다.
+
+    MSA 경로는 "원본 받는 중" 을, 우리 화면은 "S3 내려받기" 를 썼다. 게다가
+    화면 표에는 `track` 이 없어서 추적 중에는 '준비' 라고 떴고, 저장소를 고를
+    수 있게 된 뒤로는 'S3' 라는 말 자체가 틀렸다.
+    """
+    import pathlib
+    from face_anonymizer import progress
+
+    # 모든 단계에 이름이 있어야 한다 — 하나라도 비면 화면이 '준비' 로 흐른다.
+    for stage, _base, _w in progress.STAGE_SPAN:
+        assert progress.label(stage), stage
+
+    # 그리고 화면은 자기 표를 갖고 있으면 안 된다.
+    html = (pathlib.Path(__file__).resolve().parent.parent
+            / "face_anonymizer/service/static/index.html").read_text(encoding="utf-8")
+    assert "STAGE_TEXT" not in html
+    assert "stage_label" in html
+
+
+def test_snapshot_carries_the_stage_name(tmp_path, monkeypatch):
+    """화면이 쓰려면 스냅샷에 실려 나와야 한다."""
+    from face_anonymizer.service import config, jobs as jobsmod
+    monkeypatch.setattr(config, "JOBS_DIR", str(tmp_path))
+    j = jobsmod.Job(id="x", name="a.mp4", params={}, workdir=str(tmp_path))
+    j.status, j.stage = "running", "detect"
+    snap = jobsmod.snapshot(j, 0)
+    assert snap["stage"] == "detect"
+    assert snap["stage_label"] == "얼굴 찾는 중"

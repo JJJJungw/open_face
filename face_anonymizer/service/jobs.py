@@ -175,6 +175,12 @@ def snapshot(j, queued_ahead=0):
 
     return {
         "id": j.id, "name": j.name, "status": j.status, "stage": j.stage,
+        # **문구는 서버가 정한다.** 화면이 자기 표를 들고 있으면 언젠가
+        # 갈라진다 — 실제로 갈라져 있었다. MSA 경로는 "원본 받는 중" 을
+        # 보내는데 우리 화면은 "S3 내려받기" 라고 썼고, 저장소를 고를 수 있게
+        # 되면서 그 'S3' 도 틀린 말이 됐다. track 단계는 아예 표에 없어서
+        # 추적 중에는 '준비' 라고 떴다.
+        "stage_label": progress.label(j.stage),
         "waiting": j.waiting if wait_left else "", "wait_left": wait_left,
         "percent": pct, "overall": overall, "fps": round(fps, 1),
         "eta": round(eta), "job_eta": round(job_eta),

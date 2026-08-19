@@ -1702,7 +1702,7 @@ function kpis(jobs, st) {
            remain ? `남은 작업 ${remain}건` : '처리할 작업이 없습니다', 'hero'),
       // 수행중 탭을 없앴으므로 '이 한 건이 어디까지 왔나' 를 여기서 답한다.
       tile('수행중 · 대기', `${running ? 1 : 0}<small>/</small>${queued}`,
-           running ? `${STAGE_TEXT[running.stage] || '준비'} ${Math.round(running.overall)}%`
+           running ? `${stageText(running)} ${Math.round(running.overall)}%`
                      // 초반 5% 아래에서는 서버가 추정을 안 내놓는다(progress.py).
                      // 그때 0 을 그대로 그리면 '0:00' 이 되어 다 끝난 것처럼 읽힌다.
                      + (running.job_eta ? ` · 남은 ${fmt(running.job_eta)}` : '')
@@ -1737,7 +1737,7 @@ function renderQueue(st) {
         <div class="lb">처리중</div>
         <div class="v" title="${run ? run.name : ''}">${run ? run.name : '유휴'}</div>
         <div class="sub">${run
-          ? `${STAGE_TEXT[run.stage] || '준비'} ${Math.round(run.overall)}% · 남은 ${fmt(run.eta)}`
+          ? `${stageText(run)} ${Math.round(run.overall)}% · 남은 ${fmt(run.eta)}`
           : '큐에서 꺼낼 작업이 없습니다'}</div>
       </div>
       <div class="arw">▶</div>
@@ -1838,7 +1838,7 @@ function hud(jobs, st) {
       </div>`;
     return;
   }
-  const stage = STAGE_TEXT[running.stage] || '준비';
+  const stage = stageText(running);
   body.innerHTML = `
     <div class="ring">${ring(running.overall)}
       <div class="who">
@@ -1882,8 +1882,13 @@ const REVIEW_TEXT = { 'no-detections':'얼굴 검출 0건',
                       'low-detection-rate':'검출률이 매우 낮음',
                       'decode-partial':'영상을 끝까지 읽지 못함',
                       'decode-short':'프레임 수가 원본보다 적음' };
-const STAGE_TEXT = { download:'S3 내려받기', transcode:'변환 → H.264',
-                     detect:'검출', render:'렌더', upload:'S3 올리기' };
+// 단계 이름은 **서버가 준 것을 그대로 쓴다**(`stage_label`). 화면이 자기 표를
+// 들고 있으면 갈라진다 — 예전에 여기 있던 표는 MSA 경로와 문구가 달랐고,
+// track 이 빠져 있어 추적 중에는 '준비' 라고 떴고, 저장소를 고를 수 있게 된
+// 뒤로는 'S3 내려받기' 의 'S3' 도 틀린 말이 됐다.
+function stageText(o) {
+  return (o && (o.stage_label || o.stage)) || '준비';
+}
 
 function card(j) {
   const cls = j.status === 'done' ? 'ok' : '';
@@ -1895,7 +1900,7 @@ function card(j) {
                : j.status === 'running' ? 'run' : '';
   let body = '';
   if (j.status === 'running') {
-    const stage = STAGE_TEXT[j.stage] || '준비';
+    const stage = stageText(j);
     body = `<div class="bar2"><i style="width:${j.overall}%"></i></div>
       <div class="meta">${stage} ${j.percent}% · ${j.fps.toFixed(0)} f/s ·
         남은 시간 ${fmt(j.eta)}</div>
@@ -1943,7 +1948,7 @@ function card(j) {
       exhausted: `일시적인 오류로 보고 ${j.max_attempts}회까지 다시 시도했지만 계속 실패했습니다`,
     }[e.policy] || '';
     const rows = [
-      ['단계', STAGE_TEXT[e.stage] || (e.stage || '—')],
+      ['단계', e.stage_label || e.stage || '—'],
       ['시도', j.attempts ? `${j.attempts}회` : '—'],
       j.s3_key ? ['입력', j.s3_key] : null,
     ].filter(Boolean);

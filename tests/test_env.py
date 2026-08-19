@@ -103,3 +103,37 @@ def test_the_shipped_example_actually_parses():
     assert got["FA_S3_ROOT_PREFIX"] == "v1/input/"
     for key, value in got.items():
         assert "#" not in value, f"{key} 에 주석이 섞였다: {value!r}"
+
+
+# ── 문서와 코드가 갈라지지 않게 ─────────────────────────────────────────────
+
+def test_every_setting_is_documented():
+    """**코드가 읽는데 `.env.example` 에 없으면 아무도 그 값을 모른다.**
+
+    설정은 늘어나기만 하고 문서는 손으로 따라가야 해서 반드시 갈라진다. 실제로
+    여섯 개가 빠져 있었다(docs/issues/015). 사람이 기억하는 대신 여기서 센다.
+    """
+    import pathlib
+    import re
+
+    root = pathlib.Path(__file__).resolve().parent.parent
+    used = {}
+    for base in ("face_anonymizer", "tools", "setup_weights.py"):
+        p = root / base
+        files = [p] if p.is_file() else [f for f in p.rglob("*.py")
+                                         if "__pycache__" not in str(f)]
+        for f in files:
+            for m in re.finditer(r'["\'](FA_[A-Z0-9_]+)["\']',
+                                 f.read_text(encoding="utf-8")):
+                used.setdefault(m.group(1), f.relative_to(root))
+
+    doc = set(re.findall(r"^#?(FA_[A-Z0-9_]+)=",
+                         (root / ".env.example").read_text(encoding="utf-8"), re.M))
+
+    # 이 파일을 찾는 데 쓰이는 값이라 이 파일에 못 적는다 — 닭과 달걀이다.
+    missing = {k: v for k, v in used.items() if k not in doc and k != "FA_ENV_FILE"}
+    assert not missing, "\n".join(f"  {k}  ({v})" for k, v in sorted(missing.items()))
+
+    # 반대쪽도 본다. 안 읽는 값이 문서에 남아 있으면 넣어도 아무 일이 없다.
+    stale = doc - set(used) - {"FA_ENV_FILE"}
+    assert not stale, sorted(stale)
