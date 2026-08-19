@@ -7,10 +7,10 @@
 ```bash
 pip install -r requirements/base.txt -r requirements/serve.txt \
             -r requirements/worker.txt -r requirements/dev.txt
-pytest                      # 402개, 약 1분
+pytest                      # 416개, 약 1분
 ```
 
-**`dev.txt` 만 깔면 402개 중 247개가 조용히 빠진다.** 서버·S3·저장소 설정
+**`dev.txt` 만 깔면 416개 중 247개가 조용히 빠진다.** 서버·S3·저장소 설정
 201개는 fastapi 와 httpx 를, 큐 워커 46개는 celery 를 `importorskip` 으로
 확인한다. 없으면 실패가 아니라 skip 이라 초록색으로 끝나는데, 정작 그 기계에서
 띄울 서버는 한 줄도 검증되지 않은 상태다. 무엇이 왜 빠졌는지 보려면 `-rs` 를
@@ -21,7 +21,7 @@ pytest -rs                  # 건너뛴 것과 그 사유를 끝에 모아 준�
 ```
 
 `pytest -q` 는 쓰지 말 것. `addopts` 에 이미 `-q` 가 있어서 `-qq` 가 되고,
-그러면 "402 passed" 요약 줄까지 사라져 점만 찍히고 끝난다.
+그러면 "416 passed" 요약 줄까지 사라져 점만 찍히고 끝난다.
 
 ## 여기서 잡은 것들
 
@@ -35,6 +35,8 @@ pytest -rs                  # 건너뛴 것과 그 사유를 끝에 모아 준�
 - 배치 크기 비교가 인코더 설정에 따라 깨졌다 — 그리고 그 원인이 테스트
   헬퍼가 OpenCV 내부 버퍼를 그대로 들고 있던 것이었다.
 - 결과물이 입력 폴더에 섞였을 때 다시 큐에 들어갔다.
+- `face-anonymize` 가 통째로 죽어 있었다 — 지연 임포트 하나가 옛 경로에 남아서.
+  테스트 412개가 통과하는 동안 아무도 CLI 를 부르지 않았다.
 
 ## 파일
 
@@ -58,6 +60,7 @@ pytest -rs                  # 건너뛴 것과 그 사유를 끝에 모아 준�
 | `test_msa_worker.py` | 큐에서 꺼내 오는 껍데기 · 펜싱 토큰 |
 | `test_msa_journal.py` | 큐 경로의 이벤트 기록 |
 | `test_env.py` | `.env` 해석 · **설정이 문서와 갈라지지 않는가** |
+| `test_cli.py` | 명령줄 진입점이 **실제로 도는가** · 죽은 상대 임포트 전수 검사 |
 
 ## 방식
 

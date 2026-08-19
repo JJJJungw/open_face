@@ -150,7 +150,10 @@ def main(argv=None):
         detector_kwargs["weights"] = args.weights
 
     try:
-        from .pipeline import VideoAnonymizer
+        # 지연 임포트다 — torch 를 끌고 오므로 `--help` 나 인자 오류에서는 안 든다.
+        # 그래서 **여기가 틀려도 임포트 검사에 안 걸린다.** 실제로 core/ 로 옮길 때
+        # 이 줄만 남아서 CLI 가 통째로 죽어 있었다(docs/issues/019).
+        from .core.pipeline import VideoAnonymizer
         anonymizer = VideoAnonymizer(**detector_kwargs)
         res = anonymizer.process(
             args.input, out,
