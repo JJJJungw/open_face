@@ -254,8 +254,22 @@ def storage_info():
                      "설정은 .env 로도 정할 수 있습니다. 환경 변수가 이깁니다.")}
 
 
+def _secure_enough(request):
+    """이 연결로 비밀을 받아도 되나.
+
+    https 이거나 루프백(SSH 터널·같은 기계)이면 된다. 리버스 프록시 뒤에서는
+    ``X-Forwarded-Proto`` 를 본다 — **프록시를 쓰는 배포가 정상이고**, 그걸
+    무시하면 제대로 감싼 서버에서도 키를 못 넣게 된다.
+    """
+    proto = (request.headers.get("x-forwarded-proto") or "").split(",")[0].strip()
+    if (proto or request.url.scheme) == "https":
+        return True
+    host = (request.client.host if request.client else "") or ""
+    return host in ("127.0.0.1", "::1", "localhost")
+
+
 @app.post("/api/storage")
-def storage_set(body: dict = Body(default={})):
+def storage_set(request: Request, body: dict = Body(default={})):
     """화면에서 저장소를 정한다. **첫 실행에만 열린다**(`s3.editable`).
 
     **연결이 되는 것을 확인한 뒤에만 저장한다.** 첫 실행에만 열리는 문이라,
@@ -270,14 +284,24 @@ def storage_set(body: dict = Body(default={})):
     if not ok:
         raise errors.STORAGE_LOCKED(why)
 
+    # **`store` 는 여기서 안 받는다.** 그 값은 파이썬 모듈 경로이고, 받는
+    # 순간 `import_module()` 에 그대로 들어간다 — 임포트만으로 코드가 도는
+    # 모듈이 세상에 얼마든지 있으므로, 인증 없는 라우트에서 그걸 받는 것은
+    # 남의 서버에서 코드를 고르게 해 주는 일이다. 구현을 갈아 끼우는 것은
+    # **서버를 띄우는 사람의 일**이라 환경 변수(FA_STORAGE_STORE)로만 한다.
+    endpoint = (body.get("endpoint") or "").strip() or None
+    ok_url, why_url = providers.validate_endpoint(endpoint)
+    if not ok_url:
+        raise errors.INVALID_INPUT(why_url, field="endpoint")
+
     cand = providers.StorageConfig(
         provider=(body.get("provider") or "").strip() or None,
         bucket=(body.get("bucket") or "").strip(),
         region=(body.get("region") or "").strip() or None,
-        endpoint=(body.get("endpoint") or "").strip() or None,
+        endpoint=endpoint,
         root_prefix=(body.get("root_prefix") or "").strip(),
         output_prefix=body.get("output_prefix"),
-        store=(body.get("store") or "").strip() or None,
+        store=os.environ.get("FA_STORAGE_STORE") or None,
     )
     if not cand.bucket:
         raise errors.INVALID_INPUT("버킷 이름이 필요합니다")
@@ -291,6 +315,11 @@ def storage_set(body: dict = Body(default={})):
     # 진짜로 갈아 끼워야 하고, 실패하면 있던 자리로 돌려놓는다.
     prev_cfg, prev_creds = s3mod.CONFIG, s3mod.credentials()
     ak, sk = body.get("access_key"), body.get("secret_key")
+    if (ak or sk) and not _secure_enough(request):
+        # 평문 HTTP 로 온 열쇠는 이미 경로 위의 누구나 봤다고 봐야 한다.
+        # 받아서 쓰면 "안전하게 다뤘다" 는 인상만 주고 실제로는 아니다.
+        raise errors.INSECURE_TRANSPORT(
+            "액세스 키는 https 로만 받습니다. 지금 연결은 평문입니다.")
     try:
         if ak and sk:
             s3mod.set_credentials(ak, sk, body.get("session_token"))
@@ -741,8 +770,12 @@ EXPORT_COLUMNS = (
     ("파일명", lambda r: r.get("name") or ""),
     ("폴더", lambda r: r.get("batch") or ""),
     ("요약", lambda r: r.get("text") or ""),
+    # **둘은 다른 것을 잰다.** 소요는 벽시계(내려받기·올리기 포함), 처리는
+    # 파이프라인만. 한 칸에 섞어 놓으면 나중에 둘을 비교하는 순간 틀린 결론이
+    # 나온다 — 실제로 경로마다 다른 뜻으로 찍히고 있었다.
     ("소요(초)", lambda r: r.get("seconds") if r.get("seconds") is not None
      else r.get("elapsed_s", "")),
+    ("처리(초)", lambda r: r.get("pipeline_s", "")),
     ("프레임", lambda r: r.get("frames", "")),
     ("검출 프레임", lambda r: r.get("detected_frames", "")),
     ("검출률(%)", lambda r: round(r["detection_rate"] * 100, 2)

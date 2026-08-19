@@ -39,8 +39,11 @@ Cloudflare R2 · MinIO · Wasabi. 전부 S3 API 를 그대로 쓴다. 코드가 
 한다(docs/issues 참고).
 """
 
+import ipaddress
 import json
 import os
+import socket
+from urllib.parse import urlparse
 
 # 제공자 정의. endpoint 가 None 이면 그 제공자의 기본 엔드포인트를 쓴다는 뜻이고
 # (AWS 는 리전으로 알아서 정해진다), 빈 문자열이면 사람이 넣어야 한다는 뜻이다.
@@ -92,6 +95,60 @@ PROVIDERS = {
 }
 
 DEFAULT = "s3"
+
+# 절대 저장소 엔드포인트일 리 없는 자리들. **여기로 향하는 요청은 SSRF 다.**
+# 클라우드 메타데이터 서비스는 인스턴스 역할 자격 증명을 그대로 내주는 자리라,
+# 서버가 대신 요청을 보내 주는 기능이 생기는 순간 첫 번째 표적이 된다.
+METADATA_HOSTS = {
+    "metadata.google.internal", "metadata.goog", "metadata",
+    "169.254.169.254", "100.100.100.200", "fd00:ec2::254",
+}
+
+
+def validate_endpoint(url):
+    """사람이 넣은 엔드포인트 주소를 검사한다. (괜찮나, 사유)
+
+    **이 값은 서버가 대신 요청을 보낼 주소다.** 화면에서 받는 순간 임의의
+    주소로 요청을 보내게 만들 수 있는 통로(SSRF)가 열린다. 우리 서버는 VPC
+    안에 있고 인스턴스 역할을 달고 있으므로, 바깥에서는 못 닿는 곳에 닿는다.
+
+    막는 것은 둘이다. **스킴**(http·https 만 — file·gopher 따위로 로컬
+    파일을 읽히지 않는다)과 **링크 로컬·메타데이터 주소**(169.254.169.254 가
+    대표다. 여기는 인스턴스 역할의 임시 키를 그대로 내준다).
+
+    사설 IP 는 막지 않는다. MinIO 를 사내망에 두고 쓰는 것이 정상적인 용법이고
+    (제공자 목록에 우리가 직접 적어 뒀다), 그걸 막으면 지원한다고 해 놓고 못
+    쓰게 하는 셈이다. 대신 그 판단을 띄우는 사람에게 남긴다.
+    """
+    if not url:
+        return True, ""                            # 비우면 제공자 기본값
+    try:
+        u = urlparse(url)
+    except ValueError:
+        return False, "주소 형식이 올바르지 않습니다"
+    if u.scheme not in ("http", "https"):
+        return False, "http 또는 https 주소만 쓸 수 있습니다"
+    if u.username or u.password:
+        # 주소에 열쇠를 적으면 로그·저널·화면 어디로든 새어 나간다.
+        return False, "주소에 아이디·비밀번호를 넣을 수 없습니다"
+    host = (u.hostname or "").strip().lower()
+    if not host:
+        return False, "주소에 호스트가 없습니다"
+    if host in METADATA_HOSTS:
+        return False, "이 주소로는 연결할 수 없습니다"
+    try:
+        infos = socket.getaddrinfo(host, None)
+    except OSError:
+        return False, f"주소를 찾을 수 없습니다 ({host})"
+    for info in infos:
+        try:
+            ip = ipaddress.ip_address(info[4][0])
+        except ValueError:
+            continue
+        # 링크 로컬만 막는다. 클라우드 메타데이터가 전부 여기 있다.
+        if ip.is_link_local:
+            return False, "이 주소로는 연결할 수 없습니다"
+    return True, ""
 
 
 def get(name=None):

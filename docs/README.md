@@ -48,6 +48,17 @@
 | [007](issues/007-cancel-all-and-queue-screen.md) | 잘못 넣은 배치를 한 번에 멈출 수 없다 | **해결됨** |
 | [008](issues/008-silent-zero-detection.md) | 얼굴을 하나도 못 찾아도 "비식별화 완료" 로 나간다 | **해결됨** |
 | [009](issues/009-queue-path-ran-untuned.md) | 큐 워커가 튜닝 안 된 기본값(batch 1)으로 돌고 있었다 | **해결됨** |
+| [010](issues/010-review-was-only-a-sticker.md) | 검수가 스티커였다 — 판정 뒤에 아무 일도 안 일어났다 | **해결됨** |
+| [011](issues/011-storage-had-to-be-pluggable.md) | 저장소를 고를 수 있어야 하는데 고를 수 있는 건 주소뿐이었다 | **해결됨** |
+| [012](issues/012-the-model-was-tied-to-our-bucket.md) | 저장소는 고르게 해 놓고 모델은 우리 버킷에 묶여 있었다 | **해결됨** |
+| [013](issues/013-three-places-said-three-things.md) | 화면 세 곳이 모델에 대해 다른 말을 했고, 그 뒤에 죽은 서버가 있었다 | **해결됨** |
+| [014](issues/014-two-paths-drifted-apart.md) | 같은 일을 두 곳에서 하다가 여섯 군데가 갈라졌다 | **해결됨** |
+
+## 보안
+
+[`security.md`](security.md) 는 문제 기록이 아니라 **재고 목록**이다. 지금
+무엇을 막았고 무엇이 열려 있는지, 그래서 이걸 어디에 띄워도 되는지를 적는다.
+한 줄로 줄이면 — **아직 인증이 없다.**
 
 ## 이미 고친 것들
 

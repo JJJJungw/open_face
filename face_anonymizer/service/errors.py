@@ -174,6 +174,10 @@ STORAGE_LOCKED = _p(
     "storage_locked", 409, "저장소 설정이 잠겨 있습니다",
     "이 서버는 화면에서 저장소를 바꿀 수 없게 띄워져 있습니다"
     "(FA_ALLOW_STORAGE_EDIT=0). .env 를 고치고 다시 띄우면 됩니다.")
+INSECURE_TRANSPORT = _p(
+    "insecure_transport", 400, "평문 연결로는 비밀 값을 받지 않습니다",
+    "https 로 접속하시거나, 같은 기계에서(또는 SSH 터널로) 접속해 주세요. "
+    "키를 넣지 않고 인스턴스 역할·aws configure 를 쓰시는 방법도 있습니다.")
 STORAGE_BUSY = _p(
     "storage_busy", 409, "처리 중인 작업이 있어 연결을 끊을 수 없습니다",
     "진행 중이거나 대기 중인 작업이 끝난 뒤에 다시 시도해 주세요. "
@@ -257,8 +261,14 @@ def classify(exc):
         return VIDEO_UNREADABLE
     if isinstance(exc, ValueError):
         return INVALID_INPUT
-    name = type(exc).__name__
-    if "OutOfMemory" in name or "CUDA out of memory" in str(exc):
+    # **판정을 여기서 다시 쓰지 않는다.** 예전에는 대소문자를 가리는 자체
+    # 비교라, `CUDA error: out of memory` 같은 메시지를 MSA 경로는 OOM 으로
+    # 잡고 여기서는 '알 수 없는 오류' 로 흘렸다. 같은 예외가 경로에 따라 다른
+    # 코드로 남으면 나중에 로그로 원인을 세는 일이 성립하지 않는다.
+    from ..job_runner import JobError, is_oom      # noqa: PLC0415 (순환 방지)
+    if isinstance(exc, JobError) and exc.stage == "oom":
+        return GPU_OUT_OF_MEMORY
+    if is_oom(exc):
         return GPU_OUT_OF_MEMORY
     return INTERNAL
 

@@ -36,12 +36,11 @@ import os
 import threading
 import time
 
-from . import timefmt
+from . import env, timefmt
 
 DIR = os.environ.get("FA_EVENTS_DIR") or os.path.join(
     os.environ.get("FA_JOBS_DIR", "jobs"), "_events")
-ENABLED = (os.environ.get("FA_EVENTS", "1").strip().lower()
-           not in ("0", "false", "no", "off"))
+ENABLED = env.flag("FA_EVENTS", True)
 
 # 한 번에 읽어 줄 수 있는 최대. 파일이 아무리 커도 응답이 터지지 않게 한다.
 READ_MAX = int(os.environ.get("FA_EVENTS_READ_MAX", 2000))
@@ -173,7 +172,7 @@ def tail_lines(path):
 # 예전에는 저널 줄을 통째로 내려보냈다. 단계별 소요(timing)나 경고 원문처럼
 # 펼쳐야 보이는 것까지 60줄에 다 붙어 오는 셈이라, 목록 한 번에 몇 배가 실렸다.
 LIST_FIELDS = ("at", "ts", "mode", "event", "job", "name", "batch",
-               "seconds", "elapsed_s", "frames", "detection_rate",
+               "seconds", "pipeline_s", "elapsed_s", "frames", "detection_rate",
                "review_needed", "transcoded", "source_codec", "stage",
                "transient", "detail", "attempts", "percent", "eta_s",
                "action", "note", "codes", "done", "failed", "avg_elapsed_s",

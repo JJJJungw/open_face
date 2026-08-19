@@ -22,6 +22,26 @@ import os
 
 ENV_NAME = ".env"
 
+# 켜짐/꺼짐으로 읽는 값들. **한 곳에만 둔다.**
+#
+# 예전에는 이 판정이 다섯 군데에 따로 있었고 목록이 서로 달랐다. 그래서
+# `FA_PRELOAD=off` 는 켜진 채로 돌고 `FA_MSA_PRELOAD=off` 는 꺼졌다 —
+# 같은 뜻으로 쓴 두 값이 반대로 동작한 것이다. 이런 어긋남은 "왜 설정이 안
+# 먹지" 로만 드러나서 원인을 찾기가 아주 어렵다.
+FALSE_WORDS = ("0", "false", "no", "off", "")
+
+
+def flag(name, default=True):
+    """환경 변수를 켜짐/꺼짐으로. 값이 없으면 ``default``.
+
+    빈 문자열은 **꺼짐**으로 본다. `FA_HWACCEL=` 처럼 지워 두는 것이 끄려는
+    뜻이기 때문이다.
+    """
+    v = os.environ.get(name)
+    if v is None:
+        return default
+    return v.strip().lower() not in FALSE_WORDS
+
 
 def parse(text):
     """`.env` 본문 -> dict. 파싱할 수 없는 줄은 조용히 건너뛴다."""

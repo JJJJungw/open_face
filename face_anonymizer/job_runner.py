@@ -292,7 +292,13 @@ def is_oom(exc):
 
 
 def run_target(anonymizer, src, out, target, *, progress=None, note=None):
-    """타깃 하나를 처리한다. **메모리가 부족하면 배치를 줄여 다시 해 본다.**
+    """타깃 하나를 처리한다. 잡 페이로드의 타깃을 파라미터로 옮긴 뒤 아래를 부른다."""
+    return process_with_oom_retry(anonymizer, src, out, target_params(target),
+                                  progress=progress, note=note)
+
+
+def process_with_oom_retry(anonymizer, src, out, p, *, progress=None, note=None):
+    """처리 한 번. **메모리가 부족하면 배치를 줄여 다시 해 본다.**
 
     운영 인스턴스는 개발기보다 작다. 개발기가 45GB 짜리라 batch 32 가 여유롭다고
     그 값을 기본으로 박아 두면, 인스턴스를 줄이는 순간 CUDA OOM 이 난다. 그리고
@@ -302,8 +308,12 @@ def run_target(anonymizer, src, out, target, *, progress=None, note=None):
     전에 배치를 절반씩 줄여 가며 다시 해 본다. 1까지 내려가도 안 되면 그때는
     일시 실패다 — 더 작은 배치로 다시 시도할 여지가 남아 있지 않고, 다른(더 큰)
     워커에서는 될 수 있기 때문이다.
+
+    **파라미터를 받는 형태로 떼어 냈다.** 예전에는 이 회복이 MSA 경로 안에만
+    있어서, 같은 OOM 이 저쪽에서는 배치를 낮춰 되살아나고 우리 서버에서는 그냥
+    실패했다. 두 경로가 같은 GPU 사정을 겪는데 대응이 달랐던 것이다.
     """
-    p = target_params(target)
+    p = dict(p)
     batch = int(p.get("batch_size") or 1)
     first = None
     while True:

@@ -347,7 +347,14 @@ def run(job_id):
                 raise JobCancelled()
         # 프로세스가 여러 개여도 GPU 는 한 번에 하나만 쓴다.
         with gpu_lock(os.path.join(config.JOBS_DIR, config.GPU_LOCK_FILE)):
-            res = get_anonymizer().process(src, dst, progress=progress, **params)
+            # **메모리가 부족하면 배치를 낮춰 다시 해 본다.** 예전에는 이
+            # 회복이 MSA 경로에만 있어서, 같은 OOM 이 저쪽에서는 살아나고
+            # 우리 서버에서는 그냥 실패했다. 두 경로가 같은 GPU 를 쓴다.
+            def lowered(b):
+                log.warning("GPU 메모리 부족 — 배치를 %d 로 낮춘다  %s", b, j.name)
+            res = job_runner.process_with_oom_retry(
+                get_anonymizer(), src, dst, params,
+                progress=progress, note=lowered)
         if j.s3_key:
             store = s3mod.get_store()
             key = store.output_key(j.s3_key)
@@ -402,17 +409,31 @@ def run(job_id):
         # **결과가 채워진 뒤에** 찍는다. 락 안에서 찍으면 프레임 수도 검출률도
         # 아직 비어 있어서, 정작 근거로 쓸 값이 하나도 안 남는다.
         r = j.result
+        # **저널의 `seconds` 는 벽시계다.** 예전에는 여기만 파이프라인 시간을
+        # 넣어서, 같은 칸에 API 경로는 처리 시간을, MSA 경로는 내려받기·올리기까지
+        # 포함한 전체 시간을 찍고 있었다. 같은 이름으로 다른 것을 재면 나중에
+        # 둘을 나란히 놓고 비교하는 순간 틀린 결론이 나온다. 파이프라인 시간은
+        # `pipeline_s` 로 따로 남긴다.
+        wall = round((j.finished or time.time()) - j.started, 3) if j.started else None
         events.emit("job.finished", job=j.id, name=j.name,
-                    batch=j.batch or None, seconds=r.get("seconds"),
+                    batch=j.batch or None, seconds=wall,
+                    pipeline_s=r.get("seconds"),
                     frames=r.get("frames"),
                     detected_frames=r.get("detected_frames"),
                     detection_rate=r.get("detection_rate"),
                     realtime_factor=r.get("realtime_factor"),
                     warnings=list(r.get("warnings") or ()),
+                    # **검수 여부를 여기 안 넣으면 CSV 의 '검수 필요' 칸이
+                    # 영영 빈다.** 검수로 넘어간 것도 완료 줄은 똑같이 생겨서,
+                    # 나중에 기록만 보고는 구분할 방법이 없어진다.
+                    review_needed=bool(j.review),
+                    review=[i["code"] for i in j.review] or None,
                     source_codec=r.get("source_codec"),
                     transcoded=r.get("transcoded"),
                     timing=r.get("timing"), attempts=j.attempts,
-                    started_at=timefmt.iso(j.started))
+                    started_at=timefmt.iso(j.started),
+                    finished_at=timefmt.iso(j.finished),
+                    span=timefmt.span(j.started, j.finished))
         if j.review:
             events.emit("job.review", job=j.id, name=j.name, batch=j.batch or None,
                         codes=[i["code"] for i in j.review],

@@ -187,6 +187,9 @@ def job_finished(job, result, started, finished):
     events.emit("job.finished", job=job.get("video_id"), name=name,
                 batch=batch, label=t.get("label") or label_of(job),
                 seconds=result.get("elapsed_s"),
+                # API 경로와 같은 뜻으로 맞춘다 — `seconds` 는 벽시계,
+                # `pipeline_s` 는 처리만.
+                pipeline_s=(t.get("timing") or {}).get("total"),
                 started_at=timefmt.iso(started),
                 finished_at=timefmt.iso(finished),
                 span=timefmt.span(started, finished),

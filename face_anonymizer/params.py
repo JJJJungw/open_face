@@ -20,6 +20,8 @@
 
 import os
 
+from .env import flag as _bool
+
 from .core.pipeline import (
     DEFAULT_BITRATE_RATIO,
     DEFAULT_CRF,
@@ -29,11 +31,7 @@ from .core.pipeline import (
 )
 
 
-def _bool(name, default):
-    v = os.environ.get(name)
-    if v is None:
-        return default
-    return v.strip().lower() not in ("0", "false", "no", "off", "")
+
 
 
 # 검출기 해상도. 잡이 말하지 않으면 이 값으로 검출한다.

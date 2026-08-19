@@ -86,3 +86,47 @@ def test_folder_progress_excludes_results_from_the_input_count():
             "v1/input/kbs/K_00001_00_0000000_0034342_deid.mp4": (b"x", NOW)}
     rows = metrics.folder_progress(make_store(objs), "v1/input/")
     assert rows[0]["total"] == 1
+
+
+# ── 저널이 두 경로에서 같은 뜻이어야 한다 ──────────────────────────────────
+#
+# API 경로와 MSA 경로는 구조가 다르지만 **기록의 뜻은 같아야 한다.** 같은 칸에
+# 다른 것을 재 놓으면 나중에 둘을 나란히 놓고 비교하는 순간 틀린 결론이 나온다.
+
+def test_finished_row_carries_the_same_meaning_on_both_paths():
+    """`seconds` 는 벽시계, `pipeline_s` 는 처리만 — 양쪽 다."""
+    import inspect
+    from face_anonymizer.service import worker
+    from face_anonymizer.msa import journal
+
+    api = inspect.getsource(worker.run)
+    msa = inspect.getsource(journal.job_finished)
+    for src, who in ((api, "api"), (msa, "msa")):
+        assert "pipeline_s=" in src, who
+        assert "review_needed=" in src, who
+
+
+def test_review_needed_reaches_the_csv_column():
+    """검수로 넘어간 것을 완료 줄만 보고 구분할 수 있어야 한다."""
+    from face_anonymizer import events
+    from face_anonymizer.service import server
+    assert "review_needed" in events.LIST_FIELDS
+    col = dict((n, g) for n, g in server.EXPORT_COLUMNS)
+    assert col["검수 필요"]({"review_needed": True}) == "예"
+    assert col["검수 필요"]({}) == ""
+    assert col["처리(초)"]({"pipeline_s": 12.5}) == 12.5
+
+
+def test_one_flag_parser_for_every_switch():
+    """다섯 벌이던 시절 `FA_PRELOAD=off` 만 안 먹었다 — 목록이 달랐기 때문이다."""
+    import os
+    from face_anonymizer import env
+
+    for word in ("0", "false", "FALSE", "no", "off", "OFF", " off ", ""):
+        os.environ["FA_TEST_FLAG"] = word
+        assert env.flag("FA_TEST_FLAG", True) is False, word
+    for word in ("1", "true", "yes", "on", "아무거나"):
+        os.environ["FA_TEST_FLAG"] = word
+        assert env.flag("FA_TEST_FLAG", False) is True, word
+    del os.environ["FA_TEST_FLAG"]
+    assert env.flag("FA_TEST_FLAG", True) is True

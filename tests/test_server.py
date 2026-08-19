@@ -517,7 +517,13 @@ def test_queue_max_still_works_when_set(client, make_video, monkeypatch):
 
 
 def test_transient_failure_is_retried(client, make_video, monkeypatch):
-    """일시적 오류는 다시 큐에 넣는다."""
+    """일시적 오류는 다시 큐에 넣는다.
+
+    **OOM 을 예로 쓰지 않는다.** 메모리 부족은 이제 배치를 낮춰 그 자리에서
+    회복하므로 작업 시도를 소모하지 않는다(아래 test_oom_...). 여기서 보려는
+    것은 그 아래 층, 즉 작업 단위 재시도가 도는가다.
+    """
+    from face_anonymizer.storage import s3 as s3mod
     monkeypatch.setattr(config, "MAX_ATTEMPTS", 3)
     monkeypatch.setattr(config, "RETRY_DELAYS", (0.01,))   # 테스트는 기다리지 않는다
     path, n, size = make_video(frames=6)
@@ -527,7 +533,7 @@ def test_transient_failure_is_retried(client, make_video, monkeypatch):
         def detect_batch(self, frames, imgsz=None, conf=None, iou=None):
             calls["n"] += 1
             if calls["n"] <= 2:
-                raise RuntimeError("CUDA out of memory")
+                raise s3mod.S3Error("일시적인 상류 오류")
             return [[] for _ in frames]
 
     anon = VideoAnonymizer(detector=Flaky())
@@ -1884,3 +1890,56 @@ def test_status_separates_loaded_from_loading(monkeypatch):
 
     monkeypatch.setattr(w, "loading", True)
     assert w.model_status()["loading"] is True
+
+
+def test_oom_lowers_the_batch_instead_of_burning_an_attempt(client, make_video,
+                                                            monkeypatch):
+    """메모리 부족은 **이 영상의 문제가 아니라 환경의 문제**다.
+
+    예전에는 이 회복이 MSA 경로에만 있어서, 같은 OOM 이 저쪽에서는 배치를
+    낮춰 살아나고 우리 서버에서는 그냥 실패했다. 두 경로가 같은 GPU 를 쓴다.
+    """
+    monkeypatch.setattr(config, "MAX_ATTEMPTS", 3)
+    monkeypatch.setattr(config, "RETRY_DELAYS", (0.01,))
+    path, n, size = make_video(frames=12)      # 배치보다 길어야 나눠 든다
+    seen = []
+
+    class Tight:
+        def detect_batch(self, frames, imgsz=None, conf=None, iou=None):
+            seen.append(len(frames))
+            if len(seen) == 1:
+                raise RuntimeError("CUDA error: out of memory")   # 대문자 아님
+            return [[] for _ in frames]
+
+    anon = VideoAnonymizer(detector=Tight())
+    monkeypatch.setattr(worker, "get_anonymizer", lambda: anon)
+    monkeypatch.setattr(worker, "_anonymizer", anon)
+
+    jid = job_id(submit(client, path, batch_size=8))
+    s = wait(client, jid, timeout=60)
+
+    # 얼굴은 못 찾으니 검수 대기로 가지만, 여기서 보는 것은 시도를 안 썼다는 것.
+    assert s["status"] == "review", s.get("error")
+    assert s["attempts"] == 1
+    assert seen[0] == 8 and seen[1] == 4          # 절반으로 낮춰 다시 했다
+
+
+def test_the_same_oom_message_gets_the_same_code_on_both_paths():
+    """판정을 두 곳에서 따로 쓰면 언젠가 갈라진다.
+
+    실제로 갈라져 있었다 — MSA 는 소문자 비교, API 는 대소문자를 가리는 비교라
+    `CUDA error: out of memory` 가 한쪽에서만 OOM 이었다. 같은 예외가 경로에
+    따라 다른 코드로 남으면 로그로 원인을 세는 일이 성립하지 않는다.
+    """
+    from face_anonymizer.service import errors
+    from face_anonymizer import job_runner
+
+    for msg in ("CUDA out of memory", "CUDA error: out of memory",
+                "cuda oom", "CUBLAS_STATUS_ALLOC_FAILED out of memory"):
+        exc = RuntimeError(msg)
+        assert job_runner.is_oom(exc), msg
+        assert errors.classify(exc).code == "gpu_out_of_memory", msg
+
+    # 배치를 1까지 낮춰도 안 될 때 던지는 것도 같은 코드여야 한다.
+    e = job_runner.JobError("배치 1 까지 낮췄습니다", transient=True, stage="oom")
+    assert errors.classify(e).code == "gpu_out_of_memory"

@@ -11,6 +11,8 @@
 
 import os
 
+from ..env import flag
+
 # 브로커 = 저쪽 Redis. 컨테이너가 필요로 하는 설정은 사실상 이것 하나다.
 # REDIS_URL 도 보는 이유: 저쪽 compose·k8s 가 그 이름을 쓴다(x-app-env).
 BROKER_URL = (os.environ.get("FA_BROKER_URL")
@@ -48,5 +50,4 @@ CONCURRENCY = int(os.environ.get("FA_MSA_CONCURRENCY", 1))
 VISIBILITY_TIMEOUT = int(os.environ.get("FA_MSA_VISIBILITY_TIMEOUT", 3600))
 
 # 기동할 때 모델을 미리 올릴까. 첫 잡이 로딩 수십 초를 뒤집어쓰지 않게 한다.
-PRELOAD = (os.environ.get("FA_MSA_PRELOAD", "1").strip().lower()
-           not in ("0", "false", "no", "off"))
+PRELOAD = flag("FA_MSA_PRELOAD", True)

@@ -38,6 +38,7 @@ S3 설정은 storage/s3.py 를 참고 (FA_S3_BUCKET 등).
 import os
 
 from .. import params
+from ..env import flag as _bool_env
 from ..core.pipeline import (
     DEFAULT_BITRATE_RATIO,
     DEFAULT_CRF,
@@ -54,7 +55,10 @@ JOBS_DIR = os.path.abspath(os.environ.get("FA_JOBS_DIR", "jobs"))
 MAX_BYTES = int(os.environ.get("FA_MAX_UPLOAD_MB", 2048)) * 1024 * 1024
 JOB_TTL = int(os.environ.get("FA_JOB_TTL_MIN", 120)) * 60
 SWEEP_SEC = int(os.environ.get("FA_SWEEP_SEC", 300))
-PRELOAD = os.environ.get("FA_PRELOAD", "1") not in ("0", "false", "False")
+# 예전에는 여기만 strip·lower 를 안 해서 `FA_PRELOAD=off` 나 `FA_PRELOAD=FALSE`
+# 가 안 먹었다. 하필 이 값이 "모델을 미리 올리나" 라서, 안 먹으면 증상이
+# 엉뚱하게 나타난다(docs/issues/013).
+PRELOAD = _bool_env("FA_PRELOAD", True)
 RETRY_AFTER = int(os.environ.get("FA_RETRY_AFTER", 30))
 # 대기열은 기본적으로 개수로 제한하지 않는다. 전체 수행처럼 한꺼번에 수백 건을
 # 넣는 사용이 정상이고, 개수는 애초에 잘못된 기준이다 — 10건이 50MB 짜리면
@@ -91,9 +95,6 @@ PAGE_SIZE = int(os.environ.get("FA_PAGE_SIZE", 5))
 # 처음 1회 + 재시도 3회. RETRY_DELAYS 와 짝이다.
 MAX_ATTEMPTS = int(os.environ.get("FA_MAX_ATTEMPTS", 4))
 
-def _bool_env(name, default):
-    v = os.environ.get(name)
-    return default if v is None else v.strip().lower() not in ("0", "false", "no")
 
 
 # 처리 파라미터 기본값.

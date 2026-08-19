@@ -59,7 +59,10 @@ def fresh(tmp_path, monkeypatch):
     monkeypatch.setattr(s3mod, "_creds", None)
     client = FakeClient()
     monkeypatch.setattr(s3mod, "make_client", lambda config=None: client)
-    c = TestClient(server.app)
+    # **https 로 붙은 셈 친다.** 열쇠를 받는 라우트는 평문 연결을 거절하므로
+    # (아래 test_keys_are_refused_over_plaintext), 평범한 흐름을 보려면
+    # 안전한 연결이어야 한다.
+    c = TestClient(server.app, base_url="https://testserver")
     c.fake = client
     c.jobs_dir = tmp_path
     return c
@@ -235,3 +238,72 @@ def test_the_screen_does_not_open_before_it_is_configured(fresh):
     assert 'id="setup"' in html
     assert '<div class="app" hidden>' in html      # 통과해야 열린다
     assert "어디에 붙을지" in html
+
+
+# ── 보안 ────────────────────────────────────────────────────────────────────
+
+def test_keys_are_refused_over_plaintext(fresh):
+    """평문으로 온 열쇠는 이미 경로 위의 누구나 봤다고 봐야 한다.
+
+    그걸 받아서 '메모리에만 둡니다' 라고 하면, 안전하게 다뤘다는 인상만 주고
+    실제로는 아니다. 받지 않는 편이 정직하다.
+    """
+    plain = TestClient(server.app, base_url="http://not-localhost")
+    r = plain.post("/api/storage", json={"provider": "s3", "bucket": GOOD,
+                                         "access_key": "AKIAEXAMPLE",
+                                         "secret_key": "s3cr3t"})
+    assert r.status_code == 400 and r.json()["code"] == "insecure_transport"
+    assert s3mod.credentials() is None
+
+    # 열쇠 없이 붙는 것은 평문에서도 된다 — 비밀이 오가지 않기 때문이다.
+    assert plain.post("/api/storage",
+                      json={"provider": "s3", "bucket": GOOD}).status_code == 200
+
+
+def test_a_proxy_that_terminates_tls_counts_as_secure(fresh):
+    """리버스 프록시 뒤가 정상적인 배포다. 그걸 무시하면 제대로 감싼 서버에서도
+    키를 못 넣게 된다."""
+    plain = TestClient(server.app, base_url="http://behind-proxy")
+    r = plain.post("/api/storage",
+                   headers={"X-Forwarded-Proto": "https"},
+                   json={"provider": "s3", "bucket": GOOD,
+                         "access_key": "AKIAEXAMPLE", "secret_key": "s3cr3t"})
+    assert r.status_code == 200, r.text
+
+
+def test_the_module_path_is_not_something_a_request_can_choose(fresh):
+    """**`store` 는 파이썬 모듈 경로다.**
+
+    받는 순간 `import_module()` 에 그대로 들어가고, 임포트만으로 코드가 도는
+    모듈은 세상에 얼마든지 있다. 인증 없는 라우트에서 그걸 받는 것은 남의
+    서버에서 무엇을 실행할지 고르게 해 주는 일이다. 구현을 갈아 끼우는 것은
+    서버를 띄우는 사람의 일이라 환경 변수로만 한다.
+    """
+    r = fresh.post("/api/storage", json={"provider": "s3", "bucket": GOOD,
+                                         "store": "webbrowser:Anything"})
+    assert r.status_code == 200, r.text          # 그냥 무시하고 정상 연결된다
+    saved = json.loads((fresh.jobs_dir / providers.SAVED_NAME).read_text())
+    assert saved["store"] is None
+    assert s3mod.CONFIG.store is None
+
+
+def test_endpoints_that_are_never_storage_are_refused(fresh):
+    """서버가 대신 요청을 보내 줄 주소다 — 임의의 주소를 받으면 SSRF 다.
+
+    메타데이터 주소(169.254.169.254)는 인스턴스 역할의 임시 키를 그대로 내주는
+    자리라, 이런 기능이 생기는 순간 첫 번째 표적이 된다.
+    """
+    for bad in ("http://169.254.169.254/", "http://metadata.google.internal",
+                "file:///etc/passwd", "https://user:pw@example.com"):
+        r = fresh.post("/api/storage", json={"provider": "s3compat",
+                                             "bucket": GOOD, "endpoint": bad})
+        assert r.status_code == 400, (bad, r.status_code)
+        assert r.json()["code"] == "invalid_input"
+    assert not (fresh.jobs_dir / providers.SAVED_NAME).exists()
+
+
+def test_a_private_endpoint_is_still_allowed(fresh):
+    """MinIO 를 사내망에 두는 것은 정상적인 용법이다 — 우리가 목록에 적어 뒀다.
+    막으면 지원한다고 해 놓고 못 쓰게 하는 셈이다."""
+    ok, why = providers.validate_endpoint("http://127.0.0.1:9000")
+    assert ok, why
