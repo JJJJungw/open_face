@@ -5,9 +5,23 @@
 아니라 **배선**을 검증한다. 정확도는 가중치가 필요한 별개 관심사다.
 
 ```bash
-pip install -r requirements/dev.txt
-pytest                      # 195개, 약 40초
+pip install -r requirements/base.txt -r requirements/serve.txt \
+            -r requirements/worker.txt -r requirements/dev.txt
+pytest                      # 402개, 약 1분
 ```
+
+**`dev.txt` 만 깔면 402개 중 247개가 조용히 빠진다.** 서버·S3·저장소 설정
+201개는 fastapi 와 httpx 를, 큐 워커 46개는 celery 를 `importorskip` 으로
+확인한다. 없으면 실패가 아니라 skip 이라 초록색으로 끝나는데, 정작 그 기계에서
+띄울 서버는 한 줄도 검증되지 않은 상태다. 무엇이 왜 빠졌는지 보려면 `-rs` 를
+붙인다.
+
+```bash
+pytest -rs                  # 건너뛴 것과 그 사유를 끝에 모아 준다
+```
+
+`pytest -q` 는 쓰지 말 것. `addopts` 에 이미 `-q` 가 있어서 `-qq` 가 되고,
+그러면 "402 passed" 요약 줄까지 사라져 점만 찍히고 끝난다.
 
 ## 여기서 잡은 것들
 
@@ -37,6 +51,13 @@ pytest                      # 195개, 약 40초
 | `test_server.py` | 큐 · 재시도 · 취소 · 오류 응답 |
 | `test_ingest.py` | AV1 등 OpenCV 가 못 읽는 입력의 정규화 |
 | `test_metrics.py` | 큐 지표와 폴더별 진척률 |
+| `test_storage_setup.py` | 첫 실행 관문 · 저장소 연결/해제 · 입력 검증 |
+| `test_storage_contract.py` | 제공자를 갈아 끼워도 계약이 지켜지는가 |
+| `test_weights.py` | 가중치 조달 세 갈래(있음 → 버킷 → 공개 릴리스) |
+| `test_job_runner.py` | 잡 페이로드 한 장으로 도는 러너 · OOM 재시도 |
+| `test_msa_worker.py` | 큐에서 꺼내 오는 껍데기 · 펜싱 토큰 |
+| `test_msa_journal.py` | 큐 경로의 이벤트 기록 |
+| `test_env.py` | `.env` 해석 · **설정이 문서와 갈라지지 않는가** |
 
 ## 방식
 
