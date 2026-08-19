@@ -309,38 +309,95 @@ def test_rate_args_still_caps_an_unknown_encoder():
     assert other[other.index("-maxrate") + 1] == str(3_500_000)
 
 
-@ffmpeg_only
-def test_delivered_file_lands_inside_the_band(tmp_path, make_video):
-    """**실제로 인코딩한 파일을 잰다.** 이게 없어서 대역이 새는 걸 몰랐다.
+def _clip(tmp_path, name, seconds=10, kind="noise", crf=16):
+    """짧으면 컨테이너 오버헤드가 비율로 커져 위끝을 스친다(4초에서 3513 kbps).
+    납품 클립은 분 단위라 그 영역이 정상이다 — 10초면 그 효과가 가라앉는다."""
+    src = tmp_path / name
+    lavfi = (f"nullsrc=s=640x480:r=30:d={seconds},geq=random(1)*255:128:128"
+             if kind == "noise" else
+             f"color=c=navy:s=640x480:r=30:d={seconds}")
+    _sp.run(["ffmpeg", "-y", "-v", "error", "-f", "lavfi", "-i", lavfi,
+             "-c:v", "libx264", "-crf", str(crf), "-pix_fmt", "yuv420p",
+             str(src)], check=True)
+    return src
 
-    정지에 가까운 합성 클립은 인코더가 제일 아끼고 싶어 하는 입력이라, 아래끝이
-    무너지면 여기서 먼저 드러난다.
-    """
-    src, n, size = make_video(frames=90)           # 3초 — CBR 수렴에 충분
+
+@ffmpeg_only
+def test_a_high_bitrate_source_is_brought_down_into_the_band(tmp_path):
+    """원본이 대역 위면 위끝에서 자른다 — 이게 정상적인 다운코딩이다."""
+    src = _clip(tmp_path, "big.mp4", kind="noise")
+    assert P.video_bitrate(str(src)) > 3_500_000, "실험 전제가 깨졌다"
+
     out = tmp_path / "out.mp4"
-    res = run(src, out, size)
+    res = run(src, out, (640, 480))
 
     got = P.file_bitrate(str(out))
-    assert got is not None, "결과물 비트레이트를 재지 못했다"
-    assert 3_000_000 <= got <= 3_500_000, f"납품 대역 밖이다: {got // 1000} kbps"
+    assert got <= 3_500_000, f"대역 위끝을 넘었다: {got // 1000} kbps"
+    assert got >= 3_000_000, f"대역 아래로 떨어졌다: {got // 1000} kbps"
     assert not [w for w in res.warnings if str(w).startswith("bitrate")]
 
 
 @ffmpeg_only
-def test_out_of_band_output_asks_for_a_human(tmp_path, make_video):
-    """대역을 벗어나면 조용히 나가지 않고 검수로 넘어가야 한다."""
+def test_a_low_bitrate_source_is_never_inflated(tmp_path):
+    """**올려 담지 않는다.**
+
+    원본이 312 kbps 인데 3200 으로 뽑으면 압축 열화를 고화질로 보존할 뿐이다.
+    실측(720p 방송 클립): 원본 그대로가 PSNR 47.4 dB — 재인코딩으로는 사실상
+    무손실인데, 대역까지 올리면 10배를 쓰고 SSIM 0.9937 → 0.9984 를 산다.
+    둘 다 사람 눈 구분 한계 위다. 900건이면 6 GB 와 60 GB 의 차이가 된다.
+    """
+    src = _clip(tmp_path, "small.mp4", kind="flat", crf=30)
+    source = P.video_bitrate(str(src))
+    assert source < 3_000_000, "실험 전제가 깨졌다"
+
+    out = tmp_path / "out.mp4"
+    res = run(src, out, (640, 480))
+    got = P.file_bitrate(str(out))
+
+    assert got < 3_000_000, f"대역 아래 원본을 올려 담았다: {got // 1000} kbps"
+    # 원본 근처여야 한다. 모자이크가 들어가 정확히 같지는 않다.
+    assert got < source * 3, f"원본 {source // 1000}k 대비 과하다: {got // 1000}k"
+    # 사람을 부르지는 않되, 그런 파일이었다는 기록은 남는다.
+    codes = [str(w).split(":")[0] for w in res.warnings]
+    assert "source-below-band" in codes, res.warnings
+    assert "bitrate-out-of-band" not in codes
+
+
+@ffmpeg_only
+def test_a_low_source_does_not_call_a_human(tmp_path):
+    """저품질 원본은 의도한 결과다 — 검수로 올리면 900건 중 수백 건이 걸린다."""
     from face_anonymizer import job_runner
 
-    src, n, size = make_video(frames=90)
-    out = tmp_path / "out.mp4"
-    # 결과물은 3200k 로 나오는데 대역을 말도 안 되게 좁혀 위반을 만든다.
-    res = run(src, out, size, min_bitrate="9000k", max_bitrate="9500k")
+    src = _clip(tmp_path, "small.mp4", kind="flat", crf=30)
+    res = run(src, tmp_path / "out.mp4", (640, 480))
 
-    bad = [w for w in res.warnings if str(w).startswith("bitrate-out-of-band")]
-    assert bad, f"대역을 벗어났는데 경고가 없다: {res.warnings}"
-    # 경고로 끝나면 안 된다 — 사람이 봐야 한다.
     codes = [r["code"] for r in job_runner.review_of(res.warnings)]
-    assert "bitrate-out-of-band" in codes
+    assert "source-below-band" not in codes
+    # 대신 알림 쪽에는 있어야 한다 — 조용히 사라지면 안 된다.
+    assert "source-below-band" in job_runner.NOTICE
+
+
+def test_delivery_target_never_goes_above_the_source(monkeypatch):
+    """`목표 = min(원본, 납품 목표)`."""
+    monkeypatch.setattr(P, "video_bitrate", lambda p, t=None: 312_000)
+    monkeypatch.setattr(P, "video_codec", lambda p, t=None: "h264")
+    assert P.delivery_target("x.mp4", "3200k") == 312_000      # 낮으면 그대로
+
+    monkeypatch.setattr(P, "video_bitrate", lambda p, t=None: 9_000_000)
+    assert P.delivery_target("x.mp4", "3200k") == 3_200_000    # 높으면 목표에서
+
+
+def test_delivery_target_respects_codec_efficiency(monkeypatch):
+    """AV1 632 kbps 를 H.264 632 kbps 로 받는 것은 '그대로' 가 아니다."""
+    monkeypatch.setattr(P, "video_bitrate", lambda p, t=None: 632_000)
+    monkeypatch.setattr(P, "video_codec", lambda p, t=None: "av1")
+    assert P.delivery_target("x.mp4", "3200k") == 1_264_000    # 632k x 2.0
+
+
+def test_delivery_target_falls_back_to_the_ceiling(monkeypatch):
+    """원본을 못 재면 규격을 맞추는 쪽으로 간다 — 모르면서 미달을 내지 않는다."""
+    monkeypatch.setattr(P, "video_bitrate", lambda p, t=None: None)
+    assert P.delivery_target("x.mp4", "3200k") == 3_200_000
 
 
 @ffmpeg_only

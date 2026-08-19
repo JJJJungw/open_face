@@ -533,6 +533,37 @@ def rate_args(encoder, target, max_bitrate=None):
     return ["-b:v", str(t), "-maxrate", str(top), "-bufsize", str(top * 2)]
 
 
+def delivery_target(source, target, ratio=1.0, timeout=FFMPEG_TIMEOUT):
+    """이 원본을 어느 비트레이트로 낼 것인가. **올리지 않고, 목표에서 자른다.**
+
+        목표 = min(원본 비트레이트, 납품 목표)
+
+    **자르는 기준은 대역 위끝(3500k)이 아니라 목표(3200k)다.** 위끝으로 자르면
+    CBR 이 딱 3500 을 쓰고 거기에 컨테이너 오버헤드와 오디오가 얹혀 대역을
+    넘어간다(실측 3843 kbps). 목표가 대역 한가운데 있는 이유가 그것이다.
+
+    원본보다 높게 잡는 것은 **정보를 만들어 내지 못한다.** 압축 열화를 고화질로
+    보존할 뿐이고, 용량만 그만큼 는다. 실측(720p 방송 클립, 원본 312 kbps):
+
+        원본 그대로   315 kbps   SSIM 0.9937   PSNR 47.4 dB
+        대역 강제    3203 kbps   SSIM 0.9984   PSNR 56.7 dB
+
+    10배를 써서 사는 것이 사람 눈 구분 한계 **위쪽**의 차이다. PSNR 47 dB 면
+    재인코딩으로는 사실상 무손실이다. 900건이면 6 GB 와 60 GB 의 차이가 된다.
+
+    원본 코덱의 효율은 반영한다. AV1 632 kbps 를 H.264 632 kbps 로 받는 것은
+    "그대로" 가 아니라 화질 파괴다(CODEC_EFFICIENCY 주석).
+
+    원본을 못 재면 상한을 그대로 쓴다 — 모르는 채로 낮게 잡아 규격 미달을 내는
+    것보다, 알 수 없을 때는 규격을 맞추는 쪽이 낫다.
+    """
+    top = parse_bitrate(target)
+    want = bitrate_cap(source, ratio, timeout) if source else None
+    if not want:
+        return top
+    return min(want, top) if top else want
+
+
 def file_bitrate(path, timeout=FFMPEG_TIMEOUT):
     """**파일 전체** 평균 비트레이트(bps). 못 재면 None.
 
@@ -569,11 +600,20 @@ def file_bitrate(path, timeout=FFMPEG_TIMEOUT):
 BITRATE_MEASURABLE_SEC = 2.0
 
 
-def check_delivery_bitrate(path, low, high, timeout=FFMPEG_TIMEOUT):
+def check_delivery_bitrate(path, low, high, timeout=FFMPEG_TIMEOUT,
+                           source_bitrate=None):
     """결과물이 납품 대역 안인지. 벗어나면 경고 코드를 담아 돌려준다.
 
+    **위끝을 넘는 것과 아래끝에 못 미치는 것은 뜻이 다르다.**
+
+    - 위를 넘으면 언제나 잘못이다. 강제가 빗나간 것이고 사람이 봐야 한다.
+    - 아래에 못 미치는 것은 **원본이 이미 그 아래였으면 의도한 결과다**
+      (`delivery_target` 참고). 그때는 경고가 아니라 기록으로 남긴다 — 900건
+      중 저품질 원본이 몇 건이었는지는 나중에 물어보게 되는 값이다.
+    - 원본은 대역 안이었는데 결과가 미달이면 그건 우리 쪽 문제다.
+
     **강제했다고 검사를 생략하지 않는다.** 인코더가 바뀌거나(NVENC↔libx264)
-    누가 대역을 환경 변수로 바꿔 두면 강제가 빗나갈 수 있다. 그때 조용히 나가면
+    누가 대역을 환경 변수로 바꿔 두면 빗나갈 수 있다. 그때 조용히 나가면
     900건을 납품한 뒤 검수에서 알게 된다.
     """
     lo, hi = parse_bitrate(low), parse_bitrate(high)
@@ -590,6 +630,10 @@ def check_delivery_bitrate(path, low, high, timeout=FFMPEG_TIMEOUT):
     if got is None:
         return ["bitrate-unverified"]
     if lo and got < lo:
+        if source_bitrate and source_bitrate < lo:
+            # 원본이 이미 대역 아래였다. 올려 담지 않은 결과이므로 정상이다.
+            return [f"source-below-band: 원본 {source_bitrate // 1000}k "
+                    f"→ 결과 {got // 1000}k"]
         return [f"bitrate-out-of-band: {got // 1000}k < {lo // 1000}k"]
     if hi and got > hi:
         return [f"bitrate-out-of-band: {got // 1000}k > {hi // 1000}k"]
@@ -1005,6 +1049,19 @@ class VideoAnonymizer:
         bitrate, max_bitrate = info_kw["bitrate"], info_kw["max_bitrate"]
         min_bitrate = info_kw["min_bitrate"]
 
+        # **올려 담지 않는다.** 목표는 원본과 대역 위끝 중 낮은 쪽이다. 원본이
+        # 312 kbps 인데 3200 으로 뽑으면 압축 열화를 고화질로 보존할 뿐이고,
+        # 용량만 10배가 된다(delivery_target 주석의 실측). 원본이 대역 위면
+        # 여기서 잘려 내려온다.
+        source_bitrate = video_bitrate(input_path) if bitrate else None
+        if bitrate:
+            picked = delivery_target(input_path, bitrate, bitrate_ratio or 1.0)
+            if picked:
+                if parse_bitrate(bitrate) != picked:
+                    log.info("납품 목표 %.0f kbps (원본 %.0f kbps 기준)",
+                             picked / 1000, (source_bitrate or 0) / 1000)
+                bitrate = str(picked)
+
         # OpenCV 는 ffmpeg 본체보다 코덱 지원이 좁다. AV1 은 파일을 열기는 열면서
         # 한 프레임도 못 뽑는다. 읽을 수 있는 형태로 만들어 놓고 시작한다.
         from . import ingest             # 지연 임포트 (ingest 가 이 모듈을 쓴다)
@@ -1102,7 +1159,8 @@ class VideoAnonymizer:
         # 나가면 900건을 납품한 뒤 검수에서 알게 된다.
         if bitrate:
             warnings += check_delivery_bitrate(output_path, min_bitrate,
-                                               max_bitrate)
+                                               max_bitrate,
+                                               source_bitrate=source_bitrate)
         result = Result(output=output_path, frames=rendered, raw_boxes=raw_boxes,
                         filled_boxes=filled, method=method, audio=status,
                         video=info, timing=timing,
