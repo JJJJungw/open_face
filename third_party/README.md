@@ -1,6 +1,6 @@
 # third_party — 외부 리포
 
-`setup_weights.py` 가 [clibdev/YOLO-FaceV2](https://github.com/clibdev/YOLO-FaceV2)
+`scripts/setup_weights.py` 가 [clibdev/YOLO-FaceV2](https://github.com/clibdev/YOLO-FaceV2)
 를 여기에 클론한다.
 
 ## 왜 필요한가
@@ -9,7 +9,7 @@
 `utils/` 모듈이 임포트되어야 한다. 없으면 `ModuleNotFoundError` 로 검출기
 생성이 실패한다. 우리 코드가 직접 쓰는 건 아니고, 체크포인트를 푸는 데 필요하다.
 
-`requirements.txt` 의 pandas · matplotlib · seaborn · thop 같은 것들도 같은
+`requirements/base.txt` 의 pandas · matplotlib · seaborn · thop 같은 것들도 같은
 이유로 들어가 있다. 그 리포의 임포트 사슬(`models/common.py` →
 `utils/general.py` → `utils/plots.py`)이 요구한다.
 

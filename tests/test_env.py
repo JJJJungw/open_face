@@ -118,8 +118,11 @@ def test_every_setting_is_documented():
 
     root = pathlib.Path(__file__).resolve().parent.parent
     used = {}
-    for base in ("face_anonymizer", "tools", "setup_weights.py"):
+    for base in ("face_anonymizer", "tools", "scripts"):
         p = root / base
+        # 자리가 옮겨 가면 rglob 이 조용히 빈 목록을 준다 — 그러면 이 테스트가
+        # 통과하면서 아무것도 안 센다. 없으면 여기서 터뜨린다.
+        assert p.exists(), f"훑을 자리가 없다: {base}"
         files = [p] if p.is_file() else [f for f in p.rglob("*.py")
                                          if "__pycache__" not in str(f)]
         for f in files:

@@ -26,7 +26,6 @@ import argparse
 import http.server
 import json
 import os
-import shutil
 import signal
 import subprocess
 import sys

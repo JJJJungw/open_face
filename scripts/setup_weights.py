@@ -1,7 +1,7 @@
 """YOLO-FaceV2 리포 클론 + 가중치 준비.
 
-    python setup_weights.py            준비 (S3 우선, 없으면 GitHub)
-    python setup_weights.py --upload   지금 있는 가중치를 S3 에 올린다
+    python scripts/setup_weights.py            준비 (S3 우선, 없으면 GitHub)
+    python scripts/setup_weights.py --upload   지금 있는 가중치를 S3 에 올린다
 
 가중치는 **S3 를 먼저 본다.** 배포할 때마다 GitHub 릴리스에 의존하면 레이트
 리밋에 걸리고, 네트워크 정책에 막히고, 업스트림 태그가 바뀌면 어제와 다른
@@ -17,7 +17,10 @@ import subprocess
 import sys
 import urllib.request
 
-ROOT = os.path.dirname(os.path.abspath(__file__))
+# 이 파일은 scripts/ 안에 있고 받아 두는 자리는 저장소 루트다. 한 칸 올라간다 —
+# 여기를 scripts/ 로 두면 third_party 와 weights 가 scripts/ 밑에 생겨서 런타임이
+# 보는 자리(core/paths.py 의 DEFAULT_WEIGHTS)와 어긋난다.
+ROOT = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
 REPO_DIR = os.path.join(ROOT, "third_party", "YOLO-FaceV2")
 WEIGHTS = os.path.join(ROOT, "weights", "yolo-facev2.pt")   # paths.DEFAULT_WEIGHTS 와 같은 자리
 
@@ -54,7 +57,7 @@ def ensure_weights():
     print(f"내려받는 중: {WEIGHTS_URL}")
     urllib.request.urlretrieve(WEIGHTS_URL, WEIGHTS)
     print("가중치 준비: GitHub 에서 받음")
-    print("  → 다음부터 S3 에서 받으려면: python setup_weights.py --upload")
+    print("  → 다음부터 S3 에서 받으려면: python scripts/setup_weights.py --upload")
 
 
 def upload():

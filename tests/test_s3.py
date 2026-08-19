@@ -12,8 +12,8 @@ import pytest
 
 from conftest import FakeDetector
 
-pytest.importorskip("fastapi", reason="pip install -r requirements-serve.txt")
-pytest.importorskip("httpx", reason="pip install -r requirements-dev.txt")
+pytest.importorskip("fastapi", reason="pip install -r requirements/serve.txt")
+pytest.importorskip("httpx", reason="pip install -r requirements/dev.txt")
 
 from fastapi.testclient import TestClient            # noqa: E402
 
@@ -113,7 +113,7 @@ def wait(c, jid, timeout=30.0):
 
 
 def make_store(objects=None):
-    return s3mod.S3Store(bucket="ax-mbc-label-data-storage",
+    return s3mod.S3Store(bucket="test-bucket",
                          client=FakeS3Client(objects),
                          output_prefix="v1/results/face/", root_prefix="")
 
@@ -207,13 +207,13 @@ def s3client(tmp_path, monkeypatch, make_video):
     src, n, size = make_video(name="f_00001_00_0000000_0042000_raw.mp4",
                               frames=12)
     data = open(src, "rb").read()
-    store = s3mod.S3Store(bucket="ax-mbc-label-data-storage",
+    store = s3mod.S3Store(bucket="test-bucket",
                           client=FakeS3Client({
                               "videos/2026-08/f_00001_00_0000000_0042000_raw.mp4": (data, NOW),
                               "videos/2026-08/notes.txt": (b"hi", NOW)}),
                           output_prefix="v1/results/face/", root_prefix="",
                           config=s3mod.providers.StorageConfig(
-                              provider="s3", bucket="ax-mbc-label-data-storage",
+                              provider="s3", bucket="test-bucket",
                               output_prefix="v1/results/face/"))
     monkeypatch.setattr(s3mod, "get_store", lambda: store)
     monkeypatch.setattr(config, "JOBS_DIR", str(tmp_path / "jobs"))
@@ -233,7 +233,7 @@ def test_objects_endpoint(s3client):
     r = s3client.get("/api/s3/objects?prefix=videos/2026-08/")
     assert r.status_code == 200
     d = r.json()
-    assert d["bucket"] == "ax-mbc-label-data-storage"
+    assert d["bucket"] == "test-bucket"
     assert d["output_prefix"] == "v1/results/face/"
     assert [o["key"] for o in d["objects"]] == [
         "videos/2026-08/f_00001_00_0000000_0042000_raw.mp4",

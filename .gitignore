@@ -1,4 +1,4 @@
-# weights & third-party repo (setup_weights.py 로 받음 — 커밋하지 않음)
+# weights & third-party repo (scripts/setup_weights.py 로 받음 — 커밋하지 않음)
 # 폴더가 무엇을 담는 곳인지는 README 로 남기므로 그것만 예외로 둔다.
 weights/*.pt
 weights/*.onnx
@@ -6,13 +6,28 @@ third_party/*
 !third_party/README.md
 !third_party/.gitkeep
 
+# **작업 폴더.** 서버가 여기에 입력·결과물·작업 기록을 쌓는다. 저널
+# (jobs/_events/*.jsonl) 에는 방송사·날짜가 들어간 **원본 파일 이름이 그대로**
+# 남고, jobs/_storage.json 에는 붙어 있는 버킷 주소가 남는다. 저장소 루트에서
+# 서버를 띄우는 것이 정상적인 사용이라(FA_JOBS_DIR 기본값이 jobs), 여기를
+# 빼먹으면 git add -A 한 번에 통째로 커밋된다.
+jobs/
+
 # 브릿지로 파일을 옮길 때 쓰는 임시 자리
 _stage/
 _to_delete/
 
 # 로컬 설정. .env.example 만 저장소에 남긴다
 .env
+.env.*
 !.env.example
+
+# 열쇠는 저장소에 들어올 일이 없다. 실수로 놓아도 잡히게 한다.
+*.pem
+*.key
+*.p12
+.aws/
+credentials
 
 # 입출력 영상
 *.mp4
@@ -32,8 +47,10 @@ dist/
 venv/
 env/
 
-# pytest
+# 도구 캐시
 .pytest_cache/
+.ruff_cache/
+.mypy_cache/
 
 # jupyter
 .ipynb_checkpoints/
@@ -42,7 +59,3 @@ env/
 .DS_Store
 .vscode/
 .idea/
-
-# 런타임 산출물 — 작업 폴더와 이벤트 저널
-jobs/
-msa-smoke-out/

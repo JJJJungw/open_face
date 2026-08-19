@@ -5,7 +5,7 @@
 아니라 **배선**을 검증한다. 정확도는 가중치가 필요한 별개 관심사다.
 
 ```bash
-pip install -r requirements-dev.txt
+pip install -r requirements/dev.txt
 pytest                      # 195개, 약 40초
 ```
 

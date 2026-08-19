@@ -14,8 +14,8 @@ import json
 
 import pytest
 
-pytest.importorskip("fastapi", reason="pip install -r requirements-serve.txt")
-pytest.importorskip("httpx", reason="pip install -r requirements-dev.txt")
+pytest.importorskip("fastapi", reason="pip install -r requirements/serve.txt")
+pytest.importorskip("httpx", reason="pip install -r requirements/dev.txt")
 
 from fastapi.testclient import TestClient          # noqa: E402
 

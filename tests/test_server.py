@@ -12,8 +12,8 @@ import pytest
 
 from conftest import FakeDetector, face_rect, region_is_obscured, read_frames
 
-pytest.importorskip("fastapi", reason="pip install -r requirements-serve.txt")
-pytest.importorskip("httpx", reason="pip install -r requirements-dev.txt")
+pytest.importorskip("fastapi", reason="pip install -r requirements/serve.txt")
+pytest.importorskip("httpx", reason="pip install -r requirements/dev.txt")
 
 from fastapi.testclient import TestClient           # noqa: E402
 
@@ -2023,9 +2023,20 @@ def test_a_job_uses_one_storage_from_start_to_finish(client, make_video,
         def output_key(self, key):
             raise AssertionError("올릴 때 다른 저장소를 보면 안 된다")
 
+    # **내려받은 직후에 갈아 끼운다.** 제출하자마자 바꾸면 워커가 스토어를 잡기
+    # 전일 수 있고, 그러면 받는 쪽부터 Other 라 재현하려던 시나리오가 아니다
+    # (실제로 그렇게 흘러 `download` 가 없다며 엉뚱한 곳에서 터졌다). 내려받기
+    # 안에서 바꾸면 "받은 뒤, 올리기 전" 이 정확히 잡힌다.
+    real_download = first.download
+
+    def download_then_swap(*a, **kw):
+        out = real_download(*a, **kw)
+        monkeypatch.setattr(s3mod, "get_store", lambda: Other())
+        return out
+
+    monkeypatch.setattr(first, "download", download_then_swap)
+
     jid = job_id(submit(client, path))
-    # 작업이 시작된 뒤에 갈아 끼운다.
-    monkeypatch.setattr(s3mod, "get_store", lambda: Other())
     s = wait(client, jid, timeout=60)
 
     assert s["status"] in ("done", "review"), s.get("error")

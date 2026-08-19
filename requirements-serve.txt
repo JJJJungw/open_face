@@ -1,7 +1,0 @@
-# HTTP API + 웹 UI 전용. 코어(requirements.txt)에 더해서 설치한다.
-#   pip install -r requirements.txt -r requirements-serve.txt
-fastapi>=0.110
-uvicorn[standard]>=0.27
-
-# S3 연동 (FA_S3_BUCKET 을 쓸 때만 필요)
-boto3>=1.34

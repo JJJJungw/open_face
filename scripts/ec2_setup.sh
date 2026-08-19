@@ -33,7 +33,7 @@ else
 fi
 
 say "3/6 나머지 의존성"
-"$VENV/bin/pip" install -q -r requirements.txt pytest
+"$VENV/bin/pip" install -q -r requirements/base.txt pytest
 "$VENV/bin/pip" install -q -e .
 "$VENV/bin/python" - <<'PY'
 import cv2, numpy, supervision, torch
@@ -43,7 +43,7 @@ print(f"cv2={cv2.__version__}  numpy={numpy.__version__}  "
 PY
 
 say "4/6 YOLO-FaceV2 리포 + 가중치"
-"$VENV/bin/python" setup_weights.py
+"$VENV/bin/python" scripts/setup_weights.py
 
 say "5/6 단위 테스트 (가짜 검출기 — 누출 방지 검증)"
 "$VENV/bin/python" -m pytest -q

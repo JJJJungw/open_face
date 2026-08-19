@@ -155,7 +155,7 @@ def _auto(path, key=None):
         "모델 가중치를 갖추지 못했습니다.\n  " + "\n  ".join(tried) +
         f"\n다음 중 하나로 해결됩니다 — {path} 에 파일을 직접 두거나, "
         "FA_WEIGHTS_URL 에 받을 수 있는 주소를 넣거나, "
-        "python setup_weights.py 를 실행하시면 됩니다.")
+        "python scripts/setup_weights.py 를 실행하시면 됩니다.")
 
 
 def status(path=None):
@@ -211,7 +211,7 @@ def _from_s3(path, key=None):
     if store is None:
         raise WeightsUnavailable(
             f"가중치가 없고({path}) S3 도 설정되어 있지 않습니다. "
-            f"FA_S3_BUCKET 을 설정하시거나 python setup_weights.py 를 실행해 주세요.")
+            f"FA_S3_BUCKET 을 설정하시거나 python scripts/setup_weights.py 를 실행해 주세요.")
 
     tmp = _atomic(path)
     try:

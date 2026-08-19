@@ -130,7 +130,7 @@ NOT_READY = _p(
 MODEL_LOAD_FAILED = _p(
     "model_load_failed", 503, "모델을 불러오지 못했습니다",
     "가중치와 GPU 상태를 확인해 주세요. 가중치는 S3(FA_S3_WEIGHTS_KEY)에서 "
-    "받아 오며, 버킷이 설정되어 있지 않으면 python setup_weights.py 로 "
+    "받아 오며, 버킷이 설정되어 있지 않으면 python scripts/setup_weights.py 로 "
     "직접 준비할 수 있습니다.")
 QUEUE_FULL = _p(
     "queue_full", 429, "대기열이 가득 찼습니다",

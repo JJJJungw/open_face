@@ -46,7 +46,7 @@ def _httpx():
     except ImportError as e:                        # pragma: no cover
         raise TransferError(
             "서명된 URL 전송에는 httpx 가 필요합니다 "
-            "(pip install -r requirements-worker.txt)", transient=False) from e
+            "(pip install -r requirements/worker.txt)", transient=False) from e
     return httpx
 
 

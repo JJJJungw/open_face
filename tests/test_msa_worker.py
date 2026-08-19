@@ -6,7 +6,7 @@ Redis 도 저쪽 서버도 띄우지 않는다. 확인하는 것은 '무엇을 �
 
 import pytest
 
-pytest.importorskip("celery", reason="pip install -r requirements-worker.txt")
+pytest.importorskip("celery", reason="pip install -r requirements/worker.txt")
 
 from face_anonymizer import job_runner                      # noqa: E402
 from face_anonymizer.msa import celery_app as shell         # noqa: E402

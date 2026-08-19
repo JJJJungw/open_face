@@ -2,7 +2,7 @@
 
 YOLO-FaceV2 (Krasjet-Yu, clibdev fork) 는 YOLOv5 계열이라 자체 model/utils 코드가
 필요하다. 체크포인트를 unpickle 하려면 해당 리포가 sys.path 에 있어야 하므로,
-setup_weights.py 로 third_party/YOLO-FaceV2 에 클론해 둔 뒤 사용한다.
+scripts/setup_weights.py 로 third_party/YOLO-FaceV2 에 클론해 둔 뒤 사용한다.
 
 블러/모자이크 용도에는 박스만 있으면 되므로, 리포별로 이름이 다른 face-NMS 함수에
 의존하지 않고 letterbox + torchvision NMS 로 직접 디코딩한다(랜드마크 열은 무시).
@@ -84,11 +84,11 @@ class FaceDetector:
         if not os.path.isdir(repo_path):
             raise FileNotFoundError(
                 f"YOLO-FaceV2 repo not found at {repo_path}. "
-                "Run `python setup_weights.py` first."
+                "Run `python scripts/setup_weights.py` first."
             )
         if not os.path.exists(weights):
             raise FileNotFoundError(
-                f"weights not found at {weights}. Run `python setup_weights.py` first."
+                f"weights not found at {weights}. Run `python scripts/setup_weights.py` first."
             )
         if repo_path not in sys.path:
             sys.path.insert(0, repo_path)

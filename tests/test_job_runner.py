@@ -11,7 +11,7 @@ import pytest
 
 from conftest import FakeDetector
 
-pytest.importorskip("httpx", reason="pip install -r requirements-worker.txt")
+pytest.importorskip("httpx", reason="pip install -r requirements/worker.txt")
 
 from face_anonymizer import job_runner                      # noqa: E402
 from face_anonymizer.core.pipeline import VideoAnonymizer   # noqa: E402

@@ -1,8 +1,8 @@
 # 테스트 전용. 실행에는 필요 없다.
-#   pip install -r requirements.txt -r requirements-serve.txt -r requirements-dev.txt
+#   pip install -r requirements/base.txt -r requirements/serve.txt -r requirements/dev.txt
 pytest>=7
 
 # fastapi 의 TestClient 가 내부적으로 쓴다. 서버를 띄우는 데는 필요 없어서
-# requirements-serve.txt 에는 넣지 않는다 — 없으면 test_server.py 가 통째로
+# requirements/serve.txt 에는 넣지 않는다 — 없으면 test_server.py 가 통째로
 # skip 되므로, 왜 안 도는지 알 수 있게 여기 적어 둔다.
 httpx>=0.27

@@ -35,7 +35,8 @@ packages = [
     "face_anonymizer",
     "face_anonymizer.core",      # 영상 처리 (서버·S3 없이 돈다)
     "face_anonymizer.service",   # HTTP API · 웹 UI · 지표
-    "face_anonymizer.storage",   # S3 · 이름 규칙
+    "face_anonymizer.storage",   # 저장소 입출력 · 이름 규칙
+    "face_anonymizer.msa",       # 큐를 지켜보는 워커 (인바운드 포트 없음)
 ]
 
 # 웹 UI 는 static/index.html 파일 하나다. 빠지면 서버가 기동에서 터진다.
