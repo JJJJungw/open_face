@@ -482,6 +482,13 @@ def run(job_id):
                        "title": errors.CANCELLED.title, "detail": "",
                        "hint": "", "retryable": False}
         jobs.save_job(j)
+        # **취소도 영상은 버린다.** 실패 경로와 같은 이유다 — 기록은 job.json 에
+        # 다 있고 원본은 버킷에 그대로 있다. 여기가 빠져 있어서 취소한 작업의
+        # 입력 영상이 서버 디스크에 **영구히** 남았다(실측: 원본의 100%).
+        # `cancelled` 는 TTL 정리 대상도 아니라(FA_FAILED_TTL_MIN=0) 시간이
+        # 지나도 안 없어진다. 취소 한 번에 원본 하나씩 쌓이고, 그러다 여유가
+        # FA_MIN_FREE_MB 밑으로 가면 새 작업이 507 로 거절되기 시작한다.
+        jobs.drop_media(j, "취소 — 기록만 남긴다")
         log.info("작업 %s 취소됨", job_id)
         events.emit("job.cancelled", job=j.id, name=j.name, batch=j.batch or None)
     except config.PERMANENT_ERRORS as e:

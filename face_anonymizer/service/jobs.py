@@ -21,7 +21,7 @@ import threading
 import time
 from dataclasses import asdict, dataclass, field, fields
 
-from .. import progress, timefmt
+from .. import events, progress, timefmt
 from . import config
 
 try:
@@ -498,6 +498,18 @@ def recover_orphans():
                        "hint": "다시 제출해 주세요.", "retryable": True}
             j.finished = time.time()
             save_job(j)
+            # **끊긴 작업도 영상은 버린다.** 다른 종료 경로(실패·취소·업로드
+            # 성공)는 전부 이걸 하는데 여기만 빠져 있었다. failed 는 TTL 정리
+            # 대상이 아니라 그 입력 영상이 **영구히** 남는다 — 처리 중에 서버를
+            # 한 번 올렸다 내릴 때마다 원본 하나씩 쌓인다는 뜻이다.
+            drop_media(j, "재시작으로 중단 — 기록만 남긴다")
+            # **저널에도 끝을 남긴다.** 안 남기면 `job.started` 만 있고 끝나는
+            # 이벤트가 없어서, 시간 축으로 읽는 쪽에는 그 작업이 영원히 돌고
+            # 있는 것으로 보인다. 저널이 존재하는 이유가 그 축이다.
+            events.emit("job.failed", job=j.id, name=j.name,
+                        batch=j.batch or None, code="interrupted",
+                        detail="서버 재시작으로 중단됐습니다",
+                        attempts=j.attempts)
             failed += 1
         elif j.status == "review":
             # 워커에 다시 넣지 않는다 — 처리는 이미 끝났고 남은 것은 사람의

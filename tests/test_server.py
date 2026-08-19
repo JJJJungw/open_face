@@ -2238,3 +2238,82 @@ def test_the_cache_does_not_follow_a_changed_jobs_dir(client, tmp_path, monkeypa
 
     monkeypatch.setattr(config, "JOBS_DIR", str(b))
     assert jobsmod.all_jobs() == [], "옛 폴더의 작업이 따라왔다"
+
+
+def test_cancelling_does_not_leave_the_source_video_behind(client, make_video,
+                                                           monkeypatch):
+    """**취소한 작업의 입력 영상이 서버 디스크에 영원히 남았다.**
+
+    실패 경로와 업로드 성공 경로에는 `drop_media()` 가 있는데 취소 경로에만
+    없었다. 게다가 `cancelled` 는 TTL 정리 대상이 아니라(실패 원인을 보려고
+    일부러 그렇게 뒀다) 시간이 지나도 안 없어진다. 실측: 원본의 100% 가 남는다.
+
+    방송 클립 한 편이 200~400MB 다. 취소를 스무 번 하면 그만큼이 쌓이고,
+    여유가 FA_MIN_FREE_MB 밑으로 가면 새 작업이 507 로 거절된다.
+    """
+    path, n, size = make_video(frames=60)
+    client.attach(size)
+
+    # 내려받기가 끝난 **뒤에** 취소가 걸리게 한다 — 그래야 지울 영상이 있다.
+    real = client.store.download
+
+    def download_then_cancel(key, dest, **kw):
+        out = real(key, dest, **kw)
+        # 제출 호출이 아직 안 돌아왔을 수 있어 id 로 찾지 않는다 — 돌고 있는
+        # 작업은 어차피 하나다.
+        with jobsmod.LOCK:
+            for j in jobsmod.JOBS.values():
+                j.cancel = True
+        return out
+
+    monkeypatch.setattr(client.store, "download", download_then_cancel)
+    jid = [job_id(submit(client, path))]
+    s = wait(client, jid[0], timeout=60)
+    assert s["status"] == "cancelled", s
+
+    wd = os.path.join(config.JOBS_DIR, jid[0])
+    left = sorted(os.listdir(wd)) if os.path.isdir(wd) else []
+    assert left == [config.STATE_FILE], f"영상이 남았다: {left}"
+
+
+def test_a_restart_does_not_leave_the_interrupted_video_behind(client, tmp_path,
+                                                               monkeypatch):
+    """처리 중에 서버를 올렸다 내리면 그 입력 영상이 영구히 남았다.
+
+    다른 종료 경로(실패·취소·업로드 성공)는 전부 영상을 버리는데 재시작 복구만
+    빠져 있었다. `failed` 는 TTL 정리 대상이 아니라 시간이 지나도 안 없어진다 —
+    배포할 때마다 원본 하나씩 쌓인다.
+    """
+    monkeypatch.setattr(config, "JOBS_DIR", str(tmp_path))
+    monkeypatch.setattr(jobsmod, "JOBS", {})
+    jobsmod.invalidate_disk_cache()
+    orphan("r1", "running")
+    wd = tmp_path / "r1"
+    (wd / "input.mp4").write_bytes(b"x" * 4096)      # 내려받아 둔 원본
+
+    jobsmod.recover_orphans()
+
+    assert jobsmod.find_job("r1").status == "failed"
+    left = sorted(os.listdir(wd))
+    assert left == [config.STATE_FILE], f"영상이 남았다: {left}"
+
+
+def test_an_interrupted_job_gets_an_ending_in_the_journal(client, tmp_path,
+                                                          monkeypatch):
+    """`job.started` 만 있고 끝이 없으면, 시간 축으로 읽는 쪽에는 그 작업이
+    영원히 돌고 있는 것으로 보인다. 저널이 존재하는 이유가 그 축이다."""
+    from face_anonymizer import events
+
+    monkeypatch.setattr(config, "JOBS_DIR", str(tmp_path))
+    monkeypatch.setattr(jobsmod, "JOBS", {})
+    jobsmod.invalidate_disk_cache()
+    seen = []
+    monkeypatch.setattr(events, "emit",
+                        lambda kind, **kw: seen.append((kind, kw)))
+    orphan("r1", "running")
+
+    jobsmod.recover_orphans()
+
+    ends = [kw for kind, kw in seen if kind == "job.failed"]
+    assert ends, f"끝나는 이벤트가 없다: {[k for k, _ in seen]}"
+    assert ends[0]["code"] == "interrupted"
