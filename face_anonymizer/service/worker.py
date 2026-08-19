@@ -341,11 +341,19 @@ def run(job_id):
     # `j.name` 에서 따로 만든다. 여기서까지 쓸 이유가 없다.
     src = os.path.join(workdir, "input" + os.path.splitext(name)[1])
     dst = os.path.join(workdir, "output" + naming.DEFAULT_EXT)
+    # **작업 하나는 처음부터 끝까지 같은 저장소를 본다.**
+    #
+    # 예전에는 내려받을 때와 올릴 때 각각 get_store() 를 불렀다. 그 사이에
+    # 누가 화면에서 저장소를 바꾸면(연결 해제·다른 버킷) 이 영상은 A 에서
+    # 받아서 B 에 올라간다 — 조용히, 오류 하나 없이. 비식별화한 결과물이
+    # 엉뚱한 버킷에 떨어지는 것은 이 서비스에서 제일 나쁜 결말이다.
+    # 끊긴 뒤라면 get_store() 가 None 이라 올리는 자리에서 AttributeError 가
+    # 나고, 그건 '알 수 없는 오류' 로 분류돼 GPU 파이프라인을 네 번 더 돌린다.
+    store = s3mod.get_store() if j.s3_key else None
+    if j.s3_key and store is None:
+        raise s3mod.S3Error("S3 가 설정되어 있지 않습니다")
     try:
         if j.s3_key and not os.path.exists(src):
-            store = s3mod.get_store()
-            if store is None:
-                raise s3mod.S3Error("S3 가 설정되어 있지 않습니다")
             log.info("S3 에서 내려받는다: %s", j.s3_key)
             store.download(j.s3_key, src,
                            callback=transfer("download", store.size_of(j.s3_key)))
@@ -363,15 +371,18 @@ def run(job_id):
                 get_anonymizer(), src, dst, params,
                 progress=progress, note=lowered)
         if j.s3_key:
-            store = s3mod.get_store()
             key = store.output_key(j.s3_key)
             log.info("S3 에 올린다: %s", key)
             store.upload(res.output, key,
                          callback=transfer("upload", os.path.getsize(res.output)))
-            if j.cancel:
-                raise JobCancelled()
+            # **올린 다음에는 먼저 기록한다.** 취소 확인이 앞에 있으면, 업로드가
+            # 끝난 직후에 취소가 들어왔을 때 결과물은 버킷에 있는데 그걸
+            # 가리키는 기록이 없다. 그 파일은 아무도 못 찾고, 다시 제출하면
+            # '이미 처리됨' 으로 거절된다 — 취소했다면서.
             with jobs.LOCK:
                 j.s3_output = key
+            if j.cancel:
+                raise JobCancelled()
         # 사람이 봐야 하는 사유가 있으면 **완료로 넘기지 않는다.**
         # 딱지만 붙이고 done 으로 두면 결국 완료 목록에 섞여 그대로 납품된다.
         # 얼굴이 하나도 안 잡힌 영상은 원본이 그대로 나간 것이므로, 그게 정당한

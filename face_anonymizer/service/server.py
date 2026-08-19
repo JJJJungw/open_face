@@ -254,6 +254,20 @@ def storage_info():
                      "설정은 .env 로도 정할 수 있습니다. 환경 변수가 이깁니다.")}
 
 
+def _refuse_if_busy():
+    """돌고 있는 작업이 있으면 저장소를 못 건드린다.
+
+    그 밑에서 바꾸면 그 작업은 한 곳에서 받아서 다른 곳에 올린다. 검수 대기도
+    포함한다 — 판정하면 결과물을 옮겨야 하기 때문이다.
+    """
+    c = jobs.counts()
+    busy = c.get("running", 0) + c.get("queued", 0) + c.get("review", 0)
+    if busy:
+        raise errors.STORAGE_BUSY(
+            f"진행 {c.get('running', 0)}건 · 대기 {c.get('queued', 0)}건 · "
+            f"검수 대기 {c.get('review', 0)}건")
+
+
 def _secure_enough(request):
     """이 연결로 비밀을 받아도 되나.
 
@@ -283,6 +297,10 @@ def storage_set(request: Request, body: dict = Body(default={})):
     ok, why = s3mod.editable()
     if not ok:
         raise errors.STORAGE_LOCKED(why)
+    # **해제와 같은 이유로 막는다.** 돌고 있는 작업 밑에서 저장소를 바꾸면
+    # 그 작업은 A 에서 받아 B 에 올린다. 해제(DELETE)만 막고 여기를 열어 두면
+    # 같은 사고를 다른 문으로 낼 수 있다.
+    _refuse_if_busy()
 
     # **`store` 는 여기서 안 받는다.** 그 값은 파이썬 모듈 경로이고, 받는
     # 순간 `import_module()` 에 그대로 들어간다 — 임포트만으로 코드가 도는
@@ -366,12 +384,7 @@ def storage_disconnect():
     ok, why = s3mod.editable()
     if not ok:
         raise errors.STORAGE_LOCKED(why)
-    c = jobs.counts()
-    busy = c.get("running", 0) + c.get("queued", 0) + c.get("review", 0)
-    if busy:
-        raise errors.STORAGE_BUSY(
-            f"진행 {c.get('running', 0)}건 · 대기 {c.get('queued', 0)}건 · "
-            f"검수 대기 {c.get('review', 0)}건")
+    _refuse_if_busy()
     was = s3mod.CONFIG.bucket
     s3mod.disconnect()
     log.info("저장소 연결 해제: %s", was)
@@ -527,7 +540,7 @@ def name_notes(keys):
 
 
 @app.post("/api/jobs", status_code=202)
-async def create_jobs(request: Request):
+def create_jobs(body: dict = Body(default={})):
     """**제출은 여기 하나다.** 한 건이든 여러 건이든 폴더든 같은 요청, 같은 응답.
 
     진입점을 나누면 클라이언트가 경우마다 분기해야 하고, 화면에도 버튼이 그만큼
@@ -563,13 +576,6 @@ async def create_jobs(request: Request):
     **한 건이 거절돼도 나머지는 받는다.** 수백 건에서 키 하나가 오타라고 전체를
     되돌리면 호출하는 쪽이 무엇이 들어갔는지 알 수 없다.
     """
-    try:
-        body = await request.json()
-    except Exception as e:                          # noqa: BLE001
-        raise errors.INVALID_INPUT("본문을 JSON 으로 읽지 못했습니다") from e
-    if not isinstance(body, dict):
-        raise errors.INVALID_INPUT("본문은 JSON 객체여야 합니다")
-
     keys = body.get("s3_keys") or []
     prefixes = body.get("s3_prefix") or body.get("s3_prefixes") or []
     if isinstance(prefixes, str):                   # 한 개는 문자열로도 받는다

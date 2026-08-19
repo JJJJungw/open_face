@@ -307,7 +307,7 @@ def test_sweep_removes_expired_jobs(client, tmp_path, make_video, monkeypatch):
     jobsmod.JOBS[jid].finished = time.time() - 10
     jobsmod.save_job(jobsmod.JOBS[jid])
 
-    assert jobsmod.sweep() == 1
+    assert jobsmod.sweep(force=True) == 1
     assert not (tmp_path / "jobs" / jid).exists()
     assert client.get(f"/api/jobs/{jid}").status_code == 404
 
@@ -840,7 +840,7 @@ def test_failed_jobs_survive_sweep(client, make_video, monkeypatch):
     jobsmod.JOBS[jid].finished = time.time() - 9999
     jobsmod.save_job(jobsmod.JOBS[jid])
 
-    jobsmod.sweep()
+    jobsmod.sweep(force=True)
     assert client.get(f"/api/jobs/{jid}").status_code == 200
 
 
@@ -1368,7 +1368,7 @@ def test_review_is_never_swept_away_by_ttl(client, make_video, monkeypatch):
     j = jobsmod.find_job(jid)
     j.finished = time.time() - 3600                    # 한 시간 전에 끝난 것으로
 
-    jobsmod.sweep()
+    jobsmod.sweep(force=True)
 
     assert client.get(f"/api/jobs/{jid}").json()["status"] == "review"
 
@@ -1382,7 +1382,7 @@ def test_review_ttl_can_be_turned_on_deliberately(client, make_video,
     j = jobsmod.find_job(jid)
     j.finished = time.time() - 3600
 
-    jobsmod.sweep()
+    jobsmod.sweep(force=True)
 
     assert client.get(f"/api/jobs/{jid}").status_code == 404
 
@@ -1487,7 +1487,7 @@ def test_tracking_survives_the_ttl_sweep(client, tmp_path, monkeypatch):
     jobsmod.track_prefix("v1/input/kbs/a.mp4")
     with jobsmod.LOCK:
         jobsmod.JOBS.clear()
-    jobsmod.sweep()
+    jobsmod.sweep(force=True)
     assert jobsmod.tracked_prefixes() == ["v1/input/kbs/"]
 
 
@@ -1973,3 +1973,96 @@ def test_local_files_do_not_borrow_the_users_name(client, make_video, monkeypatc
     r = client.get(f"/api/jobs/{jid}/result")
     assert r.status_code == 200
     assert "이지은" in unicodedata.normalize("NFC", r.json()["name"])
+
+
+# ── 재시작이 대기 중인 작업을 영원히 잠재우던 문제 ──────────────────────────
+#
+# 재시도·보류 대기는 프로세스 안의 타이머가 재우는 방식인데, 그 타이머는
+# 재시작하면 사라진다. 예약 시각만 남겨 두면 다시 큐에 넣어도 run() 이 "아직
+# 때가 아니다" 로 물러나고, 깨워 줄 타이머는 이제 없다.
+
+def test_restart_wakes_up_jobs_that_were_waiting(client, make_video, monkeypatch):
+    """S3 가 잠깐 흔들린 뒤 서버를 다시 띄우면 수백 건이 여기 걸린다."""
+    import time as _t
+    path, n, size = make_video(frames=4)
+    client.attach(size)
+    jid = job_id(submit(client, path))
+    wait(client, jid)
+
+    # 재시도를 기다리는 모양으로 만들어 둔다 — 디스크에만 남기고 메모리에서 뺀다.
+    j = jobsmod.JOBS[jid]
+    j.status, j.not_before, j.waiting = "queued", _t.time() + 3600, "retry"
+    j.finished = 0.0
+    jobsmod.save_job(j)
+    monkeypatch.setattr(jobsmod, "JOBS", {})
+
+    again = jobsmod.recover_orphans()
+    assert [x.id for x in again] == [jid]
+    back = jobsmod.JOBS[jid]
+    assert back.not_before == 0.0 and back.waiting == ""
+
+
+def test_a_job_uses_one_storage_from_start_to_finish(client, make_video,
+                                                     monkeypatch):
+    """**받은 곳과 올리는 곳이 달라지면 안 된다.**
+
+    처리 도중에 누가 화면에서 저장소를 바꾸면, 예전에는 A 에서 받아서 B 에
+    올렸다 — 오류 하나 없이 조용히. 비식별화한 결과물이 엉뚱한 버킷에 떨어지는
+    것은 이 서비스에서 제일 나쁜 결말이다.
+    """
+    from face_anonymizer.storage import s3 as s3mod
+    path, n, size = make_video(frames=6)
+    client.attach(size)
+    first = client.store
+
+    class Other:
+        """처리 도중에 갈아 끼워지는 다른 버킷."""
+        bucket = "somewhere-else"
+        root_prefix = output_prefix = ""
+
+        def output_key(self, key):
+            raise AssertionError("올릴 때 다른 저장소를 보면 안 된다")
+
+    jid = job_id(submit(client, path))
+    # 작업이 시작된 뒤에 갈아 끼운다.
+    monkeypatch.setattr(s3mod, "get_store", lambda: Other())
+    s = wait(client, jid, timeout=60)
+
+    assert s["status"] in ("done", "review"), s.get("error")
+    assert s["s3_output"] in first.client.uploaded
+
+
+def test_a_full_disk_does_not_turn_the_worker_into_a_sweeper(monkeypatch, tmp_path):
+    """디스크가 차면 워커가 작업마다 정리를 한 번씩 부른다.
+
+    900건이 큐에 앉아 있으면 900번 연속으로 돈다 — 첫 번째 말고는 회수할 것이
+    없는데도. 한 번 훑는 데 job.json 900개 읽기가 들어서 그동안 워커는 일을
+    못 하고, 목록·지표 API 도 같은 파일들을 두고 경합한다.
+    """
+    from face_anonymizer.service import jobs as jobsmod
+    monkeypatch.setattr(config, "JOBS_DIR", str(tmp_path))
+    monkeypatch.setattr(jobsmod, "_last_sweep", 0.0)
+    calls = []
+    monkeypatch.setattr(jobsmod, "sweep_temp", lambda: calls.append(1))
+
+    for _ in range(50):
+        jobsmod.sweep()
+    assert len(calls) == 1, "간격 안에서는 한 번만 돌아야 한다"
+
+    # 백그라운드 스레드는 자기 주기가 있으니 그건 항상 돈다.
+    jobsmod.sweep(force=True)
+    assert len(calls) == 2
+
+
+def test_the_progress_folder_list_does_not_hold_the_job_lock(tmp_path,
+                                                             monkeypatch):
+    """전역 락은 워커가 **프레임마다** 잡는다. 900건 제출이 그걸 900번 뺏으면
+    화면이 끊기고 진행률이 튄다. 폴더 목록은 작업 상태와 아무 상관이 없다."""
+    from face_anonymizer.service import jobs as jobsmod
+    monkeypatch.setattr(config, "JOBS_DIR", str(tmp_path))
+
+    with jobsmod.LOCK:                       # 워커가 들고 있는 상황을 흉내
+        jobsmod.track_prefix("v1/input/kbs/K_1.mp4")
+        assert "v1/input/kbs/" in jobsmod.tracked_prefixes()
+        jobsmod.untrack_prefix("v1/input/kbs/")
+    assert jobsmod.tracked_prefixes() == []

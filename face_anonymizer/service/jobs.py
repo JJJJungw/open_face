@@ -262,12 +262,31 @@ def sweep_temp():
     return removed
 
 
-def sweep():
+# 정리를 이보다 자주 돌리지 않는다. 회수할 것이 없는데 훑기만 하는 시간이
+# 워커가 일할 시간을 그대로 잡아먹기 때문이다.
+MIN_SWEEP_GAP = float(os.environ.get("FA_SWEEP_MIN_GAP", 20))
+
+_last_sweep = 0.0
+_sweep_lock = threading.Lock()
+
+
+def sweep(force=False):
     """TTL 지난 작업 정리.
 
     예전에는 새 작업이 들어올 때만 돌아서, 업로드가 끊기면 디스크가 영원히
     안 비워졌다. 지금은 백그라운드 스레드가 주기적으로 돈다.
+
+    **너무 자주 부르면 아무것도 못 하고 훑기만 한다.** 디스크가 차면 워커가
+    작업마다 이걸 한 번씩 부르는데, 900건이 큐에 앉아 있으면 900번 연속으로
+    돈다 — 첫 번째 말고는 회수할 것이 없는데도. 한 번 훑는 데 작업 폴더
+    나열과 job.json 900개 읽기가 들어서, 그동안 워커는 일을 못 하고 목록·지표
+    API 도 같은 파일들을 두고 경합한다. 그래서 최소 간격을 둔다.
     """
+    global _last_sweep
+    with _sweep_lock:
+        if not force and time.time() - _last_sweep < MIN_SWEEP_GAP:
+            return 0
+        _last_sweep = time.time()
     sweep_temp()
     if not config.JOB_TTL:
         return 0
@@ -297,7 +316,7 @@ def sweep_loop():
     while True:
         time.sleep(config.SWEEP_SEC)
         try:
-            sweep()
+            sweep(force=True)
         except Exception:                       # noqa: BLE001 — 청소가 서버를 죽이면 안 된다
             log.exception("정리 중 오류")
 
@@ -351,6 +370,13 @@ def recover_orphans():
             # 시도 횟수는 올리지 않는다. 재시작은 이 작업이 실패한 것이 아니다 —
             # 여기서 세면 배포를 몇 번 하는 것만으로 재시도가 소진된다.
             j.stage, j.done, j.total, j.overall = "", 0, 0, 0.0
+            # **예약 시각도 같이 지운다.** 재시도·보류 대기는 프로세스 안의
+            # 타이머가 재우는 방식인데, 그 타이머는 재시작하면 사라진다.
+            # 시각만 남겨 두면 다시 큐에 넣어도 run() 이 "아직 때가 아니다" 로
+            # 물러나고, 다시 깨워 줄 타이머는 이제 없다 — 그 작업은 queued 인
+            # 채로 영원히 남는다. S3 가 잠깐 흔들린 뒤 서버를 다시 띄우면
+            # 수백 건이 한꺼번에 그렇게 된다.
+            j.not_before, j.waiting = 0.0, ""
             with LOCK:
                 JOBS[j.id] = j
             save_job(j)
@@ -489,6 +515,13 @@ def tracked_prefixes():
     return [r for r in rows if isinstance(r, str)]
 
 
+# 진척률 폴더 목록은 **작업 상태와 아무 상관이 없다.** 그런데 전역 LOCK 을 파일
+# 읽기·쓰기 내내 붙들고 있었다. 그 락은 워커가 **프레임마다** 잡고 폴링이 한
+# 번에 여섯 번씩 잡는다 — 900건짜리 폴더를 제출하면 그 사이 900번을 뺏는다.
+# 화면이 끊기고 진행률이 튄다. 자기 잠금으로 옮긴다.
+_TRACK_LOCK = threading.Lock()
+
+
 def track_prefix(key_or_prefix):
     """제출한 폴더를 진척률 대상에 넣는다. 이미 있으면 맨 앞으로만 올린다.
 
@@ -501,7 +534,7 @@ def track_prefix(key_or_prefix):
         p = p.rsplit("/", 1)[0] + "/" if "/" in p else ""
     if not p:
         return
-    with LOCK:
+    with _TRACK_LOCK:
         rows = [r for r in tracked_prefixes() if r != p]
         rows.insert(0, p)
         del rows[64:]                 # 화면에 그릴 수 있는 만큼만
@@ -517,7 +550,7 @@ def track_prefix(key_or_prefix):
 
 def untrack_prefix(prefix):
     """진척률 목록에서 뺀다. 버킷은 건드리지 않는다."""
-    with LOCK:
+    with _TRACK_LOCK:
         rows = [r for r in tracked_prefixes() if r != prefix]
         try:
             tmp = _track_path() + ".tmp"

@@ -888,3 +888,41 @@ def test_decomposed_names_get_a_notice_not_a_failure(s3client):
     assert len(notes) == 1
     assert "1건" in notes[0] and "검색" in notes[0]
     assert server.name_notes(["v1/input/kbs/plain.mp4"]) == []
+
+
+def test_storage_cannot_be_swapped_under_a_running_job(s3client, monkeypatch):
+    """해제(DELETE)만 막고 변경(POST)을 열어 두면 같은 사고를 다른 문으로 낸다."""
+    from face_anonymizer.service import jobs as jobsmod
+    monkeypatch.setattr(jobsmod, "counts",
+                        lambda: {"running": 1, "queued": 3, "review": 0})
+
+    r = s3client.post("/api/storage", json={"provider": "s3",
+                                            "bucket": "another-bucket"})
+    assert r.status_code == 409 and r.json()["code"] == "storage_busy"
+    assert "진행 1건" in r.json()["detail"]
+
+
+def test_a_cancel_right_after_upload_still_records_where_it_went(s3client,
+                                                                 monkeypatch):
+    """업로드가 끝난 직후에 취소가 들어오면, 예전에는 결과물이 버킷에 있는데
+    그걸 가리키는 기록이 없었다. 그 파일은 아무도 못 찾고, 다시 제출하면
+    '이미 처리됨' 으로 거절된다 — 취소했다면서."""
+    from face_anonymizer.service import worker as workermod
+    store = s3client.store
+    seen = {}
+    real = store.upload
+
+    def upload_then_cancel(path, key, **kw):
+        real(path, key, **kw)
+        seen["key"] = key
+        j = workermod.jobs.find_job(seen["jid"])
+        j.cancel = True                       # 올린 직후에 취소가 들어왔다
+    monkeypatch.setattr(store, "upload", upload_then_cancel)
+
+    r = s3client.post("/api/jobs", json={"s3_keys": [KEY]})
+    seen["jid"] = r.json()["accepted"][0]["id"]
+    s = wait(s3client, seen["jid"], timeout=60)
+
+    assert s["status"] == "cancelled"
+    # 취소됐어도 **어디에 올라갔는지는 남아 있어야** 한다.
+    assert s["s3_output"] == seen["key"]
