@@ -4,6 +4,7 @@
 '무엇을 세는가' 를 여기서 못 박는다.
 """
 
+import pathlib
 import time
 
 
@@ -161,3 +162,75 @@ def test_snapshot_carries_the_stage_name(tmp_path, monkeypatch):
     snap = jobsmod.snapshot(j, 0)
     assert snap["stage"] == "detect"
     assert snap["stage_label"] == "얼굴 찾는 중"
+
+
+# ── 같아야 하는 것이 갈라지지 않게 (docs/issues/023) ─────────────────────────
+
+def test_metrics_does_not_lose_jobs_waiting_for_review():
+    """**검수 대기는 처리가 끝난 것이다.** 남은 것은 사람의 확인이다.
+
+    상태 목록을 metrics 가 따로 적어 두는 바람에 `review` 가 빠져 있었다.
+    그래서 검출 0건으로 검수에 걸린 영상이 처리량·평균에서 통째로 사라졌다 —
+    같은 화면의 `recent_stats()` 는 done+review 를 세므로 **두 평균이 서로
+    다른 모집단**을 쓰고 있었다.
+    """
+    from face_anonymizer.service import jobs as jobsmod
+    now = time.time()
+
+    def job(status, seconds=None):
+        return jobsmod.Job(id=status, name="a.mp4", params={}, workdir="",
+                           status=status, finished=now - 10,
+                           result={"seconds": seconds} if seconds else {})
+
+    m = metrics.queue_metrics([job("done", 10), job("review", 20)], now=now)
+
+    assert m["done"] == 1 and m["review"] == 1
+    assert m["throughput_1h"] == 2, "검수 대기가 처리량에서 빠졌다"
+    assert m["avg_seconds"] == 15, "검수 대기가 평균에서 빠졌다"
+
+
+def test_metrics_covers_every_status_there_is():
+    """상태를 하나 추가하면 여기도 따라와야 한다 — 손으로 적으면 안 따라온다."""
+    from face_anonymizer.service import jobs as jobsmod
+    src = (pathlib.Path(metrics.__file__)).read_text(encoding="utf-8")
+    assert "jobsmod.STATUSES" in src or "jobs.STATUSES" in src, (
+        "상태 목록을 metrics 안에 다시 적어 두면 언젠가 갈라진다")
+    assert len(jobsmod.STATUSES) == 6
+
+
+def test_every_thrown_stage_has_something_to_say():
+    """`stage="oom"` 을 던지는데 문구 표에 없어서 '알 수 없는 오류' 가 나갔다.
+
+    같은 상황을 API 경로는 "GPU 메모리가 부족합니다 / batch_size 나 imgsz 를
+    낮추면 통과할 수 있습니다" 라고 정확히 말한다. 014 가 판정을 통일했는데
+    문구 표만 안 따라온 것이다.
+    """
+    import re
+
+    from face_anonymizer import job_runner
+    src = pathlib.Path(job_runner.__file__).read_text(encoding="utf-8")
+    thrown = set(re.findall(r'stage="([a-z]+)"', src)) - {""}
+    missing = thrown - set(job_runner.STAGE_FACE)
+    assert not missing, f"문구가 없는 단계: {sorted(missing)}"
+
+
+def test_a_failure_says_whether_it_was_temporary(tmp_path, monkeypatch):
+    """저널 문장은 `transient` 만 보고 '일시적/영구' 를 찍는다.
+
+    API 경로가 이 필드를 안 실어서 **모든 실패가 '영구' 로 기록**됐다.
+    재시도를 세 번 다 쓰고 죽은 일시적 오류까지.
+    """
+    import re
+
+    from face_anonymizer import events
+    from face_anonymizer.service import worker
+
+    src = pathlib.Path(worker.__file__).read_text(encoding="utf-8")
+    at = src.find('events.emit("job.failed"')
+    assert at >= 0, "job.failed 를 내는 곳을 못 찾았다"
+    # 괄호가 여러 겹이라 정규식으로 끝을 찾지 않는다 — 그 호출이 끝나는
+    # 지점(다음 빈 줄이나 다음 문장)까지의 창을 그대로 본다.
+    call = src[at:src.find("\n\n", at)]
+    assert "transient" in call, "실패에 transient 가 빠졌다"
+    # 목록·CSV 에서 사유별로 셀 수 있어야 한다.
+    assert "code" in events.LIST_FIELDS

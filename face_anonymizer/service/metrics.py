@@ -23,8 +23,12 @@ import subprocess
 import time
 
 from ..storage import naming
+from . import config, jobs as jobsmod
 
-VIDEO_EXT = {".mp4", ".mov", ".mkv", ".avi", ".webm", ".m4v"}
+# **확장자 목록은 config 한 곳이다.** 여기 따로 적어 두면 `.ts` 하나를 추가할 때
+# 제출은 통과하는데(server 가 config 를 본다) 진척률 분모에서는 빠져서, 폴더가
+# 100% 를 넘거나 "다 끝났다" 고 거짓 보고한다.
+VIDEO_EXT = config.VIDEO_EXT
 NVIDIA_TIMEOUT = 4
 
 
@@ -41,13 +45,19 @@ def queue_metrics(jobs, now=None):
     싸고 정확하기 때문이다.
     """
     now = now or time.time()
-    by = {k: [j for j in jobs if j.status == k]
-          for k in ("queued", "running", "done", "failed", "cancelled")}
+    # **상태 목록을 여기 다시 적지 않는다.** 손으로 적어 뒀더니 `review` 가
+    # 빠져서, 검수 대기로 빠진 완료 건이 처리량·평균 집계에서 통째로 사라졌다.
+    # jobs.recent_stats() 는 done+review 를 같이 세므로 **같은 화면의 두 평균이
+    # 서로 다른 모집단**을 쓰고 있었다.
+    by = {k: [j for j in jobs if j.status == k] for k in jobsmod.STATUSES}
+
+    # 처리가 끝난 것 — 검수 대기도 **처리는 끝났다.** 남은 것은 사람의 확인이다.
+    ended = by["done"] + by["review"]
 
     waits = [now - j.created for j in by["queued"]]
-    finished_recent = [j for j in by["done"] if j.finished > now - 3600]
+    finished_recent = [j for j in ended if j.finished > now - 3600]
     failed_recent = [j for j in by["failed"] if j.finished > now - 3600]
-    durations = [j.result.get("seconds") for j in by["done"]
+    durations = [j.result.get("seconds") for j in ended
                  if isinstance(j.result, dict) and j.result.get("seconds")]
     retried = [j for j in jobs if j.attempts > 1]
 
@@ -57,6 +67,7 @@ def queue_metrics(jobs, now=None):
         # 깊이만으로는 "빨리 빠지는 100건"과 "멈춰 있는 3건"을 구분 못 한다.
         "latency": round(max(waits)) if waits else 0,
         "done": len(by["done"]),
+        "review": len(by["review"]),
         "failed": len(by["failed"]),
         "cancelled": len(by["cancelled"]),
         "throughput_1h": len(finished_recent),

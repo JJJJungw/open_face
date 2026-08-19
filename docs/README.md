@@ -61,6 +61,7 @@
 | [020](issues/020-polling-died-and-cost-too-much.md) | 폴링이 한 번 실패하면 영원히 멈췄고, 도는 동안에는 너무 비쌌다 | **해결됨** |
 | [021](issues/021-a-filename-was-code.md) | 파일 이름이 코드였다 — 아포스트로피 하나로 선택이 안 됐다 | **해결됨** |
 | [022](issues/022-every-ending-had-to-clean-up.md) | 끝나는 길이 넷인데 정리는 둘에만 있었다 (취소·재시작이 영상을 흘렸다) | **해결됨** |
+| [023](issues/023-things-that-had-to-agree-and-didnt.md) | 같아야 하는 것들이 또 갈라졌다 — 검수 누락 · OOM 문구 · 실패가 전부 '영구' | **해결됨** |
 
 ## 보안
 

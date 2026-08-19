@@ -256,9 +256,14 @@ def fail_or_retry(j, exc, permanent):
     else:
         log.error("작업 %s 실패 [%s] (%d회 시도, %s): %s", j.id, info["code"],
                   j.attempts, "재시도 불가" if permanent else "재시도 소진", msg)
+        # **transient 를 반드시 싣는다.** 저널 문장 생성기는 이 필드만 보고
+        # "일시적/영구" 를 찍는데(events.decorate), 여기서 빠뜨리면 재시도를
+        # 세 번 다 쓰고 죽은 일시적 오류까지 전부 "영구" 로 기록된다. MSA 경로는
+        # 싣고 있었다 — 같은 이벤트가 경로마다 다른 필드를 갖고 있던 것이다.
         events.emit("job.failed", job=j.id, name=j.name, batch=j.batch or None,
                     code=info["code"], stage=info.get("stage") or None,
-                    policy=info.get("policy"), attempts=j.attempts, detail=msg)
+                    policy=info.get("policy"), attempts=j.attempts, detail=msg,
+                    transient=bool(info.get("retryable")))
         # 원인 파악에 필요한 것은 사유·단계·시도 횟수이고 전부 job.json 에
         # 있다. S3 작업이면 원본도 버킷에 그대로다 — 200MB 를 붙들고 있을
         # 이유가 없다. 직접 업로드는 원본이 여기밖에 없어 남긴다.

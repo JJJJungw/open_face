@@ -175,6 +175,9 @@ LIST_FIELDS = ("at", "ts", "mode", "event", "job", "name", "batch",
                "seconds", "pipeline_s", "elapsed_s", "frames", "detection_rate",
                "review_needed", "transcoded", "source_codec",
                "stage", "stage_label",
+               # code/policy 가 없으면 목록과 CSV 만 보고는 **무엇 때문에
+               # 실패했는지 셀 수 없다.** 사유는 detail 산문에만 있었다.
+               "code", "policy",
                "transient", "detail", "attempts", "percent", "eta_s",
                "action", "note", "codes", "done", "failed", "avg_elapsed_s",
                "cold_s", "queue")

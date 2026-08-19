@@ -787,6 +787,10 @@ EXPORT_COLUMNS = (
     ("시도", lambda r: r.get("attempts", "")),
     ("검수 필요", lambda r: "예" if r.get("review_needed") else ""),
     ("단계", lambda r: r.get("stage") or ""),
+    # 실패를 코드별로 세려면 칸이 있어야 한다. 산문(요약)만으로는 집계가 안 된다.
+    ("오류 코드", lambda r: r.get("code") or ""),
+    ("재시도", lambda r: "일시적" if r.get("transient") else
+     ("영구" if r.get("code") else "")),
     ("작업 id", lambda r: r.get("job") or ""),
 )
 
