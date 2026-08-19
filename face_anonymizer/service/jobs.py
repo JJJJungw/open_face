@@ -215,20 +215,67 @@ def find_job(jid):
     return j if j is not None else load_job_file(jid)
 
 
-def all_jobs():
-    """메모리 + 디스크 병합 목록. 메모리 쪽이 우선(진행 중인 값이 최신)."""
-    with LOCK:
-        merged = dict(JOBS)
+# 디스크에만 있는 작업들의 캐시. **끝난 작업은 변하지 않는다.**
+#
+# 화면은 0.7초마다 목록을 묻고, 그때마다 `job.json` 을 전부 읽고 있었다. 5건을
+# 그리려고 900개를 읽는다는 뜻이다. 실측: 100건 6.5ms · 900건 47ms · 3000건 169ms.
+# 0.7초 주기면 900건에서 코어의 7% 를 계속 먹고, 그걸 렌더 중인 워커와 GIL 을
+# 나눠 쓴다. 탭을 두 개 열면 두 배다.
+#
+# **메모리에 있는 것은 캐시하지 않는다.** 지금 돌고 있는 작업의 진행률은 매번
+# 최신이어야 한다. 캐시하는 것은 디스크에만 있는 것들 — 끝났거나 실패했거나
+# 취소된 것들이고, 그건 우리가 지우기 전까지 안 바뀐다.
+#
+# 이게 안전한 이유는 **작업 폴더의 주인이 하나이기 때문**이다(017). 다른
+# 프로세스가 몰래 작업을 만들어 넣을 수 없으므로, 우리가 모르는 변화는 없다.
+_disk_cache = {}
+_disk_cache_at = 0.0
+# **어느 폴더를 훑어 만든 캐시인지 같이 들고 있는다.** 폴더가 바뀌면 캐시는
+# 남의 것이다. 운영에서는 안 바뀌지만 테스트는 매번 바꾸고, 그때 옛 작업이
+# 새 폴더의 목록에 섞여 들어온다 — 실제로 네 개가 그렇게 깨졌다.
+_disk_cache_dir = None
+_disk_cache_lock = threading.Lock()
+DISK_CACHE_SEC = float(os.environ.get("FA_LIST_CACHE_SEC", 5))
+
+
+def invalidate_disk_cache():
+    """작업을 지웠거나 새로 만들었을 때. 다음 조회가 디스크를 다시 본다."""
+    global _disk_cache_at
+    with _disk_cache_lock:
+        _disk_cache_at = 0.0
+
+
+def _disk_only_jobs(known):
+    """디스크에만 있는 작업들. ``known`` 은 메모리에 이미 있는 id 집합."""
+    global _disk_cache, _disk_cache_at, _disk_cache_dir
+    now = time.time()
+    where = config.JOBS_DIR
+    with _disk_cache_lock:
+        usable = (_disk_cache_dir == where
+                  and now - _disk_cache_at < DISK_CACHE_SEC)
+        if usable:
+            return {k: v for k, v in _disk_cache.items() if k not in known}
+    found = {}
     try:
         entries = os.listdir(config.JOBS_DIR)
     except OSError:
         entries = []
     for jid in entries:
-        if jid in merged or not os.path.isdir(os.path.join(config.JOBS_DIR, jid)):
+        if not os.path.isdir(os.path.join(config.JOBS_DIR, jid)):
             continue
         j = load_job_file(jid)
         if j is not None:
-            merged[jid] = j
+            found[jid] = j
+    with _disk_cache_lock:
+        _disk_cache, _disk_cache_at, _disk_cache_dir = found, now, where
+    return {k: v for k, v in found.items() if k not in known}
+
+
+def all_jobs():
+    """메모리 + 디스크 병합 목록. 메모리 쪽이 우선(진행 중인 값이 최신)."""
+    with LOCK:
+        merged = dict(JOBS)
+    merged.update(_disk_only_jobs(set(merged)))
     return sorted(merged.values(), key=lambda x: -x.created)
 
 
@@ -400,6 +447,8 @@ def sweep(force=False):
                 JOBS.pop(j.id, None)
             removed += 1
     if removed:
+        # 지운 것이 캐시에 남아 있으면 목록에 유령으로 뜬다.
+        invalidate_disk_cache()
         log.info("TTL 정리: %d건", removed)
     return removed
 

@@ -1065,3 +1065,4 @@ def delete_job(jid: str):
     with jobs.LOCK:
         jobs.JOBS.pop(jid, None)
     shutil.rmtree(j.workdir or os.path.join(config.JOBS_DIR, jid), ignore_errors=True)
+    jobs.invalidate_disk_cache()      # 안 지우면 5초 동안 유령으로 남는다

@@ -2164,3 +2164,77 @@ def test_no_lock_is_a_warning_not_a_dead_server(tmp_path, monkeypatch, caplog):
     with caplog.at_level("WARNING"):
         assert jobsmod.claim_jobs_dir(str(tmp_path / ".server.lock")) is False
     assert any("하나만" in r.message for r in caplog.records)
+
+
+# ── 폴링 비용 (docs/issues/020) ──────────────────────────────────────────────
+
+def test_finished_jobs_are_not_reread_on_every_poll(client, tmp_path, monkeypatch):
+    """**5건을 그리려고 job.json 900개를 읽고 있었다.**
+
+    화면은 0.7초마다 목록을 묻는다. 실측 47ms(900건) · 169ms(3000건) 이라
+    코어의 7% 를 계속 먹고, 그걸 렌더 중인 워커와 GIL 로 나눠 쓴다.
+
+    끝난 작업은 우리가 지우기 전까지 안 바뀌므로 다시 읽을 이유가 없다.
+    """
+    monkeypatch.setattr(config, "JOBS_DIR", str(tmp_path))
+    monkeypatch.setattr(jobsmod, "JOBS", {})
+    jobsmod.invalidate_disk_cache()
+    for i in range(5):
+        orphan(f"d{i}", "done")
+
+    reads = []
+    real = jobsmod.load_job_file
+    monkeypatch.setattr(jobsmod, "load_job_file",
+                        lambda jid: (reads.append(jid), real(jid))[1])
+
+    assert len(jobsmod.all_jobs()) == 5
+    first = len(reads)
+    assert first == 5, "첫 조회는 디스크를 읽어야 한다"
+
+    for _ in range(10):
+        assert len(jobsmod.all_jobs()) == 5
+    assert len(reads) == first, "캐시가 있는데도 매번 다시 읽었다"
+
+
+def test_a_running_job_is_never_served_from_cache(client, tmp_path, monkeypatch):
+    """**진행률은 캐시하면 안 된다.** 화면이 멈춘 숫자를 보게 된다."""
+    monkeypatch.setattr(config, "JOBS_DIR", str(tmp_path))
+    monkeypatch.setattr(jobsmod, "JOBS", {})
+    jobsmod.invalidate_disk_cache()
+    j = jobsmod.Job(id="r1", name="a.mp4", params={}, workdir=str(tmp_path / "r1"),
+                    status="running", done=10, total=100)
+    with jobsmod.LOCK:
+        jobsmod.JOBS["r1"] = j
+    jobsmod.all_jobs()                       # 캐시를 채운다
+
+    j.done = 90                              # 워커가 진행률을 올린다
+    got = {x.id: x for x in jobsmod.all_jobs()}["r1"]
+    assert got.done == 90, "메모리에 있는 작업이 캐시로 덮였다"
+
+
+def test_deleting_a_job_does_not_leave_a_ghost(client, tmp_path, monkeypatch):
+    """지운 작업이 캐시에 남아 목록에 계속 뜨면 안 된다."""
+    monkeypatch.setattr(config, "JOBS_DIR", str(tmp_path))
+    monkeypatch.setattr(jobsmod, "JOBS", {})
+    jobsmod.invalidate_disk_cache()
+    orphan("g1", "done")
+    assert [x.id for x in jobsmod.all_jobs()] == ["g1"]
+
+    import shutil as _sh
+    _sh.rmtree(tmp_path / "g1")
+    jobsmod.invalidate_disk_cache()
+    assert jobsmod.all_jobs() == []
+
+
+def test_the_cache_does_not_follow_a_changed_jobs_dir(client, tmp_path, monkeypatch):
+    """폴더가 바뀌면 캐시는 남의 것이다 — 옛 작업이 새 목록에 섞여 든다."""
+    monkeypatch.setattr(jobsmod, "JOBS", {})
+    a, b = tmp_path / "a", tmp_path / "b"
+    a.mkdir(); b.mkdir()
+    monkeypatch.setattr(config, "JOBS_DIR", str(a))
+    jobsmod.invalidate_disk_cache()
+    orphan("in_a", "done")
+    assert [x.id for x in jobsmod.all_jobs()] == ["in_a"]
+
+    monkeypatch.setattr(config, "JOBS_DIR", str(b))
+    assert jobsmod.all_jobs() == [], "옛 폴더의 작업이 따라왔다"

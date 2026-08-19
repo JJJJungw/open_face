@@ -58,6 +58,7 @@
 | [017](issues/017-one-server-per-jobs-dir.md) | 문서는 `--workers N` 을 지원한다고 했고 코드는 아니었다 | **해결됨** |
 | [018](issues/018-the-delivery-band-was-not-enforced.md) | 납품 비트레이트가 규격을 안 지켰다 — 그리고 지키게 했더니 이번엔 올려 담았다 | **해결됨** |
 | [019](issues/019-the-cli-was-dead-and-tests-said-fine.md) | CLI 가 죽어 있었는데 테스트 412개는 통과하고 있었다 | **해결됨** |
+| [020](issues/020-polling-died-and-cost-too-much.md) | 폴링이 한 번 실패하면 영원히 멈췄고, 도는 동안에는 너무 비쌌다 | **해결됨** |
 
 ## 보안
 

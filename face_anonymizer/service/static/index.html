@@ -2091,6 +2091,23 @@ async function cancel(id) {
   poll();
 }
 
+// **다음 회차 예약은 finally 에서 한다.** 예전에는 함수 맨 끝에 있었는데,
+// 중간에 `return` 하는 길이 셋이라 그중 하나만 타면 폴링이 통째로 멎었다.
+// 요청이 실패하면(서버 재시작·순간 네트워크 끊김) 화면이 그 자리에서 얼어붙고
+// 새로고침 전까지 안 돌아왔다. 바로 아래 safeCard 주석이 걱정하던 그 상황인데
+// 정작 이 길은 막혀 있지 않았다.
+let pollFails = 0;
+
+function nextPollDelay(busy) {
+  // 서버가 죽어 있는 동안 초당 세 번씩 두드릴 이유가 없다. 실패가 이어지면
+  // 간격을 늘리되 30초에서 멈춘다 — 서버가 돌아왔을 때 화면이 30초 안에는
+  // 살아나야 사람이 '멈췄다' 고 읽지 않는다.
+  if (pollFails) return Math.min(1000 * Math.pow(2, pollFails - 1), 30000);
+  // **안 보이는 탭은 묻지 않는다.** 운영자는 탭을 켜 둔 채 다른 일을 한다.
+  if (document.hidden) return 15000;
+  return busy ? 700 : 5000;
+}
+
 async function poll() {
   // 거르는 일은 서버가 한다. 잘라 받은 다음 여기서 거르면, 완료가 100건 창
   // 밖에 있을 때 '완료' 탭이 비어 보인다(docs/issues/006).
@@ -2104,45 +2121,65 @@ async function poll() {
     fetch('/api/jobs?' + q).then(r => r.json()).catch(() => null),
     fetch('/api/status').then(r => r.json()).catch(() => null),
   ]);
-  // 그 사이 탭이나 쪽이 바뀌었다 — 새 폴링이 그린다
-  if (asked !== filter || askedPage !== page) return;
-  LAST_STATUS = st;
-  paintDev(st);
-  hud(jobs || [], st);
-  // 팝오버가 열려 있으면 그 안의 모델 상태도 같이 따라간다.
-  if (!$('#connpop').hidden && STORAGE) $('#connpop').innerHTML = connPanel(STORAGE);
-  if (!jobs) return;
-  kpis(jobs, st);
-  navCounts(st);
-  renderCancelAll(st);
-  const c = counts(st);
-  if (st && st.page_size) pageSize = st.page_size;
-  // 큐 화면은 대기 탭에서만. 탭마다 화면이 실제로 달라야 사이드바가 의미를 갖는다.
-  $('#card-queue').hidden = !(filter === 'queued' && view === 'jobs');
-  if (!$('#card-queue').hidden) renderQueue(st);
-  $('#jobstitle').textContent = FILTER_TEXT[filter] || '전체 기록';
-  const total = navCount(st, filter);
-  // 큐가 빠지면서 총 건수가 줄면 지금 쪽이 빈 쪽이 된다. 뒤로 물러난다.
-  const lastPage = Math.max(0, Math.ceil(total / pageSize) - 1);
-  if (page > lastPage) return goPage(lastPage);
-  $('#jobcnt').textContent = `${total}건`;
-  // 제목이 이미 필터 이름이라 '대기만 ×' 칩은 같은 말을 두 번 하는 셈이다.
-  // 되돌아가는 길은 사이드바에 있다.
-  $('#jobfilter').hidden = true;
-  const html = jobs.length
-    ? jobs.map(safeCard).join('') + pager(total)
-    : `<div class="empty">${filter === 'active' ? '처리할 작업이 없습니다'
-        : filter ? `${FILTER_TEXT[filter]} 상태인 작업이 없습니다` : '작업이 없습니다'}</div>`;
-  // 바뀐 게 없으면 다시 그리지 않는다. 0.7초마다 통째로 갈아 끼우면 쪽 번호를
-  // 입력하는 중에 포커스가 날아가고, 카드를 읽는 동안 화면이 미세하게 떨린다.
-  if (html !== lastJobsHtml) { $('#jobs').innerHTML = html; lastJobsHtml = html; }
-  if (view === 'overview' && Date.now() - lastOverview > 10000) loadOverview();
-  // 목록을 걸러 보고 있어도 큐가 돌면 빠르게 폴링해야 한다.
-  const busy = (c.running || 0) + (c.queued || 0) > 0
-    || jobs.some(j => j.status === 'running' || j.status === 'queued');
-  clearTimeout(timer);
-  timer = setTimeout(poll, busy ? 700 : 5000);
+  // 둘 다 못 받았으면 서버가 안 뜬 것이다. 하나라도 오면 실패 수를 되돌린다.
+  pollFails = (jobs === null && st === null) ? pollFails + 1 : 0;
+
+  // **다음 회차를 누가 걸 것인가.** 아래에는 다른 폴링 체인에 넘기고 나가는
+  // 길이 둘 있다(탭이 바뀐 경우, 빈 쪽에서 물러나는 경우). 그때 여기서도 걸면
+  // 체인이 둘이 되어 요청이 두 배로 나간다.
+  let busy = false, handedOff = false;
+  try {
+    // 그 사이 탭이나 쪽이 바뀌었다 — 새 폴링이 그린다
+    if (asked !== filter || askedPage !== page) { handedOff = true; return; }
+    LAST_STATUS = st;
+    paintDev(st);
+    hud(jobs || [], st);
+    // 팝오버가 열려 있으면 그 안의 모델 상태도 같이 따라간다.
+    if (!$('#connpop').hidden && STORAGE) $('#connpop').innerHTML = connPanel(STORAGE);
+    if (!jobs) return;
+    kpis(jobs, st);
+    navCounts(st);
+    renderCancelAll(st);
+    const c = counts(st);
+    if (st && st.page_size) pageSize = st.page_size;
+    // 큐 화면은 대기 탭에서만. 탭마다 화면이 실제로 달라야 사이드바가 의미를 갖는다.
+    $('#card-queue').hidden = !(filter === 'queued' && view === 'jobs');
+    if (!$('#card-queue').hidden) renderQueue(st);
+    $('#jobstitle').textContent = FILTER_TEXT[filter] || '전체 기록';
+    const total = navCount(st, filter);
+    // 큐가 빠지면서 총 건수가 줄면 지금 쪽이 빈 쪽이 된다. 뒤로 물러난다.
+    const lastPage = Math.max(0, Math.ceil(total / pageSize) - 1);
+    if (page > lastPage) { handedOff = true; return goPage(lastPage); }
+    $('#jobcnt').textContent = `${total}건`;
+    // 제목이 이미 필터 이름이라 '대기만 ×' 칩은 같은 말을 두 번 하는 셈이다.
+    // 되돌아가는 길은 사이드바에 있다.
+    $('#jobfilter').hidden = true;
+    const html = jobs.length
+      ? jobs.map(safeCard).join('') + pager(total)
+      : `<div class="empty">${filter === 'active' ? '처리할 작업이 없습니다'
+          : filter ? `${FILTER_TEXT[filter]} 상태인 작업이 없습니다` : '작업이 없습니다'}</div>`;
+    // 바뀐 게 없으면 다시 그리지 않는다. 0.7초마다 통째로 갈아 끼우면 쪽 번호를
+    // 입력하는 중에 포커스가 날아가고, 카드를 읽는 동안 화면이 미세하게 떨린다.
+    if (html !== lastJobsHtml) { $('#jobs').innerHTML = html; lastJobsHtml = html; }
+    if (view === 'overview' && Date.now() - lastOverview > 10000) loadOverview();
+    // 목록을 걸러 보고 있어도 큐가 돌면 빠르게 폴링해야 한다.
+    busy = (c.running || 0) + (c.queued || 0) > 0
+      || jobs.some(j => j.status === 'running' || j.status === 'queued');
+  } finally {
+    // **어느 길로 나가든 여기를 지난다.** 그리기 중에 예외가 나도 다음 회차는
+    // 걸린다 — 화면이 한 번 잘못 그려지는 것과 영원히 멈추는 것은 다른 일이다.
+    if (!handedOff) {
+      clearTimeout(timer);
+      timer = setTimeout(poll, nextPollDelay(busy));
+    }
+  }
 }
+
+// 탭이 다시 보이면 기다리지 않고 바로 한 번 묻는다 — 돌아왔을 때 옛 화면이
+// 15초 동안 남아 있으면 그것도 멈춘 것으로 보인다.
+document.addEventListener('visibilitychange', () => {
+  if (!document.hidden) poll();
+});
 
 // 배지는 폴링에서 그린다(paintDev). 예전에는 기동 때 딱 한 번 그려서,
 // 모델이 다 올라온 뒤에도 '모델 준비 중' 이 영원히 붙어 있었다.
