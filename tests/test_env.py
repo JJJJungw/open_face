@@ -98,8 +98,12 @@ def test_the_shipped_example_actually_parses():
     with open(os.path.join(root, ".env.example"), encoding="utf-8") as fh:
         got = env.parse(fh.read())
     assert got["FA_OUTPUT_HEIGHT"] == "720"
-    assert got["FA_TARGET_BITRATE"] == "3500k"
-    assert got["FA_MAX_BITRATE"] == "4000k"
+    # **납품 대역(3000~3500 kbps)을 못 박는 자리는 여기 하나다.** 다른 테스트는
+    # params.DEFAULTS 를 보고, 여기만 실제 숫자를 본다 — 대역이 바뀌면 계약이
+    # 바뀐 것이므로 테스트 하나가 반드시 걸려야 한다.
+    assert got["FA_TARGET_BITRATE"] == "3200k"      # CBR 목표 = 대역 한가운데
+    assert got["FA_MIN_BITRATE"] == "3000k"
+    assert got["FA_MAX_BITRATE"] == "3500k"
     assert got["FA_S3_ROOT_PREFIX"] == "v1/input/"
     for key, value in got.items():
         assert "#" not in value, f"{key} 에 주석이 섞였다: {value!r}"

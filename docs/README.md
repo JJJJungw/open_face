@@ -56,6 +56,7 @@
 | [015](issues/015-a-mac-filename-broke-the-pipeline.md) | 맥에서 올린 파일 이름 하나가 처리를 통째로 막았다 (NFD) | **해결됨** |
 | [016](issues/016-things-that-only-break-at-scale.md) | 900건을 돌려야 드러나는 것들 — 재시작·저장소 교체·취소 경합 | **일부 해결** |
 | [017](issues/017-one-server-per-jobs-dir.md) | 문서는 `--workers N` 을 지원한다고 했고 코드는 아니었다 | **해결됨** |
+| [018](issues/018-the-delivery-band-was-not-enforced.md) | 납품 비트레이트 대역이 강제된 적이 없었다 (단순한 컷 342 kbps) | **해결됨** |
 
 ## 보안
 

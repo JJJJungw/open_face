@@ -273,3 +273,105 @@ def test_parse_bitrate_accepts_the_usual_spellings(value, expect):
 ])
 def test_scale_filter_uses_the_short_side_and_never_upscales(w, h, target, expect):
     assert P.scale_filter(w, h, target) == expect
+
+
+# ── 납품 비트레이트 대역 (3000~3500 kbps) ────────────────────────────────────
+#
+# **이 대역은 지켜지는 게 아니라 강제해야 하는 값이다.** 예전 설정
+# (`-b:v 3500k -maxrate 4000k`)은 양쪽으로 다 샜다 — 단순한 장면 14 kbps,
+# 복잡한 장면 3915 kbps. 그런데 그걸 잡아 줄 테스트가 하나도 없었다.
+# parse_bitrate 의 철자와 bitrate_cap 의 산수만 봤지, **실제로 인코딩된 파일을
+# 재는 테스트가 없었다.** 900건을 납품한 뒤 검수에서 알게 될 종류의 구멍이다.
+
+def test_rate_args_turns_on_stuffing_per_encoder():
+    """`-b:v` 는 목표 평균이지 하한이 아니다. 스터핑을 켜야 아래끝이 선다.
+
+    x264 는 `-minrate` 를 무시한다(실측: minrate 3200k 인데 14 kbps). 인코더마다
+    켜는 방법이 달라서, 그걸 여기서 못 박는다.
+    """
+    x264 = P.rate_args("libx264", "3200k", "3500k")
+    assert "nal-hrd=cbr" in x264, "x264 는 HRD 스터핑이 없으면 아래끝이 샌다"
+    # CBR 이려면 목표·최대·버퍼가 한 값이어야 한다.
+    assert x264[x264.index("-b:v") + 1] == x264[x264.index("-maxrate") + 1]
+    assert x264[x264.index("-bufsize") + 1] == x264[x264.index("-b:v") + 1]
+
+    nv = P.rate_args("h264_nvenc", "3200k", "3500k")
+    assert nv[:2] == ["-rc", "cbr"], "NVENC 는 -rc cbr 로 켠다"
+    # 후보 표의 `-rc vbr` 뒤에 붙어야 이긴다 — 순서가 뒤집히면 조용히 VBR 이다.
+    assert "vbr" not in nv
+
+    assert P.rate_args("libx264", "") is None      # 목표가 없으면 CRF 경로로
+
+
+def test_rate_args_still_caps_an_unknown_encoder():
+    """모르는 인코더라도 상한은 건다. 아래끝은 결과물 검사가 잡는다."""
+    other = P.rate_args("libx265", "3200k", "3500k")
+    assert other[other.index("-maxrate") + 1] == str(3_500_000)
+
+
+@ffmpeg_only
+def test_delivered_file_lands_inside_the_band(tmp_path, make_video):
+    """**실제로 인코딩한 파일을 잰다.** 이게 없어서 대역이 새는 걸 몰랐다.
+
+    정지에 가까운 합성 클립은 인코더가 제일 아끼고 싶어 하는 입력이라, 아래끝이
+    무너지면 여기서 먼저 드러난다.
+    """
+    src, n, size = make_video(frames=90)           # 3초 — CBR 수렴에 충분
+    out = tmp_path / "out.mp4"
+    res = run(src, out, size)
+
+    got = P.file_bitrate(str(out))
+    assert got is not None, "결과물 비트레이트를 재지 못했다"
+    assert 3_000_000 <= got <= 3_500_000, f"납품 대역 밖이다: {got // 1000} kbps"
+    assert not [w for w in res.warnings if str(w).startswith("bitrate")]
+
+
+@ffmpeg_only
+def test_out_of_band_output_asks_for_a_human(tmp_path, make_video):
+    """대역을 벗어나면 조용히 나가지 않고 검수로 넘어가야 한다."""
+    from face_anonymizer import job_runner
+
+    src, n, size = make_video(frames=90)
+    out = tmp_path / "out.mp4"
+    # 결과물은 3200k 로 나오는데 대역을 말도 안 되게 좁혀 위반을 만든다.
+    res = run(src, out, size, min_bitrate="9000k", max_bitrate="9500k")
+
+    bad = [w for w in res.warnings if str(w).startswith("bitrate-out-of-band")]
+    assert bad, f"대역을 벗어났는데 경고가 없다: {res.warnings}"
+    # 경고로 끝나면 안 된다 — 사람이 봐야 한다.
+    codes = [r["code"] for r in job_runner.review_of(res.warnings)]
+    assert "bitrate-out-of-band" in codes
+
+
+@ffmpeg_only
+def test_a_clip_too_short_to_measure_is_not_flagged(tmp_path, make_video):
+    """CBR 은 버퍼가 차야 목표에 붙는다. 0.7초짜리를 미달로 부르면 오탐이다."""
+    src, n, size = make_video(frames=20)           # 0.7초
+    res = run(src, tmp_path / "out.mp4", size)
+    assert not [w for w in res.warnings if str(w).startswith("bitrate")]
+
+
+def test_file_bitrate_reads_by_name_not_by_position(tmp_path):
+    """ffprobe 는 요청한 순서가 아니라 자기 고정 순서로 찍는다.
+
+    duration 이 bit_rate 보다 먼저 나오는데 값만 받아 자리로 세면 **길이를
+    비트레이트로 읽는다.** 실제로 그렇게 틀렸다.
+    """
+    seen = {}
+
+    class P_:
+        returncode = 0
+        stdout = "duration=10.000000\nbit_rate=3200000\n"
+
+    def fake_run(cmd, timeout=None):
+        seen["cmd"] = cmd
+        return P_()
+
+    import face_anonymizer.core.pipeline as mod
+    old = mod._run
+    mod._run = fake_run
+    try:
+        assert mod.file_bitrate("x.mp4") == 3_200_000
+    finally:
+        mod._run = old
+    assert "default=nw=1" in seen["cmd"], "키를 지우면 자리로 세게 된다"

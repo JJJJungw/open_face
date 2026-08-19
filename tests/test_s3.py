@@ -839,11 +839,40 @@ def test_connection_check_separates_read_from_write(s3client):
     assert "쓰지 못" in r.json()["detail"]
 
 
-def test_storage_info_never_leaks_credentials(s3client):
-    """우리는 키를 애초에 안 들고 있다. 응답에도 없어야 한다."""
+def test_storage_info_never_leaks_credentials(s3client, monkeypatch):
+    """우리는 키를 애초에 안 들고 있다. 응답에도 없어야 한다.
+
+    **문자열을 훑어 "access_key" 를 찾으면 안 된다.** 응답은 열쇠가 어디서
+    오는지를 사람에게 말해 주고("환경 변수 (AWS_ACCESS_KEY_ID)"), 그 설명에
+    그 낱말이 들어간다. 실제로 이 테스트는 환경 변수로 자격 증명이 잡힌
+    기계에서 **그 설명 때문에** 실패했다 — 새는 것은 하나도 없는데.
+
+    봐야 하는 것은 낱말이 아니라 **값**이다. 그리고 값을 담을 만한 자리(필드
+    이름)가 응답 구조에 아예 없어야 한다.
+    """
+    monkeypatch.setattr(s3mod, "_creds",
+                        {"aws_access_key_id": "AKIA_SECRET_VALUE_XYZ",
+                         "aws_secret_access_key": "s3cr3t_value_xyz"})
     d = s3client.get("/api/storage").json()
-    body = str(d).lower()
-    assert "secret" not in body and "access_key" not in body
+
+    body = str(d)
+    for value in ("AKIA_SECRET_VALUE_XYZ", "s3cr3t_value_xyz"):
+        assert value not in body, "열쇠 값이 응답에 실렸다"
+
+    def fields(node):
+        """응답 구조 전체의 필드 이름."""
+        if isinstance(node, dict):
+            for k, v in node.items():
+                yield k
+                yield from fields(v)
+        elif isinstance(node, list):
+            for v in node:
+                yield from fields(v)
+
+    named = {f.lower() for f in fields(d)}
+    for bad in ("access_key", "secret_key", "aws_access_key_id",
+                "aws_secret_access_key", "session_token", "password"):
+        assert bad not in named, f"열쇠를 담을 자리가 있다: {bad}"
     assert d["current"]["bucket"] and d["first_run"] is False
     # 어디서 왔는지는 말하되 값은 절대 안 말한다.
     assert "source" in d["credentials"]

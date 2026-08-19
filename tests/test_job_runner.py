@@ -186,7 +186,7 @@ def test_unspecified_fields_get_the_service_defaults_not_the_signature_ones():
     p = job_runner.target_params({"label": "deid-720p"})
     assert p["batch_size"] == params.BATCH_SIZE != 1
     assert p["imgsz"] == params.IMGSZ != 960
-    assert p["bitrate"] == "3500k"
+    assert p["bitrate"] == params.DEFAULTS["bitrate"]
 
 
 def test_both_entry_points_share_one_set_of_defaults():
@@ -211,8 +211,10 @@ def test_crf_target_turns_off_our_bitrate_policy():
     # bitrate 가 살아 있으면 파이프라인은 비트레이트 쪽 정책을 쓴다.
     p = job_runner.target_params({"bitrate": "3500k", "max_bitrate": "4000k"})
     assert p["bitrate"] == "3500k" and p["max_bitrate"] == "4000k"
-    # 아무 말도 안 하면 납품 기준(720p / 3500k)이 그대로 적용된다
-    assert job_runner.target_params({})["bitrate"] == "3500k"
+    # 아무 말도 안 하면 납품 기준이 그대로 적용된다. 실제 숫자를 못 박는 자리는
+    # tests/test_env.py 하나뿐이라 여기서는 단일 출처를 본다.
+    from face_anonymizer import params
+    assert job_runner.target_params({})["bitrate"] == params.DEFAULTS["bitrate"]
 
 
 def test_transfer_classifies_status_codes():

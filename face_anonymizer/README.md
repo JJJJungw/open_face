@@ -67,8 +67,18 @@ msa/      우리가 소비자다 — 남의 큐에서 일을 꺼내 온다
 | `linger` | `5` | `FA_LINGER` |
 | `interp` / `keep_audio` | on | `FA_INTERP` / `FA_KEEP_AUDIO` |
 | `height` | `720` (0=원본) | `FA_OUTPUT_HEIGHT` |
-| `bitrate` / `max_bitrate` | `3500k` / `4000k` | `FA_TARGET_BITRATE` / `FA_MAX_BITRATE` |
+| `bitrate` (CBR 목표) | `3200k` | `FA_TARGET_BITRATE` |
+| `min_bitrate` / `max_bitrate` | `3000k` / `3500k` | `FA_MIN_BITRATE` / `FA_MAX_BITRATE` |
 | `crf` / `bitrate_ratio` | `23` / `1.0` | `FA_CRF` / `FA_BITRATE_RATIO` |
+
+**납품 대역(3000~3500 kbps)은 강제한다.** `-b:v` 는 목표 평균이지 하한이 아니라서,
+정지에 가까운 컷은 인코더가 얼마든지 아낀다 — 예전 설정에서 실측 14 kbps 가
+나왔다. 그래서 목표를 대역 한가운데 두고 CBR 스터핑을 켠다. 단순한 장면에 비트를
+낭비하는 것은 의도한 대가다. 아껴서 미달하는 것이 곧 반려이기 때문이다.
+그러고도 결과물을 다시 재서 대역을 벗어나면 검수로 넘긴다
+([issues/018](../docs/issues/018-the-delivery-band-was-not-enforced.md)).
+
+`min_bitrate` 는 잡이 못 바꾼다. 대역은 계약이지 요청마다 고를 수 있는 값이 아니다.
 
 `batch_size` 는 **배포마다 정해야 한다.** 32 는 개발기(L40S 45GB) 기준이고
 T4(16GB)나 L4(24GB)에서 32/1280 은 OOM 이 날 수 있다. 그래도 모자라면 잡 러너가

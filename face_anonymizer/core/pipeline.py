@@ -104,17 +104,40 @@ DEFAULT_BITRATE_RATIO = float(os.environ.get("FA_BITRATE_RATIO", "1.0"))
 # 아니라 값을 바꾸는 것으로 끝나야 한다.
 #
 #   FA_OUTPUT_HEIGHT   짧은 변 기준 상한 (0 이면 원본 유지)
-#   FA_TARGET_BITRATE  목표 비트레이트 ("3500k" / "3500000" / "" 이면 안 씀)
-#   FA_MAX_BITRATE     순간 최대 (기본 4000k = 납품 대역 위끝)
+#   FA_TARGET_BITRATE  목표 비트레이트 ("3200k" / "3200000" / "" 이면 안 씀)
+#   FA_MIN_BITRATE     납품 대역 아래끝 (검사용)
+#   FA_MAX_BITRATE     납품 대역 위끝   (검사용)
+#   FA_AUDIO_BITRATE   오디오 고정 비트레이트
 #
 # 목표 비트레이트를 주면 **CRF 와 원본 비례 상한은 쓰지 않는다.** 둘은 반대
 # 방향의 정책이다 — CRF 는 화질을 정해 두고 용량이 따라오게 하고, 목표
 # 비트레이트는 용량을 정해 두고 화질이 따라오게 한다. 같이 걸면 서로 싸운다.
 DEFAULT_HEIGHT = int(os.environ.get("FA_OUTPUT_HEIGHT", "720") or 0)
-DEFAULT_TARGET_BITRATE = os.environ.get("FA_TARGET_BITRATE", "3500k")
-# 납품 대역이 3000~4000 kbps 다. 평균은 목표(3500k)로 가고 순간 최대는 대역
-# 위끝(4000k)에서 자른다 — 기본 여유(1.15배)로 두면 4025k 라 대역을 살짝 넘는다.
-DEFAULT_MAX_BITRATE = os.environ.get("FA_MAX_BITRATE", "4000k")
+
+# **납품 대역은 3000~3500 kbps 이고, 이건 지켜지는 게 아니라 강제해야 하는 값이다.**
+#
+# 예전 설정(`-b:v 3500k -maxrate 4000k`)은 양쪽으로 다 샜다. 실측:
+#
+#     단순한 장면(정지에 가까운 컷)   →    14 kbps   ← 대역 한참 아래
+#     복잡한 장면(노이즈)            →  3915 kbps   ← 대역 위
+#
+# 아래끝이 새는 이유가 중요하다. `-b:v` 는 **목표 평균이지 하한이 아니다.**
+# 인코더는 단순한 장면에서 "이 정도면 충분하다" 고 판단해 얼마든지 적게 쓴다.
+# `-minrate` 를 걸어도 x264 는 무시한다(실측: minrate 3200k 인데 14 kbps).
+# 실제로 채우게 하려면 **HRD 스터핑**을 켜야 한다 — 그게 `nal-hrd=cbr` 이고,
+# NVENC 에서는 `-rc cbr` 이다. 그때 비로소 정지 화면도 3173 kbps 로 나온다.
+#
+# 그래서 목표를 대역 한가운데(3200k)에 두고 CBR 로 못 박는다. 오디오(128k)와
+# 컨테이너 오버헤드가 얹혀도 파일 전체가 대역 안에 남는다 — 실측 3284~3330 kbps.
+# 대역 위끝을 목표로 잡으면 오디오를 더하는 순간 넘어간다.
+#
+# **단순한 장면에 비트를 낭비하는 것은 의도한 대가다.** 납품 기준이 "이 대역
+# 안" 이면 아껴서 미달하는 것이 곧 반려다.
+DEFAULT_TARGET_BITRATE = os.environ.get("FA_TARGET_BITRATE", "3200k")
+DEFAULT_MIN_BITRATE = os.environ.get("FA_MIN_BITRATE", "3000k")
+DEFAULT_MAX_BITRATE = os.environ.get("FA_MAX_BITRATE", "3500k")
+# 오디오를 ffmpeg 이 알아서 고르게 두면 대역 계산이 매번 달라진다. 고정한다.
+DEFAULT_AUDIO_BITRATE = os.environ.get("FA_AUDIO_BITRATE", "128k")
 MAXRATE_HEADROOM = 1.15
 
 CODEC_EFFICIENCY = {
@@ -389,11 +412,9 @@ class FramePipe:
         if vf:
             cmd += ["-vf", vf]
         cmd += ["-c:v", encoder, *extra, "-pix_fmt", "yuv420p"]
-        target = parse_bitrate(bitrate)
-        if target:
-            top = parse_bitrate(max_bitrate) or int(target * MAXRATE_HEADROOM)
-            cmd += ["-b:v", str(target), "-maxrate", str(top),
-                    "-bufsize", str(top * 2)]
+        rc = rate_args(encoder, bitrate, max_bitrate)
+        if rc:
+            cmd += rc
         elif crf is not None:
             cmd += [qflag, str(crf)]
         cmd += ["-movflags", "+faststart", path]
@@ -481,6 +502,98 @@ def video_size(path, timeout=FFMPEG_TIMEOUT):
         return w, h
     except ValueError:
         return 0, 0
+
+
+def rate_args(encoder, target, max_bitrate=None):
+    """납품 대역을 **강제하는** rate control 인자. 목표가 없으면 None.
+
+    평균만 맞추는 것으로는 대역을 못 지킨다(위 상수 주석 참고). 인코더마다
+    스터핑을 켜는 방법이 달라서 여기서 갈라 준다.
+
+    - **libx264** — `nal-hrd=cbr`. VBV 가 CBR 이려면 목표·최대·버퍼가 모두
+      같아야 해서 셋을 한 값으로 준다.
+    - **NVENC** — `-rc cbr`. 이 인자는 후보 표의 `-rc vbr` **뒤에** 붙는다.
+      ffmpeg 은 같은 옵션이 두 번 오면 뒤엣것을 쓰므로 이게 이긴다.
+
+    ``max_bitrate`` 는 CBR 로 갈 수 없을 때(모르는 인코더)만 쓰인다 — 그때는
+    상한만이라도 걸어 둔다.
+    """
+    t = parse_bitrate(target)
+    if not t:
+        return None
+    if "nvenc" in (encoder or ""):
+        return ["-rc", "cbr", "-b:v", str(t), "-maxrate", str(t),
+                "-bufsize", str(t)]
+    if (encoder or "") == "libx264":
+        return ["-b:v", str(t), "-minrate", str(t), "-maxrate", str(t),
+                "-bufsize", str(t), "-x264opts", "nal-hrd=cbr"]
+    # 모르는 인코더. 스터핑을 어떻게 켜는지 모르므로 아래끝은 보장하지 못한다 —
+    # 그건 결과물 검사(check_delivery_bitrate)가 잡아서 사람에게 넘긴다.
+    top = parse_bitrate(max_bitrate) or int(t * MAXRATE_HEADROOM)
+    return ["-b:v", str(t), "-maxrate", str(top), "-bufsize", str(top * 2)]
+
+
+def file_bitrate(path, timeout=FFMPEG_TIMEOUT):
+    """**파일 전체** 평균 비트레이트(bps). 못 재면 None.
+
+    비디오 스트림만 재면 안 된다. 납품 검수는 파일을 열어서 재고, 거기에는
+    오디오와 컨테이너 오버헤드가 같이 들어간다 — 스트림이 대역 안이어도 파일이
+    넘어갈 수 있다.
+    """
+    # **키를 남겨 두고 이름으로 읽는다.** ffprobe 는 요청한 순서가 아니라 자기
+    # 고정 순서로 찍는다(duration 이 bit_rate 보다 먼저 나온다). 값만 받아
+    # 자리로 세면 길이를 비트레이트로 읽는다 — 실제로 그렇게 틀렸다.
+    p = _run(["ffprobe", "-v", "error", "-show_entries", "format=bit_rate,duration",
+              "-of", "default=nw=1", path], timeout)
+    if p is None or p.returncode != 0:
+        return None
+    got = {}
+    for line in p.stdout.splitlines():
+        k, _, v = line.partition("=")
+        got[k.strip()] = v.strip()
+    try:                                    # 컨테이너가 적어 둔 값이 있으면 그것
+        return int(float(got.get("bit_rate", "")))
+    except ValueError:
+        pass
+    try:                                    # 없으면(N/A) 크기 ÷ 길이로 직접 잰다
+        dur = float(got.get("duration", ""))
+        return int(os.path.getsize(path) * 8 / dur) if dur > 0 else None
+    except (ValueError, OSError):
+        return None
+
+
+# CBR 은 버퍼가 차야 목표에 붙는다. 이보다 짧은 결과물은 **아직 수렴 전**이라
+# 평균이 낮게 나온다 — 실측: 0.7초 2743 kbps / 2초 3050 / 5초 3142 / 15초 3183.
+# 인코딩이 잘못된 게 아니라 이 길이에서는 잴 수 없는 것이다. 납품 클립은 분
+# 단위라 실물에서는 걸리지 않는다.
+BITRATE_MEASURABLE_SEC = 2.0
+
+
+def check_delivery_bitrate(path, low, high, timeout=FFMPEG_TIMEOUT):
+    """결과물이 납품 대역 안인지. 벗어나면 경고 코드를 담아 돌려준다.
+
+    **강제했다고 검사를 생략하지 않는다.** 인코더가 바뀌거나(NVENC↔libx264)
+    누가 대역을 환경 변수로 바꿔 두면 강제가 빗나갈 수 있다. 그때 조용히 나가면
+    900건을 납품한 뒤 검수에서 알게 된다.
+    """
+    lo, hi = parse_bitrate(low), parse_bitrate(high)
+    if not lo and not hi:
+        return []
+    dur = video_duration(path, timeout)
+    if dur is not None and dur < BITRATE_MEASURABLE_SEC:
+        # 넘어가는 것을 기록은 남긴다. 조용히 건너뛰면 "검사했는데 통과" 와
+        # 구분이 안 된다.
+        log.info("결과물이 %.1f초라 비트레이트 대역 검사를 건너뛴다 "
+                 "(CBR 수렴 전이라 낮게 잡힌다)", dur)
+        return []
+    got = file_bitrate(path, timeout)
+    if got is None:
+        return ["bitrate-unverified"]
+    if lo and got < lo:
+        return [f"bitrate-out-of-band: {got // 1000}k < {lo // 1000}k"]
+    if hi and got > hi:
+        return [f"bitrate-out-of-band: {got // 1000}k > {hi // 1000}k"]
+    return []
 
 
 def scale_filter(width, height, target):
@@ -579,7 +692,8 @@ def finalize_output(noaudio, original, output, keep_audio=True,
                     expected_frames=None, crf=DEFAULT_CRF,
                     bitrate_ratio=DEFAULT_BITRATE_RATIO, height=DEFAULT_HEIGHT,
                     bitrate=DEFAULT_TARGET_BITRATE,
-                    max_bitrate=DEFAULT_MAX_BITRATE, timeout=FFMPEG_TIMEOUT,
+                    max_bitrate=DEFAULT_MAX_BITRATE,
+                    audio_bitrate=DEFAULT_AUDIO_BITRATE, timeout=FFMPEG_TIMEOUT,
                     video_ready=False):
     """중간 산출물을 최종 결과물로 만든다 — H.264 재인코딩 + 오디오 합성 + 검증.
 
@@ -625,7 +739,8 @@ def finalize_output(noaudio, original, output, keep_audio=True,
     # 인코딩하지 않는다.** 예전에는 mp4v 중간 파일을 만들고 여기서 H.264 로 다시
     # 떴다 — 같은 영상을 두 번 인코딩하는 구조였다(docs/issues/010).
     if video_ready:
-        return _mux_only(noaudio, original, output, status, expected_frames, timeout)
+        return _mux_only(noaudio, original, output, status, expected_frames,
+                         audio_bitrate, timeout)
 
     enc = pick_encoder()
     if enc is None:
@@ -636,7 +751,11 @@ def finalize_output(noaudio, original, output, keep_audio=True,
     out_tmp = root + ".final" + (ext or ".mp4")
     cmd = ["ffmpeg", "-y", "-v", "error", "-i", noaudio]
     if status == "ok":
-        cmd += ["-i", original, "-map", "0:v:0", "-map", "1:a:0", "-c:a", "aac"]
+        # 오디오 비트레이트를 고정한다. ffmpeg 이 알아서 고르게 두면 채널 수와
+        # 원본에 따라 값이 달라지고, 그러면 파일 전체가 납품 대역 안인지를
+        # 미리 계산할 수 없다.
+        cmd += ["-i", original, "-map", "0:v:0", "-map", "1:a:0",
+                "-c:a", "aac", "-b:a", str(parse_bitrate(audio_bitrate) or 128_000)]
     else:
         cmd += ["-map", "0:v:0", "-an"]
     # -shortest 없음(위 1번). +faststart 는 moov 를 앞으로 옮겨 부분 다운로드
@@ -650,13 +769,12 @@ def finalize_output(noaudio, original, output, keep_audio=True,
 
     cmd += ["-c:v", encoder, *extra, "-pix_fmt", "yuv420p"]
 
-    target = parse_bitrate(bitrate)
-    if target:
+    rc = rate_args(encoder, bitrate, max_bitrate)
+    if rc:
         # 용량을 정해 두는 정책. CRF 도 원본 비례 상한도 걸지 않는다.
-        top = parse_bitrate(max_bitrate) or int(target * MAXRATE_HEADROOM)
-        cmd += ["-b:v", str(target), "-maxrate", str(top),
-                "-bufsize", str(top * 2)]
-        log.info("목표 비트레이트 %.2f Mbps (최대 %.2f)", target / 1e6, top / 1e6)
+        cmd += rc
+        log.info("납품 비트레이트 %.2f Mbps 고정 (%s)",
+                 (parse_bitrate(bitrate) or 0) / 1e6, encoder)
     else:
         cmd += [qflag, str(crf)]
         cap = bitrate_cap(original, bitrate_ratio, timeout)
@@ -694,7 +812,7 @@ def finalize_output(noaudio, original, output, keep_audio=True,
 
 
 def _mux_only(noaudio, original, output, status, expected_frames,
-              timeout=FFMPEG_TIMEOUT):
+              audio_bitrate=DEFAULT_AUDIO_BITRATE, timeout=FFMPEG_TIMEOUT):
     """영상은 그대로 복사하고 오디오만 붙인다 — **재인코딩 없음.**
 
     렌더가 ffmpeg 로 바로 써서 이미 최종 사양이면, 여기서 할 일은 오디오를 얹는
@@ -708,7 +826,11 @@ def _mux_only(noaudio, original, output, status, expected_frames,
     out_tmp = root + ".final" + (ext or ".mp4")
     cmd = ["ffmpeg", "-y", "-v", "error", "-i", noaudio]
     if status == "ok":
-        cmd += ["-i", original, "-map", "0:v:0", "-map", "1:a:0", "-c:a", "aac"]
+        # 오디오 비트레이트를 고정한다. ffmpeg 이 알아서 고르게 두면 채널 수와
+        # 원본에 따라 값이 달라지고, 그러면 파일 전체가 납품 대역 안인지를
+        # 미리 계산할 수 없다.
+        cmd += ["-i", original, "-map", "0:v:0", "-map", "1:a:0",
+                "-c:a", "aac", "-b:a", str(parse_bitrate(audio_bitrate) or 128_000)]
     else:
         cmd += ["-map", "0:v:0", "-an"]
     cmd += ["-c:v", "copy", "-movflags", "+faststart", out_tmp]
@@ -833,7 +955,7 @@ class VideoAnonymizer:
                 allow_partial=False, min_detection_rate=None, crf=DEFAULT_CRF,
                 bitrate_ratio=DEFAULT_BITRATE_RATIO, height=DEFAULT_HEIGHT,
                 bitrate=DEFAULT_TARGET_BITRATE, max_bitrate=DEFAULT_MAX_BITRATE,
-                rotate=0):
+                min_bitrate=DEFAULT_MIN_BITRATE, rotate=0):
         """영상 한 편을 익명화하고 Result 를 돌려준다.
 
         progress : callable(stage, done, total) | None
@@ -863,7 +985,8 @@ class VideoAnonymizer:
                 batch_size=batch_size, keep_audio=keep_audio, progress=progress,
                 allow_partial=allow_partial, min_detection_rate=min_detection_rate,
                 crf=crf, bitrate_ratio=bitrate_ratio, height=height,
-                bitrate=bitrate, max_bitrate=max_bitrate, rotate=rotate,
+                bitrate=bitrate, max_bitrate=max_bitrate,
+                min_bitrate=min_bitrate, rotate=rotate,
                 t_start=t_start))
         finally:
             shutil.rmtree(tmpdir, ignore_errors=True)
@@ -880,6 +1003,7 @@ class VideoAnonymizer:
             info_kw["bitrate_ratio"], info_kw["rotate"], info_kw["t_start"])
         height = info_kw["height"]
         bitrate, max_bitrate = info_kw["bitrate"], info_kw["max_bitrate"]
+        min_bitrate = info_kw["min_bitrate"]
 
         # OpenCV 는 ffmpeg 본체보다 코덱 지원이 좁다. AV1 은 파일을 열기는 열면서
         # 한 프레임도 못 뽑는다. 읽을 수 있는 형태로 만들어 놓고 시작한다.
@@ -973,6 +1097,12 @@ class VideoAnonymizer:
                         total=time.perf_counter() - t_start)
         if status not in ("ok", "no-audio", "disabled"):
             warnings.append(f"audio: {status}")
+        # **강제했어도 결과물을 재 본다.** 인코더가 갈리거나(NVENC↔libx264)
+        # 대역을 환경 변수로 바꿔 두면 강제가 빗나갈 수 있고, 그때 조용히
+        # 나가면 900건을 납품한 뒤 검수에서 알게 된다.
+        if bitrate:
+            warnings += check_delivery_bitrate(output_path, min_bitrate,
+                                               max_bitrate)
         result = Result(output=output_path, frames=rendered, raw_boxes=raw_boxes,
                         filled_boxes=filled, method=method, audio=status,
                         video=info, timing=timing,

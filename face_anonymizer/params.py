@@ -27,6 +27,7 @@ from .core.pipeline import (
     DEFAULT_CRF,
     DEFAULT_HEIGHT,
     DEFAULT_MAX_BITRATE,
+    DEFAULT_MIN_BITRATE,
     DEFAULT_TARGET_BITRATE,
 )
 
@@ -66,6 +67,9 @@ DEFAULTS = {
     "height": DEFAULT_HEIGHT,
     "bitrate": DEFAULT_TARGET_BITRATE,
     "max_bitrate": DEFAULT_MAX_BITRATE,
+    # 납품 대역 아래끝. 결과물을 재서 대조하는 값이라 잡이 못 바꾼다 —
+    # 대역은 계약이지 요청마다 고를 수 있는 것이 아니다.
+    "min_bitrate": DEFAULT_MIN_BITRATE,
 }
 
 # 잡 페이로드가 정할 수 있는 것들. 여기 없는 키는 잡이 못 바꾼다 — 임의의
