@@ -13,7 +13,6 @@ import pytest
 from conftest import FakeDetector, face_rect, region_is_obscured, read_frames
 
 pytest.importorskip("fastapi", reason="pip install -r requirements-serve.txt")
-pytest.importorskip("multipart", reason="pip install -r requirements-serve.txt")
 pytest.importorskip("httpx", reason="pip install -r requirements-dev.txt")
 
 from fastapi.testclient import TestClient           # noqa: E402
@@ -21,6 +20,8 @@ from fastapi.testclient import TestClient           # noqa: E402
 from face_anonymizer import VideoAnonymizer                # noqa: E402
 from face_anonymizer.service import jobs as jobsmod        # noqa: E402
 from face_anonymizer.service import config, server, worker          # noqa: E402
+from face_anonymizer.storage import s3 as s3mod                     # noqa: E402
+from test_s3 import NOW, FakeS3Client                               # noqa: E402
 
 
 @pytest.fixture
@@ -39,8 +40,16 @@ def client(tmp_path, monkeypatch):
         monkeypatch.setattr(worker, "_anonymizer", anon)
         return anon
 
+    # **제출은 버킷 경유가 전부다.** 예전에는 테스트가 multipart 업로드로
+    # 파이프라인을 돌렸는데, 그 경로는 화면에 버튼조차 없던 API 전용 길이라
+    # 걷어냈다. 테스트도 실제로 쓰는 길과 같은 길로 들어가는 편이 낫다.
+    store = s3mod.S3Store(bucket="test-bucket", client=FakeS3Client(),
+                          output_prefix="v1/results/face/", root_prefix="")
+    monkeypatch.setattr(s3mod, "get_store", lambda: store)
+
     c = TestClient(server.app)
     c.attach = attach
+    c.store = store
     return c
 
 
@@ -56,10 +65,29 @@ def wait(c, jid, timeout=30.0):
     raise AssertionError(f"작업이 {timeout}s 안에 끝나지 않았다")
 
 
-def submit(c, path, **form):
+def _native(v):
+    """폼으로 보내던 문자열을 JSON 이 쓰는 타입으로. 호출부는 그대로 둔다."""
+    if not isinstance(v, str):
+        return v
+    if v.lower() in ("true", "false"):
+        return v.lower() == "true"
+    for cast in (int, float):
+        try:
+            return cast(v)
+        except ValueError:
+            pass
+    return v
+
+
+def submit(c, path, name="clip.mp4", **params):
+    """영상을 가짜 버킷에 넣고 그 키로 제출한다."""
+    key = "in/" + name
     with open(path, "rb") as f:
-        return c.post("/api/jobs",
-                      files={"file": ("clip.mp4", f, "video/mp4")}, data=form)
+        c.store.client.objects[key] = (f.read(), NOW)
+    body = {"s3_keys": [key]}
+    if params:
+        body["params"] = {k: _native(v) for k, v in params.items()}
+    return c.post("/api/jobs", json=body)
 
 
 def job_id(response):
@@ -97,12 +125,6 @@ def test_rejects_bad_input(client, files, data):
     assert r.json()["code"]
 
 
-def test_bad_upload_leaves_no_workdir(client, tmp_path):
-    """거절된 업로드가 작업 디렉터리를 남기면 디스크가 조용히 찬다."""
-    client.post("/api/jobs", files={"file": ("a.mp4", b"")})
-    jobs = tmp_path / "jobs"
-    assert not jobs.exists() or not list(jobs.iterdir())
-
 
 def test_imgsz_is_range_clamped(client, make_video):
     """서버는 범위만 본다. stride 배수 맞추기는 검출기 몫이다(규칙을 두 벌 두지 않는다)."""
@@ -113,8 +135,11 @@ def test_imgsz_is_range_clamped(client, make_video):
     wait(client, jid)
 
 
-def test_full_lifecycle_and_no_leak(client, tmp_path, make_video):
-    """업로드 → 처리 → 다운로드 → 삭제. 검출기가 놓친 프레임도 가려져야 한다."""
+def test_full_lifecycle_and_no_leak(client, tmp_path, make_video, monkeypatch):
+    """제출 → 처리 → 결과 확인 → 삭제. 검출기가 놓친 프레임도 가려져야 한다."""
+    # 결과물을 읽어 봐야 하므로 로컬 사본을 남긴다. 평소에는 버킷에 올린 뒤
+    # 지운다 — 대량으로 돌릴 때 디스크가 차기 때문이다(docs/issues/001).
+    monkeypatch.setattr(config, "KEEP_LOCAL", True)
     path, n, size = make_video(frames=30)
     client.attach(size, miss_frames={7, 8})
 
@@ -286,17 +311,6 @@ def test_sweep_removes_expired_jobs(client, tmp_path, make_video, monkeypatch):
     assert not (tmp_path / "jobs" / jid).exists()
     assert client.get(f"/api/jobs/{jid}").status_code == 404
 
-
-def test_missing_output_reports_410_not_500(client, tmp_path, make_video):
-    """보관 기간이 지나 파일만 사라진 경우를 구분해서 알린다."""
-    path, n, size = make_video(frames=10)
-    client.attach(size)
-    jid = job_id(submit(client, path))
-    wait(client, jid)
-
-    os.remove(jobsmod.JOBS[jid].output)
-    # 버킷 사본도 없으니 정말 없는 것이다 — 500 이 아니라 410 이어야 한다.
-    assert client.get(f"/api/jobs/{jid}/result").status_code == 410
 
 
 @pytest.mark.parametrize("bad", ["../etc", "..", "a/b", ".hidden"])
@@ -632,9 +646,7 @@ def test_submit_without_any_parameter(client, make_video):
     path, n, size = make_video(frames=6)
     client.attach(size)
 
-    with open(path, "rb") as f:
-        r = client.post("/api/jobs", files={"file": ("clip.mp4", f, "video/mp4")})
-    jid = job_id(r)
+    jid = job_id(submit(client, path))
 
     assert jobsmod.JOBS[jid].params == server.JOB_DEFAULTS
     assert wait(client, jid)["status"] == "done"
@@ -680,7 +692,8 @@ from face_anonymizer.service import errors            # noqa: E402
 
 def test_errors_are_problem_json(client):
     client.attach((320, 240))
-    r = client.post("/api/jobs", data={"s3_key": "x.mp4", "conf": "1.5"})
+    r = client.post("/api/jobs", json={"s3_keys": ["x.mp4"],
+                                      "params": {"conf": 1.5}})
 
     assert r.headers["content-type"].startswith("application/problem+json")
     b = r.json()
@@ -692,8 +705,8 @@ def test_errors_are_problem_json(client):
 
 def test_error_carries_actionable_fields(client):
     client.attach((320, 240))
-    b = client.post("/api/jobs", data={"s3_key": "x.mp4",
-                                       "method": "nope"}).json()
+    b = client.post("/api/jobs", json={"s3_keys": ["x.mp4"],
+                                      "params": {"method": "nope"}}).json()
     assert b["code"] == "invalid_input"
     assert b["field"] == "method"
     assert "mosaic" in b["allowed"]
@@ -712,15 +725,12 @@ def test_retryable_errors_carry_retry_after(client, make_video, monkeypatch):
     assert r.headers.get("Retry-After")
 
 
-def test_missing_and_conflicting_input_are_distinct(client, make_video):
+def test_missing_input_says_so(client):
+    """입력이 없으면 그렇게 말한다 — 빈 202 를 주면 아무 일도 안 일어난 것처럼 보인다."""
     client.attach((320, 240))
-    assert client.post("/api/jobs", data={}).json()["code"] == "missing_input"
-
-    src, n, size = make_video(name="x.mp4", frames=4)
-    with open(src, "rb") as f:
-        b = client.post("/api/jobs", files={"file": ("x.mp4", f, "video/mp4")},
-                        data={"s3_key": "a.mp4"}).json()
-    assert b["code"] == "conflicting_input"
+    assert client.post("/api/jobs", json={}).json()["code"] == "missing_input"
+    assert client.post("/api/jobs", json={"s3_keys": []}).json()["code"] \
+        == "missing_input"
 
 
 def test_problem_catalog_is_published(client):
@@ -835,18 +845,6 @@ def test_failed_jobs_survive_sweep(client, make_video, monkeypatch):
 
 
 # ── 로컬 디스크 정리 (docs/issues/001) ──────────────────────────────────────
-
-def test_direct_upload_keeps_its_local_copy(client, make_video):
-    """S3 를 안 쓰는 업로드는 로컬이 유일한 사본이다. 지우면 결과가 사라진다."""
-    path, n, size = make_video(frames=6)
-    client.attach(size)
-    jid = job_id(submit(client, path))
-    s = wait(client, jid)
-
-    assert s["status"] == "done"
-    left = sorted(os.listdir(jobsmod.JOBS[jid].workdir))
-    assert left != ["job.json"], "업로드분까지 지우면 안 된다"
-    assert os.path.exists(jobsmod.JOBS[jid].output)
 
 
 def test_sweep_removes_temp_dirs_left_by_a_killed_process(client, tmp_path, monkeypatch):
@@ -1943,3 +1941,35 @@ def test_the_same_oom_message_gets_the_same_code_on_both_paths():
     # 배치를 1까지 낮춰도 안 될 때 던지는 것도 같은 코드여야 한다.
     e = job_runner.JobError("배치 1 까지 낮췄습니다", transient=True, stage="oom")
     assert errors.classify(e).code == "gpu_out_of_memory"
+
+
+# ── 이름이 길거나 자모로 분리된 경우 ────────────────────────────────────────
+#
+# 맥에서 올린 한글 이름은 자모가 분리된 형태(NFD)로 저장된다. 화면에는 짧아
+# 보이는데 UTF-8 로는 세 배라, 로컬 파일 이름으로 쓰면 ext4 한계 255바이트를
+# 넘어 처리가 통째로 실패했다. 실제로 겪었다.
+
+def test_local_files_do_not_borrow_the_users_name(client, make_video, monkeypatch):
+    """로컬 파일 이름은 **우리 사정**이다. 남이 지은 이름을 쓸 이유가 없다."""
+    import unicodedata
+    long_kr = unicodedata.normalize(
+        "NFD", "EP12-13 광일이 명장면 좋은 어른이 옆에만 있었더라면 달라졌을 이지은")
+    assert len(long_kr.encode()) > 150            # 눈에는 짧은데 실제로는 길다
+
+    path, n, size = make_video(frames=6)
+    client.attach(size)
+    # 키의 파일명만 긴 이름으로 — 실제로 겪은 모양 그대로다.
+    jid = job_id(submit(client, path, name=long_kr + ".mp4"))
+    s = wait(client, jid, timeout=60)
+    assert s["status"] in ("done", "review"), s.get("error")
+
+    # 작업 폴더에는 짧은 이름만 있다.
+    import os
+    from face_anonymizer.service import config as cfg
+    files = os.listdir(os.path.join(cfg.JOBS_DIR, jid))
+    for f in files:
+        assert len(f.encode()) < 60, f
+    # 그래도 사용자에게 보이는 이름은 원래 이름 그대로다.
+    r = client.get(f"/api/jobs/{jid}/result")
+    assert r.status_code == 200
+    assert "이지은" in unicodedata.normalize("NFC", r.json()["name"])

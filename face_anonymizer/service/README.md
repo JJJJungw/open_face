@@ -13,7 +13,7 @@ uvicorn face_anonymizer.service.server:app --host 127.0.0.1 --port 8000
 ```
 POST /api/jobs
    │
-   ├─① 무엇이 왔는지 판별      업로드 파일 / s3_keys / s3_prefix
+   ├─① 무엇이 왔는지 판별      s3_keys / s3_prefix
    ├─② 파라미터 확정           기본값 위에 보낸 것만 덮고 검증
    ├─③ 폴더 펼치기             프리픽스 → 영상 키 목록
    ├─④ 중복 제거               폴더와 낱개가 겹치면 한 번만
@@ -37,15 +37,16 @@ POST /api/jobs
 그만큼 늘어난다.
 
 ```
-multipart/form-data   file=@clip.mp4            업로드 한 건
-application/json      {"s3_keys": [...]}        고른 파일들
-application/json      {"s3_prefix": "kbs/"}     폴더 하나
-application/json      {"s3_prefix": ["kbs/","mbc/"]}   폴더 여럿
+{"s3_keys": [...]}                  고른 파일들
+{"s3_prefix": "kbs/"}               폴더 하나
+{"s3_prefix": ["kbs/","mbc/"]}      폴더 여럿
 ```
 
 파일과 폴더는 **같이** 보낼 수 있다. 화면에서 파일 두 개와 폴더 하나를 한꺼번에
-체크하는 게 자연스럽기 때문이다. 업로드만 S3 선택과 배타적이다 — 올라오는
-바이트와 버킷의 키는 아예 다른 경로다.
+체크하는 게 자연스럽기 때문이다.
+
+**입력은 버킷에 있는 것뿐이다.** multipart 로 직접 올리는 길도 있었는데 화면에
+버튼조차 없는 API 전용 경로였다. 걷어낸 이유는 docs/issues/015 에 있다.
 
 ### ② 파라미터 확정 — `resolve_params()`
 
@@ -154,8 +155,8 @@ S3 작업은 결과를 버킷에 올린 뒤 **로컬 사본을 바로 지운다.
 디스크가 먼저 찬다. 최종 실패한 작업도 `job.json` 만 남긴다 — 원인 파악에 쓰는
 것은 사유·단계·시도 횟수뿐이다.
 
-**직접 업로드분은 지우지 않는다.** 로컬이 유일한 사본이라 지우면 결과가
-사라진다. `FA_KEEP_LOCAL_RESULT=1` 로 S3 쪽도 예전처럼 남길 수 있다.
+`FA_KEEP_LOCAL_RESULT=1` 로 로컬 사본을 예전처럼 남길 수 있다 — 결과를 눈으로
+확인하며 돌릴 때 쓴다.
 
 ## 작업 상태가 디스크에 있는 이유 — `jobs.py`
 

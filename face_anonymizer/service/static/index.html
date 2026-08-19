@@ -342,9 +342,6 @@
         padding:9px 11px;margin-top:10px;color:var(--critical-ink);
         font-size:11.5px;line-height:1.5}
   .warn b{display:block;margin-bottom:2px}
-  a.dl{display:inline-block;background:var(--accent);color:#fff;text-decoration:none;
-       border-radius:7px;padding:6px 13px;font-weight:600;font-size:12px}
-  a.dl:hover{background:var(--accent-ink)}
   .row{display:flex;gap:8px;align-items:center;margin-top:10px;flex-wrap:wrap}
 
   /* ── 좌측 하단 상태 박스 ────────────────────────────────────────────── */
@@ -669,9 +666,12 @@ function renderBrowser() {
     el.innerHTML = `<div class="empty">목록을 불러오지 못했습니다 (${S3.error})</div>`;
     return updatePicked();
   }
-  const q = ($('#q').value || '').toLowerCase();
-  const folders = S3.folders.filter(f => f.toLowerCase().includes(q));
-  const objects = S3.objects.filter(o => o.key.toLowerCase().includes(q));
+  // **자모가 분리된 이름(NFD)은 그냥 비교하면 안 잡힌다.** 사람이 치는 글자는
+  // 합쳐진 형태라 바이트가 다르다 — 눈에는 똑같은데 파일이 안 나온다. 맥에서
+  // 올린 한글 이름이 그렇다. 양쪽을 같은 형태로 맞춘 뒤에 비교한다.
+  const q = norm($('#q').value);
+  const folders = S3.folders.filter(f => norm(f).includes(q));
+  const objects = S3.objects.filter(o => norm(o.key).includes(q));
   if (!folders.length && !objects.length) {
     el.innerHTML = '<div class="empty">항목이 없습니다</div>';
     return updatePicked();
@@ -720,10 +720,10 @@ function renderBrowser() {
 const isFolder = k => k.endsWith('/');
 function toggle(key, on) { on ? S3.selected.add(key) : S3.selected.delete(key); renderBrowser(); }
 function toggleAll(on) {
-  const q = ($('#q').value || '').toLowerCase();
-  S3.folders.filter(f => f.toLowerCase().includes(q))
+  const q = norm($('#q').value);
+  S3.folders.filter(f => norm(f).includes(q))
     .forEach(f => on ? S3.selected.add(f) : S3.selected.delete(f));
-  S3.objects.filter(o => VIDEO_RE.test(o.key) && o.key.toLowerCase().includes(q))
+  S3.objects.filter(o => VIDEO_RE.test(o.key) && norm(o.key).includes(q))
     .forEach(o => on ? S3.selected.add(o.key) : S3.selected.delete(o.key));
   renderBrowser();
 }
@@ -772,9 +772,15 @@ async function submitJobs(body, label) {
   // 것이 어떻게 되고 있는지 보려고 사이드바를 한 번 더 눌러야 한다.
   if (d.accepted && d.accepted.length) setFilter('active');
   else poll();
+  const notes = (d.notes || []).join('\n');
   if (d.rejected && d.rejected.length) {
     alert(`${d.accepted.length}건 접수, ${d.rejected.length}건은 넣지 못했습니다\n\n`
-      + d.rejected.map(x => `${x.s3_key}\n  ${problemText(x.error)}`).join('\n\n'));
+      + d.rejected.map(x => `${x.s3_key}\n  ${problemText(x.error)}`).join('\n\n')
+      + (notes ? `\n\n${notes}` : ''));
+  } else if (notes) {
+    // 실패가 아니라 알림이다. 거절이 없을 때도 이건 한 번은 말해 준다 —
+    // 안 그러면 나중에 "검색해도 안 나온다" 로만 겪는다.
+    alert(`${d.accepted.length}건 접수했습니다.\n\n${notes}`);
   }
 }
 
@@ -959,6 +965,11 @@ function scheduleLogs() {
   if (view === 'logs' && $('#lglive').checked && !logOpen
       && !logOpenRows.size && logRows.length <= LOG_PAGE)
     logTimer = setTimeout(() => loadLogs(), 4000);
+}
+
+// 검색·비교용 정규화. 자모 분리(NFD)와 합쳐진 형태(NFC)를 같게 본다.
+function norm(s) {
+  return String(s || '').normalize('NFC').toLowerCase();
 }
 
 function esc(s) {

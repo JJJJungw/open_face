@@ -136,17 +136,7 @@ class FaceDetector:
 
     # ------------------------------------------------------------------ #
 
-    def warmup(self, imgsz=None, batch_size=1):
-        """더미 입력으로 1회 추론해 CUDA 커널/메모리를 미리 잡아 둔다.
 
-        서버로 띄울 때 첫 요청만 유독 느려지는 것을 막는다.
-        """
-        imgsz = imgsz or self.imgsz
-        dummy = np.zeros((imgsz, imgsz, 3), dtype=np.uint8)
-        self.detect_batch([dummy] * batch_size)
-        return self
-
-    @torch.no_grad()
     def detect(self, frame, imgsz=None, conf=None, iou=None):
         """단일 BGR 프레임 → [(x1, y1, x2, y2, score), ...] (원본 좌표계)."""
         return self.detect_batch([frame], imgsz=imgsz, conf=conf, iou=iou)[0]

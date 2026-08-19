@@ -33,8 +33,6 @@ COMPLETE_TASK = os.environ.get("FA_MSA_COMPLETE_TASK",
                                "worker_io.tasks.deidentify_complete")
 
 # GPU 한 장에 검출기 하나. 이 값을 올릴 이유가 생기면 그건 GPU 를 늘렸다는 뜻이고,
-# 그때는 컨테이너를 늘리는 게 맞다(KEDA 가 큐 깊이로 그렇게 한다).
-CONCURRENCY = int(os.environ.get("FA_MSA_CONCURRENCY", 1))
 
 # 브로커가 "이 메시지는 아직 처리 중" 으로 봐 주는 시간. **넘기면 다른 워커에게
 # 다시 배달된다.**

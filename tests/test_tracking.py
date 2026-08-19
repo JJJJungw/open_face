@@ -9,7 +9,6 @@ linger 도 돌지 않는다.
 대상군에서만 안전망이 꺼지는 형태였다. 아래가 그 회귀다.
 """
 
-import numpy as np
 import pytest
 
 from conftest import FakeDetector, face_rect, read_frames, region_is_obscured

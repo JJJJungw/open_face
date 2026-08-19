@@ -32,7 +32,6 @@ STAGE_SPAN = (                      # (단계, 시작 지점, 차지하는 몫)
     ("upload",    0.92, 0.08),
 )
 SPAN = {name: (base, width) for name, base, width in STAGE_SPAN}
-ORDER = [name for name, _b, _w in STAGE_SPAN]
 
 # 화면에 띄울 단계 이름. 코드 이름을 그대로 보여 주면 사용자가 읽을 말이 아니다.
 STAGE_LABEL = {"download": "원본 받는 중", "transcode": "읽을 수 있게 변환 중",

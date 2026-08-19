@@ -29,7 +29,6 @@ import os
 import re
 from dataclasses import dataclass, replace
 
-STATE_RAW = "raw"
 STATE_DEID = "deid"
 STATE_NONE = ""                 # 입력 파일은 상태 토큰이 없다
 DEFAULT_EXT = ".mp4"

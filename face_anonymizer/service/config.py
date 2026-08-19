@@ -8,7 +8,6 @@
     FA_DEVICE          'cuda:0' | 'cpu'    (기본: 자동)
     FA_IMGSZ           검출기 기본 해상도  (기본: 1280)
     FA_JOBS_DIR        작업 디렉터리       (기본: ./jobs)
-    FA_MAX_UPLOAD_MB   업로드 상한         (기본: 2048)
     FA_JOB_TTL_MIN     완료 후 자동 삭제   (기본: 120, 0이면 안 지움)
     FA_FAILED_TTL_MIN  실패 보관           (기본: 0 = 안 지움)
     FA_SWEEP_SEC       정리 주기           (기본: 300)
@@ -40,11 +39,6 @@ import os
 from .. import params
 from ..env import flag as _bool_env
 from ..core.pipeline import (
-    DEFAULT_BITRATE_RATIO,
-    DEFAULT_CRF,
-    DEFAULT_HEIGHT,
-    DEFAULT_MAX_BITRATE,
-    DEFAULT_TARGET_BITRATE,
     VideoOpenError,
     VideoWriteError,
 )
@@ -52,7 +46,6 @@ from ..core.pipeline import (
 DEVICE = os.environ.get("FA_DEVICE") or None
 IMGSZ = params.IMGSZ          # 단일 출처는 face_anonymizer/params.py
 JOBS_DIR = os.path.abspath(os.environ.get("FA_JOBS_DIR", "jobs"))
-MAX_BYTES = int(os.environ.get("FA_MAX_UPLOAD_MB", 2048)) * 1024 * 1024
 JOB_TTL = int(os.environ.get("FA_JOB_TTL_MIN", 120)) * 60
 SWEEP_SEC = int(os.environ.get("FA_SWEEP_SEC", 300))
 # 예전에는 여기만 strip·lower 를 안 해서 `FA_PRELOAD=off` 나 `FA_PRELOAD=FALSE`
@@ -151,5 +144,4 @@ PERMANENT_ERRORS = (VideoOpenError, VideoWriteError, ValueError, FileNotFoundErr
 STATE_FILE = "job.json"
 GPU_LOCK_FILE = ".gpu.lock"
 PROGRESS_FLUSH_SEC = 0.5      # 진행률을 디스크에 쓰는 최소 간격
-CHUNK = 1 << 20
 VIDEO_EXT = {".mp4", ".mov", ".mkv", ".avi", ".webm", ".m4v"}

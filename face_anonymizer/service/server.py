@@ -26,7 +26,7 @@ from contextlib import asynccontextmanager
 from urllib.parse import quote
 
 from fastapi import Body, FastAPI, Query, Request, Response
-from fastapi.responses import FileResponse, HTMLResponse, RedirectResponse
+from fastapi.responses import HTMLResponse
 
 from .. import events, logsetup, timefmt
 from ..core.anonymize import METHODS
@@ -403,7 +403,7 @@ def storage_test():
 def s3_objects(prefix: str = ""):
     """버킷을 한 단계씩 나열한다 (S3 콘솔과 같은 방식).
 
-    설정 전이면 404. UI 는 그때 안내만 띄우고 직접 업로드로 쓴다.
+    설정 전이면 404. 첫 화면(관문)이 그때 저장소부터 물어본다.
     """
     store = s3mod.get_store()
     if store is None:
@@ -421,21 +421,6 @@ def s3_objects(prefix: str = ""):
             "folders": folders, "objects": objects,
             "output_prefix": store.output_prefix}
 
-
-def _coerce(key, value):
-    """폼은 전부 문자열로 온다. 기본값의 타입에 맞춰 되돌린다."""
-    ref = JOB_DEFAULTS.get(key)
-    if isinstance(ref, bool):
-        return str(value).strip().lower() in ("1", "true", "on", "yes")
-    try:
-        if isinstance(ref, int):
-            return int(float(value))
-        if isinstance(ref, float):
-            return float(value)
-    except (TypeError, ValueError) as e:
-        raise errors.INVALID_INPUT(f"{key} 값이 숫자가 아닙니다: {value!r}",
-                                   field=key) from e
-    return value
 
 
 def check_admission():
@@ -483,12 +468,62 @@ def check_video_name(name):
     return ext
 
 
+# S3 오브젝트 키 한계. 이건 우리가 어떻게 해도 못 넘긴다.
+S3_KEY_MAX = 1024
+
+
 def check_s3_key(key):
-    if s3mod.get_store() is None:
+    store = s3mod.get_store()
+    if store is None:
         raise errors.S3_NOT_CONFIGURED()
     if ".." in key or key.startswith("/"):
         raise errors.INVALID_KEY(key)
-    return check_video_name(os.path.basename(key))
+    ext = check_video_name(os.path.basename(key))
+    # **처리하고 나서 못 올리는 것보다, 넣기 전에 아는 편이 낫다.**
+    #
+    # 로컬 파일 이름은 우리가 짧게 바꿔서 더 이상 제약이 아니다. 남은 한계는
+    # 결과물을 올릴 **버킷 키**뿐이고 이건 우리가 못 피한다. 40초를 처리한
+    # 뒤에 실패하지 않고 제출 때 건별로 돌려준다.
+    out = store.output_key(key)
+    n = len(out.encode("utf-8"))
+    if n > S3_KEY_MAX:
+        raise errors.NAME_TOO_LONG(
+            f"결과물 주소가 {n}바이트입니다 (한계 {S3_KEY_MAX}). {_length_why(key)}",
+            bytes=n, limit=S3_KEY_MAX)
+    return ext
+
+
+def _length_why(key):
+    """왜 그렇게 긴지 한 줄. **글자 수만 보면 납득이 안 된다.**
+
+    한글은 한 글자가 UTF-8 로 3바이트고, 자모로 분리돼 저장돼 있으면(NFD)
+    9바이트까지 간다. 맥에서 올린 파일이 그렇다 — 화면에는 짧아 보이는데
+    실제로는 세 배다. 이 한 줄이 없으면 "60자밖에 안 되는데 왜?" 가 된다.
+    """
+    import unicodedata
+    name = os.path.basename(key)
+    nfc = unicodedata.normalize("NFC", name)
+    if nfc != name:
+        return (f"이름이 {len(nfc)}자인데 자모가 분리된 형태로 저장돼 있어 "
+                f"바이트로는 세 배가 됩니다(맥에서 올린 파일이 그렇습니다).")
+    return f"이름이 {len(name)}자입니다."
+
+
+def name_notes(keys):
+    """제출은 됐지만 알아 두면 좋은 것. **실패가 아니라 알림이다.**
+
+    자모가 분리된 이름(NFD)은 처리에는 아무 문제가 없다 — 로컬 이름을 우리가
+    따로 짓기 때문이다. 다만 **화면 검색에 안 잡힌다.** 사람이 치는 글자는
+    합쳐진 형태(NFC)라 바이트가 달라서, 파일이 분명히 있는데 검색하면 안 나온다.
+    그걸 모르고 있으면 "왜 없지" 로만 겪는다.
+    """
+    import unicodedata
+    odd = [k for k in keys
+           if unicodedata.normalize("NFC", k) != k]
+    if not odd:
+        return []
+    return [f"{len(odd)}건은 이름이 자모 분리(NFD)로 저장돼 있습니다. 처리에는 "
+            f"문제가 없지만, 화면 검색창에 한글을 쳐도 안 잡힐 수 있습니다."]
 
 
 @app.post("/api/jobs", status_code=202)
@@ -500,17 +535,19 @@ async def create_jobs(request: Request):
 
     받는 형태::
 
-        multipart/form-data   file=@clip.mp4                     # 업로드 한 건
-        application/json      {"s3_keys": ["a.mp4", "b.mp4"]}    # 고른 파일들
-        application/json      {"s3_prefix": "kbs/"}              # 폴더 하나
-        application/json      {"s3_prefix": ["kbs/", "mbc/"]}    # 폴더 여럿
+        {"s3_keys": ["a.mp4", "b.mp4"]}    # 고른 파일들
+        {"s3_prefix": "kbs/"}              # 폴더 하나
+        {"s3_prefix": ["kbs/", "mbc/"]}    # 폴더 여럿
+
+    **입력은 버킷에 있는 것뿐이다.** 예전에는 multipart 로 파일을 직접 올리는
+    길도 있었는데, 화면에는 버튼조차 없는 API 전용 경로였고 아무도 안 썼다.
+    남겨 두면 인증을 붙일 때 같이 막아야 하고, 결과물이 버킷에 없는 작업이라는
+    예외 경로를 계속 들고 다녀야 한다.
 
     **파일과 폴더는 같이 보낼 수 있다.** 화면에서 파일 두 개와 폴더 하나를
-    한꺼번에 체크하는 게 자연스럽기 때문이다. 펼친 결과가 겹치면 한 번만
-    넣는다. 업로드(``file``)만 S3 선택과 같이 못 보낸다 — 올라오는 바이트와
-    버킷의 키는 아예 다른 경로다.
+    한꺼번에 체크하는 게 자연스럽기 때문이다. 펼친 결과가 겹치면 한 번만 넣는다.
 
-    옵션은 JSON 이면 ``params``, multipart 면 폼 필드로 준다. 안 주면 서비스
+    옵션은 ``params`` 에 담는다. 안 주면 서비스
     기본값(GET /api/defaults).
 
     폴더 제출은 ``recursive``(하위 폴더까지, 기본 false)와
@@ -526,53 +563,29 @@ async def create_jobs(request: Request):
     **한 건이 거절돼도 나머지는 받는다.** 수백 건에서 키 하나가 오타라고 전체를
     되돌리면 호출하는 쪽이 무엇이 들어갔는지 알 수 없다.
     """
-    ctype = (request.headers.get("content-type") or "").split(";")[0].strip()
-    upload = None
-    keys, prefixes, recursive, skip_processed = [], [], False, False
+    try:
+        body = await request.json()
+    except Exception as e:                          # noqa: BLE001
+        raise errors.INVALID_INPUT("본문을 JSON 으로 읽지 못했습니다") from e
+    if not isinstance(body, dict):
+        raise errors.INVALID_INPUT("본문은 JSON 객체여야 합니다")
 
-    if ctype == "application/json":
-        try:
-            body = await request.json()
-        except Exception as e:                      # noqa: BLE001
-            raise errors.INVALID_INPUT("본문을 JSON 으로 읽지 못했습니다") from e
-        if not isinstance(body, dict):
-            raise errors.INVALID_INPUT("본문은 JSON 객체여야 합니다")
-        keys = body.get("s3_keys") or []
-        prefixes = body.get("s3_prefix") or body.get("s3_prefixes") or []
-        if isinstance(prefixes, str):               # 한 개는 문자열로도 받는다
-            prefixes = [prefixes]
-        if not isinstance(prefixes, list):
-            raise errors.INVALID_INPUT("s3_prefix 는 문자열이거나 배열이어야 합니다",
-                                       field="s3_prefix")
-        recursive = bool(body.get("recursive"))
-        skip_processed = bool(body.get("skip_processed"))
-        given = body.get("params") or {}
-        if not isinstance(keys, list):
-            raise errors.INVALID_INPUT("s3_keys 는 배열이어야 합니다", field="s3_keys")
-    else:
-        form = await request.form()
-        upload = form.get("file")
-        if isinstance(upload, str):                 # 파일이 아니라 문자열이면 무시
-            upload = None
-        keys = [v for v in form.getlist("s3_keys") if v]
-        one = form.get("s3_key")
-        if one:
-            keys.append(one)
-        prefixes = [v for v in form.getlist("s3_prefix") if v]
-        recursive = str(form.get("recursive", "")).lower() in ("1", "true", "on")
-        skip_processed = str(form.get("skip_processed", "")).lower() in (
-            "1", "true", "on")
-        given = {k: form.get(k) for k in JOB_DEFAULTS if form.get(k) is not None}
-        given = {k: _coerce(k, v) for k, v in given.items()}
+    keys = body.get("s3_keys") or []
+    prefixes = body.get("s3_prefix") or body.get("s3_prefixes") or []
+    if isinstance(prefixes, str):                   # 한 개는 문자열로도 받는다
+        prefixes = [prefixes]
+    if not isinstance(prefixes, list):
+        raise errors.INVALID_INPUT("s3_prefix 는 문자열이거나 배열이어야 합니다",
+                                   field="s3_prefix")
+    if not isinstance(keys, list):
+        raise errors.INVALID_INPUT("s3_keys 는 배열이어야 합니다", field="s3_keys")
+    recursive = bool(body.get("recursive"))
+    skip_processed = bool(body.get("skip_processed"))
 
-    uploaded = upload is not None and bool(getattr(upload, "filename", ""))
-    if not uploaded and not keys and not prefixes:
+    if not keys and not prefixes:
         raise errors.MISSING_INPUT()
-    if uploaded and (keys or prefixes):
-        raise errors.CONFLICTING_INPUT(
-            "업로드 파일과 S3 선택은 같이 보내실 수 없습니다")
 
-    params = resolve_params(given)
+    params = resolve_params(body.get("params") or {})
 
     # 폴더는 여기서 펼친다. 클라이언트가 목록을 먼저 받아 오게 하면 그 사이에
     # 파일이 늘거나 줄 수 있고, 왕복도 한 번 더 든다.
@@ -628,49 +641,21 @@ async def create_jobs(request: Request):
         rejected.append({"s3_key": k,
                          "error": errors.ALREADY_PROCESSED(k).body()})
 
-    if uploaded:
-        name = os.path.basename(upload.filename)
-        ext = check_video_name(name)
-        jid = worker.new_job_id()
-        workdir = os.path.join(config.JOBS_DIR, jid)
-        os.makedirs(workdir, exist_ok=True)
-        src = os.path.join(workdir, "input" + ext)
-        size = 0
+    for key in keys:
         try:
-            with open(src, "wb") as f:
-                while True:
-                    chunk = await upload.read(config.CHUNK)
-                    if not chunk:
-                        break
-                    size += len(chunk)
-                    if size > config.MAX_BYTES:
-                        raise errors.PAYLOAD_TOO_LARGE(
-                            f"상한 {config.MAX_BYTES // 1048576} MB")
-                    f.write(chunk)
-        except Exception:
-            shutil.rmtree(workdir, ignore_errors=True)
-            raise
-        if size == 0:
-            shutil.rmtree(workdir, ignore_errors=True)
-            raise errors.EMPTY_FILE()
-        _job, snap = worker.enqueue(name, params, jid=jid, workdir=workdir)
-        accepted.append({"id": snap["id"], "name": name, "s3_key": None})
-    else:
-        for key in keys:
-            try:
-                if not isinstance(key, str):
-                    raise errors.INVALID_KEY(str(key))
-                check_s3_key(key)
-                name = os.path.basename(key)
-                _job, snap = worker.enqueue(name, dict(params), s3_key=key,
-                                            batch=batch_of(key, prefixes))
-                accepted.append({"id": snap["id"], "name": name, "s3_key": key})
-                # **제출한 폴더가 곧 진척률 대상이다.** 어느 폴더를 돌릴지는
-                # 여기서 이미 골랐다 — 진척률 화면에서 또 고르게 하면 두 번
-                # 고르는 셈이고, 둘이 어긋나면 엉뚱한 폴더의 숫자가 뜬다.
-                jobs.track_prefix(key)
-            except errors.ProblemError as e:
-                rejected.append({"s3_key": key, "error": e.body()})
+            if not isinstance(key, str):
+                raise errors.INVALID_KEY(str(key))
+            check_s3_key(key)
+            name = os.path.basename(key)
+            _job, snap = worker.enqueue(name, dict(params), s3_key=key,
+                                        batch=batch_of(key, prefixes))
+            accepted.append({"id": snap["id"], "name": name, "s3_key": key})
+            # **제출한 폴더가 곧 진척률 대상이다.** 어느 폴더를 돌릴지는
+            # 여기서 이미 골랐다 — 진척률 화면에서 또 고르게 하면 두 번
+            # 고르는 셈이고, 둘이 어긋나면 엉뚱한 폴더의 숫자가 뜬다.
+            jobs.track_prefix(key)
+        except errors.ProblemError as e:
+            rejected.append({"s3_key": key, "error": e.body()})
 
     if not accepted and rejected:
         # 하나도 못 받았으면 202 를 줄 수 없다. 단건 제출이면 그 사유가 곧
@@ -682,7 +667,9 @@ async def create_jobs(request: Request):
             rejected[0]["error"].get("detail", "") if len(rejected) == 1
             else f"{len(rejected)}건 전부 거절됐다",
             rejected=rejected)
-    return {"accepted": accepted, "rejected": rejected, "queued": jobs.queue_depth()}
+    return {"accepted": accepted, "rejected": rejected,
+            "notes": name_notes([a["s3_key"] for a in accepted if a["s3_key"]]),
+            "queued": jobs.queue_depth()}
 
 
 # 검수는 **사람을 기다리는 일**이라 대기보다 위다. 아래로 내리면 300건짜리
@@ -1038,19 +1025,13 @@ def job_result(jid: str):
            "status": j.status, "review": list(j.review or ()),
            "s3_key": j.s3_output or None}
     store = s3mod.get_store()
-    if j.s3_output and store is not None:
-        out["download_url"] = store.presigned_url(j.s3_output)
-        out["expires_in"] = s3mod.URL_TTL
-        out["via"] = "s3"
-    else:
-        # 직접 업로드분은 버킷에 없다. 결과물은 서버 작업 폴더에 있고, 그건
-        # 운영하는 사람이 가져갈 몫이다 — 우리가 스트리밍하지 않는다.
-        if not j.output or not os.path.exists(j.output):
-            # 보관 기간이 지나 정리됐다. 버킷 사본도 없으니 정말 없는 것이다.
-            raise errors.RESULT_EXPIRED(jid)
-        out["download_url"] = None
-        out["via"] = "local"
-        out["hint"] = "S3 로 제출한 작업이 아니라 서버 작업 폴더에만 있습니다."
+    if not j.s3_output or store is None:
+        # 여기 오는 길이 사라졌다 — 입력이 전부 버킷에서 오므로 끝난 작업에는
+        # 항상 결과 키가 있다. 그래도 방어는 남긴다(저장소를 끊은 뒤 등).
+        raise errors.RESULT_EXPIRED(jid)
+    out["download_url"] = store.presigned_url(j.s3_output)
+    out["expires_in"] = s3mod.URL_TTL
+    out["via"] = "s3"
     return out
 
 

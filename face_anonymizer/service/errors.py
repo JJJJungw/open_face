@@ -101,25 +101,22 @@ INVALID_INPUT = _p(
     "보내신 파라미터를 확인해 주세요. 값의 범위는 GET /api/defaults 에서 볼 수 있습니다.")
 MISSING_INPUT = _p(
     "missing_input", 400, "처리할 입력이 없습니다",
-    "파일을 업로드하시거나 S3 키를 함께 보내 주세요.")
-CONFLICTING_INPUT = _p(
-    "conflicting_input", 400, "입력이 두 가지로 들어왔습니다",
-    "업로드 파일과 S3 선택 중 하나만 보내 주세요.")
+    "s3_keys 나 s3_prefix 중 하나는 보내 주셔야 합니다.")
 INVALID_KEY = _p(
     "invalid_key", 400, "S3 키 형식이 올바르지 않습니다",
     "상대 경로만 사용할 수 있습니다. '..' 이나 맨 앞의 '/' 는 넣을 수 없습니다.")
 UNSUPPORTED_MEDIA = _p(
     "unsupported_media", 415, "지원하지 않는 파일 형식입니다",
     "mp4 · mov · mkv · avi · webm · m4v 를 처리할 수 있습니다.")
-EMPTY_FILE = _p("empty_file", 400, "파일이 비어 있습니다")
-PAYLOAD_TOO_LARGE = _p(
-    "payload_too_large", 413, "업로드 용량 상한을 넘었습니다",
-    "파일을 나눠서 보내시거나, 서버의 FA_MAX_UPLOAD_MB 값을 올리면 됩니다.")
 BATCH_EMPTY = _p("batch_empty", 400, "처리할 항목이 없습니다")
 ALREADY_PROCESSED = _p(
     "already_processed", 409, "이미 비식별화된 영상입니다",
     "다시 처리하시려면 '처리된 건 건너뛰기' 를 끄고 보내 주세요 "
     "(API 는 skip_processed=false).")
+NAME_TOO_LONG = _p(
+    "name_too_long", 400, "파일 이름이 너무 깁니다",
+    "결과물을 올릴 주소가 저장소 한계를 넘습니다. 원본 이름을 줄여서 다시 "
+    "올려 주시면 처리할 수 있습니다.")
 BATCH_TOO_LARGE = _p(
     "batch_too_large", 400, "한 번에 넣을 수 있는 개수를 넘었습니다",
     "나눠서 보내 주세요. 상한은 서버의 FA_BATCH_MAX 로 조정할 수 있습니다.")
@@ -186,8 +183,7 @@ STORAGE_BUSY = _p(
 # ── S3 (404/502) ──────────────────────────────────────────────────────────
 S3_NOT_CONFIGURED = _p(
     "s3_not_configured", 404, "S3 가 설정되어 있지 않습니다",
-    "화면에서 정하시거나 FA_S3_BUCKET 을 설정하고 서버를 다시 띄우면 됩니다. "
-    "직접 업로드는 설정 없이도 쓰실 수 있습니다.")
+    "화면에서 정하시거나 FA_S3_BUCKET 을 설정하고 서버를 다시 띄우면 됩니다.")
 S3_OBJECT_NOT_FOUND = _p(
     "s3_object_not_found", 404, "S3 에서 해당 파일을 찾지 못했습니다",
     "키를 확인해 주세요. 대소문자와 폴더 경로가 정확해야 합니다.")
@@ -217,9 +213,6 @@ NO_DETECTIONS = _p(
 GPU_OUT_OF_MEMORY = _p(
     "gpu_out_of_memory", 503, "GPU 메모리가 부족합니다",
     "batch_size 나 imgsz 를 낮추면 통과할 수 있습니다.", retryable=True)
-FFMPEG_MISSING = _p(
-    "ffmpeg_missing", 500, "ffmpeg 를 찾을 수 없습니다",
-    "서버에 ffmpeg 를 설치해 주세요.")
 CANCELLED = _p("cancelled", 499, "사용자가 취소했습니다")
 INTERNAL = _p(
     "internal", 500, "서버 내부 오류가 발생했습니다",

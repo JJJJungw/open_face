@@ -55,7 +55,6 @@
 
 import logging
 import os
-import shutil
 import tempfile
 
 log = logging.getLogger(__name__)

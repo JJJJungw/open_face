@@ -332,8 +332,15 @@ def run(job_id):
             progress(stage, min(seen[0], total) if total else seen[0], total)
         return cb
 
+    # **로컬 파일 이름은 우리 사정이다.** 예전에는 결과물만 원본 이름을 그대로
+    # 썼는데(입력은 이미 input.<ext> 였다), 그러면 남이 지은 이름의 길이·특수
+    # 문자·정규화가 전부 우리 문제가 된다. 실제로 맥에서 올라온 한글 이름이
+    # 자모로 분리돼 저장돼(NFD) 298바이트가 됐고, ext4 한계 255를 넘겨 터졌다.
+    #
+    # 예쁜 이름이 필요한 자리는 **버킷 키와 내려받기 파일명**뿐이고 둘 다
+    # `j.name` 에서 따로 만든다. 여기서까지 쓸 이유가 없다.
     src = os.path.join(workdir, "input" + os.path.splitext(name)[1])
-    dst = os.path.join(workdir, naming.output_name(name))
+    dst = os.path.join(workdir, "output" + naming.DEFAULT_EXT)
     try:
         if j.s3_key and not os.path.exists(src):
             store = s3mod.get_store()

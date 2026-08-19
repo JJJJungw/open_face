@@ -13,7 +13,6 @@ import pytest
 from conftest import FakeDetector
 
 pytest.importorskip("fastapi", reason="pip install -r requirements-serve.txt")
-pytest.importorskip("multipart", reason="pip install -r requirements-serve.txt")
 pytest.importorskip("httpx", reason="pip install -r requirements-dev.txt")
 
 from fastapi.testclient import TestClient            # noqa: E402
@@ -250,8 +249,9 @@ def test_objects_endpoint_404_when_not_configured(tmp_path, monkeypatch):
 
 
 def test_s3_job_downloads_processes_and_uploads(s3client):
-    r = s3client.post("/api/jobs", data={"s3_key": "videos/2026-08/f_00001_00_0000000_0042000_raw.mp4",
-                                         "batch_size": "4", "keep_audio": "false"})
+    r = s3client.post("/api/jobs",
+                      json={"s3_keys": ["videos/2026-08/f_00001_00_0000000_0042000_raw.mp4"],
+                            "params": {"batch_size": 4, "keep_audio": False}})
     assert r.status_code == 202, r.text
     jid = r.json()["accepted"][0]["id"]
 
@@ -282,23 +282,23 @@ def test_processed_flag_appears_after_run(s3client):
 
 def test_requires_exactly_one_input(s3client, make_video):
     """file 과 s3_key 를 둘 다 주거나 둘 다 안 주면 거절한다."""
-    assert s3client.post("/api/jobs", data={}).status_code == 400
+    assert s3client.post("/api/jobs", json={}).status_code == 400
 
     src, n, size = make_video(name="both.mp4", frames=4)
     with open(src, "rb") as f:
         r = s3client.post("/api/jobs",
                           files={"file": ("both.mp4", f, "video/mp4")},
-                          data={"s3_key": "videos/2026-08/f_00001_00_0000000_0042000_raw.mp4"})
+                          json={"s3_keys": ["videos/2026-08/f_00001_00_0000000_0042000_raw.mp4"]})
     assert r.status_code == 400
 
 
 def test_rejects_traversal_key(s3client):
-    r = s3client.post("/api/jobs", data={"s3_key": "../../etc/passwd.mp4"})
+    r = s3client.post("/api/jobs", json={"s3_keys": ["../../etc/passwd.mp4"]})
     assert r.status_code == 400
 
 
 def test_rejects_non_video_key(s3client):
-    r = s3client.post("/api/jobs", data={"s3_key": "videos/2026-08/notes.txt"})
+    r = s3client.post("/api/jobs", json={"s3_keys": ["videos/2026-08/notes.txt"]})
     assert r.status_code == 415
     assert r.json()["code"] == "unsupported_media"
 
@@ -359,7 +359,7 @@ def test_batch_rejects_empty_and_oversized(s3client, monkeypatch):
 
 
 def test_result_gives_presigned_url_for_s3_job(s3client):
-    jid = s3client.post("/api/jobs", data={"s3_key": KEY}).json()["accepted"][0]["id"]
+    jid = s3client.post("/api/jobs", json={"s3_keys": [KEY]}).json()["accepted"][0]["id"]
     wait(s3client, jid, timeout=60)
 
     r = s3client.get(f"/api/jobs/{jid}/result")
@@ -383,7 +383,7 @@ def workdir_files(client, jid):
 
 def test_local_copy_is_removed_after_upload(s3client):
     """S3 에 올렸으면 로컬에 남길 이유가 없다. 기록만 남긴다."""
-    jid = s3client.post("/api/jobs", data={"s3_key": KEY}).json()["accepted"][0]["id"]
+    jid = s3client.post("/api/jobs", json={"s3_keys": [KEY]}).json()["accepted"][0]["id"]
     s = wait(s3client, jid, timeout=60)
 
     assert s["status"] == "done"
@@ -394,7 +394,7 @@ def test_local_copy_is_removed_after_upload(s3client):
 def test_keeping_the_local_copy_can_be_turned_back_on(s3client, monkeypatch):
     """로컬에서 결과를 바로 열어 보고 싶을 때가 있다."""
     monkeypatch.setattr(config, "KEEP_LOCAL", True)
-    jid = s3client.post("/api/jobs", data={"s3_key": KEY}).json()["accepted"][0]["id"]
+    jid = s3client.post("/api/jobs", json={"s3_keys": [KEY]}).json()["accepted"][0]["id"]
     wait(s3client, jid, timeout=60)
 
     assert len(workdir_files(s3client, jid)) > 1
@@ -410,7 +410,7 @@ def test_failed_s3_job_keeps_only_the_record(s3client, monkeypatch):
     anon = VideoAnonymizer(detector=Broken())
     monkeypatch.setattr(worker, "get_anonymizer", lambda: anon)
 
-    jid = s3client.post("/api/jobs", data={"s3_key": KEY}).json()["accepted"][0]["id"]
+    jid = s3client.post("/api/jobs", json={"s3_keys": [KEY]}).json()["accepted"][0]["id"]
     s = wait(s3client, jid, timeout=60)
 
     assert s["status"] == "failed"
@@ -419,7 +419,7 @@ def test_failed_s3_job_keeps_only_the_record(s3client, monkeypatch):
 
 
 def test_result_before_done_is_409(s3client):
-    jid = s3client.post("/api/jobs", data={"s3_key": KEY}).json()["accepted"][0]["id"]
+    jid = s3client.post("/api/jobs", json={"s3_keys": [KEY]}).json()["accepted"][0]["id"]
     jobsmod.JOBS[jid].status = "running"
     b = s3client.get(f"/api/jobs/{jid}/result")
     assert b.status_code == 409 and b.json()["code"] == "job_not_finished"
@@ -618,15 +618,6 @@ def test_prefix_takes_a_single_string_too(s3client):
         wait(s3client, a["id"], timeout=60)
 
 
-def test_upload_cannot_be_mixed_with_s3_selection(s3client, make_video):
-    """올라오는 바이트와 버킷의 키는 아예 다른 경로다."""
-    src, _n, _size = make_video(name="up.mp4", frames=4)
-    with open(src, "rb") as fh:
-        r = s3client.post("/api/jobs", files={"file": ("up.mp4", fh, "video/mp4")},
-                          data={"s3_key": KEY})
-    assert r.status_code == 400
-    assert r.json()["code"] == "conflicting_input"
-
 
 # ── S3 전송 중 취소 · 진행률 (docs/issues/004) ──────────────────────────────
 #
@@ -727,7 +718,7 @@ def test_review_does_not_hold_the_local_copy_hostage(s3client, monkeypatch):
     monkeypatch.setattr(worker, "get_anonymizer", lambda: anon)
     monkeypatch.setattr(worker, "_anonymizer", anon)
 
-    jid = s3client.post("/api/jobs", data={"s3_key": KEY}).json()["accepted"][0]["id"]
+    jid = s3client.post("/api/jobs", json={"s3_keys": [KEY]}).json()["accepted"][0]["id"]
     s = wait(s3client, jid, timeout=60)
 
     assert s["status"] == "review"
@@ -859,3 +850,41 @@ def test_storage_info_never_leaks_credentials(s3client):
     ids = {p["id"] for p in d["providers"]}
     assert {"s3", "ncp", "gcs"} <= ids
     assert next(p for p in d["providers"] if p["id"] == "gcs")["supported"] is False
+
+
+def test_a_key_whose_result_would_not_fit_is_refused_up_front(s3client):
+    """**처리하고 나서 못 올리는 것보다 넣기 전에 아는 편이 낫다.**
+
+    로컬 이름은 우리가 짧게 짓게 됐으니 더 이상 제약이 아니다. 남은 한계는
+    결과물을 올릴 버킷 키뿐이고 그건 못 피한다 — 그때는 제출 시점에 건별로
+    사유와 함께 돌려준다.
+    """
+    import unicodedata
+    huge = unicodedata.normalize("NFD", "가" * 400) + ".mp4"
+    r = s3client.post("/api/jobs", json={"s3_keys": ["videos/2026-08/" + huge]})
+    assert r.status_code == 400
+    d = r.json()
+    assert d["code"] == "name_too_long"
+    # 글자 수만 말하면 "60자밖에 안 되는데 왜?" 가 된다. 왜 긴지 같이 적는다.
+    assert "자모가 분리" in d["detail"] and "바이트" in d["detail"]
+
+
+def test_a_long_but_ordinary_name_still_goes_through(s3client):
+    """한계는 버킷 키 1024바이트다. 그 아래는 길어도 받는다."""
+    from face_anonymizer.service import server
+    ok = "가" * 100 + ".mp4"                       # NFC 로 300바이트 남짓
+    assert len(server.check_s3_key("videos/2026-08/" + ok)) > 0
+
+
+def test_decomposed_names_get_a_notice_not_a_failure(s3client):
+    """자모 분리는 처리에 문제가 없다 — 다만 화면 검색에 안 잡힌다.
+
+    그걸 모르면 "파일이 분명히 있는데 검색하면 안 나온다" 로만 겪는다.
+    """
+    from face_anonymizer.service import server
+    import unicodedata
+    nfd = unicodedata.normalize("NFD", "나의아저씨.mp4")
+    notes = server.name_notes(["v1/input/kbs/" + nfd, "v1/input/kbs/plain.mp4"])
+    assert len(notes) == 1
+    assert "1건" in notes[0] and "검색" in notes[0]
+    assert server.name_notes(["v1/input/kbs/plain.mp4"]) == []

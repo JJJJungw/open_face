@@ -30,11 +30,6 @@ log = logging.getLogger(__name__)
 # 화면에서 고르게 하는 길이 아예 막혀 있었다(providers.StorageConfig 주석).
 CONFIG = providers.StorageConfig.from_env()
 
-# 옛 이름들. 여기저기서 읽고 있어 한 번에 걷어내지 않는다.
-BUCKET = CONFIG.bucket
-REGION = CONFIG.region
-ROOT_PREFIX = CONFIG.root_prefix
-OUTPUT_PREFIX = CONFIG.output_prefix
 LIST_TTL = int(os.environ.get("FA_S3_LIST_TTL", 30))
 URL_TTL = int(os.environ.get("FA_S3_URL_TTL", 3600))
 
@@ -495,8 +490,6 @@ def reconfigure(config):
     대조이고, 진척률 폴더와 저널의 폴더 이름도 옛 저장소 기준이다. 사실상 새
     작업 공간을 여는 일이라, 부르는 쪽이 그걸 사람에게 먼저 알려야 한다.
     """
-    global CONFIG, _store, BUCKET, REGION, ROOT_PREFIX, OUTPUT_PREFIX
+    global CONFIG, _store
     CONFIG, _store = config, None
-    BUCKET, REGION = config.bucket, config.region
-    ROOT_PREFIX, OUTPUT_PREFIX = config.root_prefix, config.output_prefix
     return CONFIG

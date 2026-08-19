@@ -53,6 +53,7 @@
 | [012](issues/012-the-model-was-tied-to-our-bucket.md) | 저장소는 고르게 해 놓고 모델은 우리 버킷에 묶여 있었다 | **해결됨** |
 | [013](issues/013-three-places-said-three-things.md) | 화면 세 곳이 모델에 대해 다른 말을 했고, 그 뒤에 죽은 서버가 있었다 | **해결됨** |
 | [014](issues/014-two-paths-drifted-apart.md) | 같은 일을 두 곳에서 하다가 여섯 군데가 갈라졌다 | **해결됨** |
+| [015](issues/015-a-mac-filename-broke-the-pipeline.md) | 맥에서 올린 파일 이름 하나가 처리를 통째로 막았다 (NFD) | **해결됨** |
 
 ## 보안
 

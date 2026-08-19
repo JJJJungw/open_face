@@ -6,7 +6,6 @@
 
 import time
 
-import pytest
 
 from face_anonymizer.service import metrics
 from face_anonymizer.storage import s3 as s3mod

@@ -122,7 +122,6 @@ pytest -q
 | `GET /api/jobs/{id}/result` | 결과 받는 방법 (S3 면 presigned URL) |
 | `GET /api/problems` | 이 서비스가 낼 수 있는 오류 목록 |
 | `GET /api/jobs/{id}` | 진행률 · 단계 · fps · ETA · 완료 시 통계와 경고 |
-| `GET /api/jobs/{id}/download` | 결과 영상 (완료 전 409, 파일 만료 410) |
 | `DELETE /api/jobs/{id}` | 작업과 파일 삭제 (진행 중이면 409) |
 | `GET /api/jobs?limit=&status=` | 작업 목록 (최신순, 기본 100건, 상태 필터) |
 | `GET /api/s3/objects?prefix=` | 버킷 한 단계 나열 (미설정 시 404) |
@@ -164,7 +163,7 @@ videos/2026-08/f_00001_00_0000000_0042000_raw.mp4
   -> v1/results/face/f_00001_00_0000000_0042000_deid.mp4
 ```
 
-확장자는 입력이 `.mov` 여도 항상 `.mp4` 다 — H.264/mp4 로 다시 뜨기 때문이다. 자릿수는 고정으로 검사한다(느슨하게 받으면 정렬이 깨지고 잘못 붙은 이름이 결과 폴더에 남는다). 규칙 밖 이름도 처리는 되며 `<이름>_deid.mp4` 로 떨어진다 — 직접 업로드한 임의 파일을 막지 않기 위해서다. 규칙은 `face_anonymizer/naming.py` 한곳에 있고 S3·로컬 출력·다운로드 파일명·CLI 기본 경로가 모두 이걸 쓴다.
+확장자는 입력이 `.mov` 여도 항상 `.mp4` 다 — H.264/mp4 로 다시 뜨기 때문이다. 자릿수는 고정으로 검사한다(느슨하게 받으면 정렬이 깨지고 잘못 붙은 이름이 결과 폴더에 남는다). 규칙 밖 이름도 처리는 되며 `<이름>_deid.mp4` 로 떨어진다 — 규칙을 안 따르는 파일을 막지 않기 위해서다. 규칙은 `face_anonymizer/naming.py` 한곳에 있고 S3·로컬 출력·다운로드 파일명·CLI 기본 경로가 모두 이걸 쓴다.
 
 목록의 `processed` 표시는 결과물 프리픽스를 **한 번 나열해서** 대조한다(`FA_S3_LIST_TTL` 초 캐시). 객체마다 HEAD 를 날리면 목록 한 번에 수백 번 왕복한다.
 
@@ -246,9 +245,6 @@ boto3 는 지연 임포트라 S3 를 안 쓰면 설치할 필요가 없다.
 **진입점은 하나다.** 진입점을 나누면 클라이언트가 경우마다 분기해야 하고, 화면에도 버튼이 그만큼 늘어난다. 입력이 무엇이냐만 다르고 나머지는 전부 같다.
 
 ```bash
-# 한 건 업로드
-curl -F file=@clip.mp4 localhost:8000/api/jobs
-
 # 고른 것들
 curl -X POST localhost:8000/api/jobs -H 'Content-Type: application/json' \
   -d '{"s3_keys": ["videos/2026-08/f_00001_00_0000000_0042000_raw.mp4"]}'
@@ -258,7 +254,9 @@ curl -X POST localhost:8000/api/jobs -H 'Content-Type: application/json' \
   -d '{"s3_prefix": "videos/2026-08/", "recursive": true, "skip_processed": true}'
 ```
 
-`file` · `s3_keys` · `s3_prefix` 중 **하나만** 보낸다. 옵션은 JSON 이면 `params`, multipart 면 폼 필드로 주고, 안 주면 서비스 기본값이다.
+`s3_keys` 와 `s3_prefix` 는 **같이** 보낼 수 있다 — 화면에서 파일 몇 개와 폴더 하나를 한꺼번에 고르는 게 자연스럽기 때문이다. 옵션은 `params` 에 담고, 안 주면 서비스 기본값이다.
+
+**입력은 버킷에 있는 것뿐이다.** 예전에는 multipart 로 파일을 직접 올리는 길도 있었는데, 화면에는 버튼조차 없는 API 전용 경로였고 아무도 안 썼다. 남겨 두면 인증을 붙일 때 같이 막아야 하고, 결과물이 버킷에 없는 작업이라는 예외 경로를 계속 들고 다녀야 한다(`docs/issues/015`).
 
 응답은 세 경우 모두 같다.
 
@@ -280,7 +278,7 @@ curl -s localhost:8000/api/jobs/<id>/result
 #  "download_url":"https://...","expires_in":3600}
 ```
 
-S3 작업이면 **presigned URL** 을 준다 — GPU 서버가 파일 전송까지 떠안을 이유가 없고, 로컬 사본이 보관 기간에 정리돼도 S3 원본은 남아 있다. `/download` 도 로컬 사본이 없으면 S3 로 302 리다이렉트한다.
+S3 작업이면 **presigned URL** 을 준다 — GPU 서버가 파일 전송까지 떠안을 이유가 없고, 로컬 사본이 보관 기간에 정리돼도 S3 원본은 남아 있다.
 
 **실패·취소된 작업은 기본적으로 지우지 않는다**(`FA_FAILED_TTL_MIN=0`). 배치로 수백 건 돌린 뒤 몇 건이 실패했을 때 입력과 사유가 남아 있어야 원인을 볼 수 있다.
 
@@ -293,14 +291,15 @@ S3 작업이면 **presigned URL** 을 준다 — GPU 서버가 파일 전송까�
 curl -s localhost:8000/api/status          # {"ready":true,"busy":false,"queued":0,"free_mb":41230}
 
 # 2. 제출 — 바쁘면 429
-curl -sf -F file=@in.mp4 localhost:8000/api/jobs   # {"id":"ab12...","status":"queued"}
-# S3 입력이면:  -F s3_key=videos/2026-08/f_00001_00_0000000_0042000_raw.mp4
+curl -sf -X POST localhost:8000/api/jobs -H 'Content-Type: application/json' \
+  -d '{"s3_keys": ["videos/2026-08/f_00001_00_0000000_0042000_raw.mp4"]}'
 
 # 3. 진행률 폴링
 curl -s localhost:8000/api/jobs/ab12...     # {"status":"running","stage":"detect","overall":31,"fps":98.4,"eta":42}
 
 # 4. 결과 받기
-curl -sf -OJ localhost:8000/api/jobs/ab12.../download
+# 결과물은 /result 가 알려 주는 presigned URL 로 받는다
+curl -s localhost:8000/api/jobs/ab12.../result
 
 # 5. 정리
 curl -sX DELETE localhost:8000/api/jobs/ab12...
@@ -312,11 +311,11 @@ curl -sX DELETE localhost:8000/api/jobs/ab12...
 
 **추론은 한 번에 하나만 돈다.** GPU 한 장에 검출기 하나를 올려 두고 워커 스레드 하나가 큐를 소비한다. 요청마다 스레드를 띄우면 VRAM 이 터지거나 서로 느려지기만 하고, 총 처리량은 오히려 직렬화하는 쪽이 높다. 프로세스를 여러 개 띄워도(`--workers N`) 작업 디렉터리의 잠금 파일로 직렬화한다.
 
-**작업 상태는 디스크에 둔다.** 작업별 디렉터리의 `job.json` 이 정본이고 메모리는 캐시다. 전역 dict 에만 두면 재시작 시 전부 사라져 폴링 중인 클라이언트가 404 를 받고, `--workers 2` 로 띄우는 순간 업로드는 A 프로세스 · 폴링은 B 프로세스로 가서 계속 404 가 난다. 진행률은 0.5초 간격으로 흘려 쓰고, 쓰기는 임시 파일 + rename 이라 읽는 쪽이 반쪽짜리 JSON 을 보지 않는다.
+**작업 상태는 디스크에 둔다.** 작업별 디렉터리의 `job.json` 이 정본이고 메모리는 캐시다. 전역 dict 에만 두면 재시작 시 전부 사라져 폴링 중인 클라이언트가 404 를 받고, `--workers 2` 로 띄우는 순간 제출은 A 프로세스 · 폴링은 B 프로세스로 가서 계속 404 가 난다. 진행률은 0.5초 간격으로 흘려 쓰고, 쓰기는 임시 파일 + rename 이라 읽는 쪽이 반쪽짜리 JSON 을 보지 않는다.
 
-기동 시 `queued`/`running` 상태로 남은 작업은 실패로 표시한다(프로세스가 죽으면 상태 파일만 남아 클라이언트가 영원히 '처리 중' 을 폴링한다). TTL 정리는 백그라운드 스레드가 `FA_SWEEP_SEC` 주기로 돈다 — 예전에는 새 업로드가 있을 때만 돌아서 업로드가 끊기면 디스크가 안 비워졌다.
+기동 시 `queued`/`running` 상태로 남은 작업은 실패로 표시한다(프로세스가 죽으면 상태 파일만 남아 클라이언트가 영원히 '처리 중' 을 폴링한다). TTL 정리는 백그라운드 스레드가 `FA_SWEEP_SEC` 주기로 돈다 — 예전에는 새 제출이 있을 때만 돌아서 제출이 끊기면 디스크가 안 비워졌다.
 
-환경 변수로 `FA_DEVICE`, `FA_IMGSZ`, `FA_JOBS_DIR`, `FA_MAX_UPLOAD_MB`(기본 2048), `FA_JOB_TTL_MIN`(기본 120, 완료 후 자동 삭제), `FA_FFMPEG_TIMEOUT`(기본 600)을 조정한다.
+환경 변수로 `FA_DEVICE`, `FA_IMGSZ`, `FA_JOBS_DIR`, `FA_JOB_TTL_MIN`(기본 120, 완료 후 자동 삭제), `FA_FFMPEG_TIMEOUT`(기본 600)을 조정한다.
 
 인증이 없으므로 공개 주소에 그대로 띄우지 말 것. 원격 테스트는 SSH 터널이 안전하다.
 

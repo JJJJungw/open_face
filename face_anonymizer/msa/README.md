@@ -137,7 +137,6 @@ DB 도 없다. 가중치 조달만 아직 미결이다(docs/integration/rebornst
 | `FA_MSA_CALLBACK_QUEUE` | `default` | 하트비트·완료를 보낼 큐 |
 | `FA_MSA_HEARTBEAT_TASK` | `worker_io.tasks.deidentify_heartbeat` | |
 | `FA_MSA_COMPLETE_TASK` | `worker_io.tasks.deidentify_complete` | |
-| `FA_MSA_CONCURRENCY` | `1` | GPU 한 장에 검출기 하나 |
 | `FA_MSA_PRELOAD` | `1` | 기동 때 모델 예열 |
 | `FA_EVENTS_STDOUT` | (msa 에서 자동 `1`) | 저널을 stdout 으로도. 컨테이너에선 이게 유일한 사본이다 |
 | `FA_MODE` | (msa 에서 자동 `msa`) | 저널 줄에 찍히는 얼굴 표시 |

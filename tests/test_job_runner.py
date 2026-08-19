@@ -5,8 +5,6 @@
 """
 
 import http.server
-import json
-import os
 import threading
 
 import pytest

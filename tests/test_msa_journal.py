@@ -12,7 +12,6 @@ import pytest
 pytest.importorskip("celery", reason="pip install -r requirements-worker.txt")
 
 from face_anonymizer import events, job_runner, timefmt      # noqa: E402
-from face_anonymizer.msa import config as mc                 # noqa: E402
 from face_anonymizer.msa import celery_app as shell          # noqa: E402
 from face_anonymizer.msa import journal                      # noqa: E402
 
