@@ -222,6 +222,7 @@ def wanted():
 
 
 ACTIVE = None                    # 지금 활성인 제공자 id (없으면 None)
+REASON = ""                      # 못 정했으면 왜. 화면과 오류가 이걸 그대로 쓴다
 
 
 def activate(pid):
@@ -232,7 +233,6 @@ def activate(pid):
     """
     from . import s3 as s3mod
 
-    global ACTIVE
     cfg = config_of(pid)
     if cfg is None:
         raise ValueError(f"{prefix_of(pid)}BUCKET 이 설정되지 않았습니다")
@@ -242,17 +242,30 @@ def activate(pid):
                               "session_token": creds.get("aws_session_token")}
                              if creds else {}))
     s3mod.reconfigure(cfg)
-    ACTIVE = pid
+    global ACTIVE, REASON
+    ACTIVE, REASON = pid, ""
     log.info("활성 클라우드: %s / %s", cfg.info["name"], cfg.bucket)
     return cfg
 
 
 def resolve():
-    """기동 때 한 번. 정해지면 활성으로 걸고, 못 정하면 사유를 남긴다."""
+    """기동 때 한 번. 정해지면 활성으로 걸고, **못 정하면 아무것도 안 남긴다.**
+
+    여기가 조용한 사고를 막는 자리다. 예전 전역 설정(`s3.CONFIG`)은 임포트할 때
+    `FA_S3_BUCKET` 을 읽어 두므로, 활성을 못 정했는데 그냥 두면 **잡이 소리 없이
+    AWS 로 나간다.** 못 정했으면 붙을 곳을 비워서 `get_store()` 가 None 이 되게
+    한다 — 그러면 잡은 거절당하고 사유가 나온다.
+    """
+    from . import s3 as s3mod
+
+    global REASON
     pid, why = wanted()
+    REASON = why
     if pid is None:
         if why:
             log.warning("활성 클라우드가 정해지지 않았습니다 — %s", why)
+        # **비워 둔다.** 조용히 옛 값으로 도는 것보다 거절하는 편이 낫다.
+        s3mod.reconfigure(providers.StorageConfig(bucket=""))
         return None, why
     activate(pid)
     return pid, ""

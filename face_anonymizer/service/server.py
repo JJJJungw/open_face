@@ -408,6 +408,10 @@ def storage_disconnect():
     _refuse_if_busy()
     was = s3mod.CONFIG.bucket
     s3mod.disconnect()
+    # **활성도 같이 내려놓는다.** 안 내려놓으면 카드는 계속 "사용 중" 으로
+    # 보이는데 붙을 곳은 비어 있어서, 다시 연결할 길이 화면에서 사라진다.
+    registry.ACTIVE, registry.REASON = None, "연결을 끊었습니다"
+    registry.invalidate()
     log.info("저장소 연결 해제: %s", was)
     events.emit("storage.disconnected", bucket=was)
     return {"ok": True, "detail": "연결을 끊었습니다. 버킷의 파일은 그대로 있습니다."}

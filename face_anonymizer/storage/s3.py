@@ -566,7 +566,14 @@ def get_store():
 
 
 def unavailable_reason():
-    """왜 못 붙는지 한 줄. 붙을 수 있으면 빈 문자열."""
+    """왜 못 붙는지 한 줄. 붙을 수 있으면 빈 문자열.
+
+    **레지스트리가 못 정한 사유가 먼저다.** "둘이 켜져 있는데 어느 쪽인지
+    안 정해졌다" 를 "S3 미설정" 으로 보고하면 사람은 엉뚱한 데를 고친다.
+    """
+    from . import registry                          # 순환 방지
+    if registry.REASON:
+        return registry.REASON
     if CONFIG.ready:
         return ""
     if not CONFIG.supported:

@@ -1413,7 +1413,7 @@ function cloudCard(c) {
     ['자격 증명', c.credentials || '기본 체인 (역할·~/.aws)'],
   ] : [];
   return `<div class="ccard ${s.cls}${c.active ? ' active' : ''}"
-       ${st === 'ok' && !c.active ? `data-pick="${esc(c.id)}"` : ''}>
+       ${st === 'ok' ? `data-pick="${esc(c.id)}"` : ''}>
     <div class="chead">
       <span class="cdot" style="background:${s.dot}"></span>
       <b>${esc(c.name)}</b>
@@ -1422,8 +1422,8 @@ function cloudCard(c) {
     ${rows.length ? `<div class="crows">${rows.map(([k, v]) =>
       `<div><span>${k}</span><b title="${esc(v)}">${esc(v)}</b></div>`).join('')}</div>` : ''}
     ${why ? `<div class="cwhy">${esc(why)}</div>` : ''}
-    ${st === 'ok' && !c.active
-      ? '<div class="cpick">누르면 이쪽으로 바꿉니다</div>' : ''}
+    ${st === 'ok' ? `<div class="cpick">${c.active
+      ? '누르면 다시 연결합니다' : '누르면 이쪽으로 바꿉니다'}</div>` : ''}
   </div>`;
 }
 
@@ -1477,7 +1477,7 @@ document.addEventListener('click', e => {
 // 관문을 연다. 통과하기 전에는 본 화면을 아예 안 그린다 — 그려 봐야 0 으로
 // 채워진 카드와 404 뿐이고, 그 화면들은 '아직 아니다' 라고 말해 주지 않는다.
 function openSetup(d) {
-  STORAGE = d;
+  if (d) STORAGE = d;
   $('#setup').hidden = false;
   $('#setup-body').innerHTML = `<div class="empty">확인하는 중…</div>`;
   refreshClouds(true);
@@ -2247,10 +2247,13 @@ setFilter('active');
 //
 // 못 물어보면(응답 실패) 그냥 들여보낸다 — 설정 조회 한 번 실패했다고 도구
 // 전체를 잠그면, 정작 고칠 수 있는 사람도 못 들어온다.
-fetch('/api/storage').then(r => r.ok ? r.json() : null).then(d => {
-  if (d && d.first_run) return openSetup(d);
-  enterApp();
-}).catch(enterApp);
+// **첫 화면은 언제나 클라우드 카드다.**
+//
+// 예전에는 버킷이 정해져 있으면 곧장 본 화면으로 넘어갔다. 그러면 지금 어디에
+// 붙어 있는지, 애초에 붙기는 하는지를 **볼 기회가 없다** — 900건을 넣고 나서야
+// 안다. 붙어 있어도 한 번은 보여 주고, 들어가는 것은 사람이 누른다. 못 붙는
+// 상태여도 막지 않는다 — 카드가 사유를 띄우고 '시작하기' 는 그대로 눌린다.
+openSetup(null);
 </script>
 </body>
 </html>

@@ -174,3 +174,91 @@ def test_probe_is_cached_so_the_card_screen_can_poll(monkeypatch):
     registry.probe("s3")
     registry.probe("s3")
     assert len(calls) == 1, "카드가 폴링할 때마다 클라우드를 치고 있다"
+
+
+def test_an_unresolved_active_does_not_quietly_fall_back(monkeypatch):
+    """**여기가 조용한 사고를 막는 자리다.**
+
+    전역 설정은 임포트할 때 `FA_S3_BUCKET` 을 읽어 둔다. 활성을 못 정했는데
+    그냥 두면 잡이 **소리 없이 AWS 로 나간다** — 켜져 있는 다른 클라우드로
+    보낼 생각이었는데도. 못 정했으면 붙을 곳을 비워서 거절하게 만든다.
+    """
+    from face_anonymizer.storage import s3 as s3mod
+
+    monkeypatch.setenv("FA_S3_BUCKET", "aws-bucket")
+    monkeypatch.setenv("FA_NCP_BUCKET", "ncp-bucket")
+    monkeypatch.setattr(s3mod, "CONFIG",
+                        s3mod.providers.StorageConfig(provider="s3",
+                                                      bucket="aws-bucket"))
+    monkeypatch.setattr(s3mod, "_store", None)
+    monkeypatch.setattr(registry, "REASON", "")
+
+    pid, why = registry.resolve()
+    assert pid is None and "여럿" in why
+    assert s3mod.get_store() is None, "옛 값으로 조용히 붙고 있다"
+    assert "여럿" in s3mod.unavailable_reason()
+
+
+def test_resolving_one_cloud_clears_the_reason(monkeypatch):
+    from face_anonymizer.storage import s3 as s3mod
+
+    monkeypatch.setenv("FA_S3_BUCKET", "only")
+    monkeypatch.setattr(s3mod, "_store", None)
+    monkeypatch.setattr(registry, "REASON", "옛 사유")
+    pid, why = registry.resolve()
+    assert pid == "s3" and why == "" and registry.REASON == ""
+
+
+def test_disconnecting_lets_you_connect_again(monkeypatch, tmp_path):
+    """**끊고 나서 다시 붙을 수 있어야 한다.**
+
+    활성을 안 내려놓으면 카드는 계속 '사용 중' 인데 붙을 곳은 비어 있다 —
+    그러면 화면에서 다시 연결할 길이 사라진다.
+    """
+    pytest = __import__("pytest")
+    pytest.importorskip("fastapi")
+    from fastapi.testclient import TestClient
+
+    from face_anonymizer.service import config, jobs, server
+    from face_anonymizer.storage import s3 as s3mod
+
+    monkeypatch.setenv("FA_S3_BUCKET", "b")
+    monkeypatch.setenv("FA_JOBS_DIR", str(tmp_path))
+    monkeypatch.setattr(config, "JOBS_DIR", str(tmp_path))
+    monkeypatch.setattr(jobs, "JOBS", {})
+    monkeypatch.setattr(s3mod, "_store", None)
+    monkeypatch.delenv("FA_ALLOW_STORAGE_EDIT", raising=False)
+
+    registry.activate("s3")
+    assert registry.ACTIVE == "s3"
+
+    c = TestClient(server.app)
+    assert c.delete("/api/storage").status_code == 200
+    assert registry.ACTIVE is None, "끊었는데 활성이 남아 있다"
+
+    # 다시 붙는다.
+    registry.activate("s3")
+    assert s3mod.CONFIG.bucket == "b"
+
+
+def test_the_active_card_can_be_pressed_again():
+    """붙을 곳이 비어 버렸을 때 다시 연결하는 길이 화면에 있어야 한다."""
+    import pathlib
+    import re
+
+    html = (pathlib.Path(__file__).resolve().parent.parent / "face_anonymizer"
+            / "service" / "static" / "index.html").read_text(encoding="utf-8")
+    card = re.search(r"function cloudCard\(c\) \{.*?\n\}", html, re.S).group(0)
+    assert "!c.active ? `data-pick" not in card, "활성 카드가 안 눌린다"
+    assert "다시 연결합니다" in card
+
+
+def test_the_first_screen_is_always_the_cards():
+    """붙어 있어도 **한 번은 보여 준다.** 곧장 넘어가면 지금 어디에 붙어 있는지,
+    애초에 붙기는 하는지를 볼 기회가 없다."""
+    import pathlib
+
+    html = (pathlib.Path(__file__).resolve().parent.parent / "face_anonymizer"
+            / "service" / "static" / "index.html").read_text(encoding="utf-8")
+    assert "openSetup(null);" in html
+    assert "if (d && d.first_run) return openSetup(d);" not in html
