@@ -271,3 +271,211 @@ def test_the_open_switch_beats_a_token_but_says_so(client, monkeypatch, caplog):
     with caplog.at_level(logging.WARNING, logger="face_anonymizer.service.remote"):
         remote.announce()
     assert "인증 없이" in caplog.text
+
+
+# ── 경로로 받기 (2026-08-20 결정) ─────────────────────────────────────────
+#
+# **클라우드 접근은 이쪽이 맡는다.** 저쪽은 분석할 파일 경로와 결과를 둘 경로만
+# 넘기고, 자격 증명은 우리 `.env` 에 있다. 바꾸는 자리를 문 하나로 몰아 두어서,
+# 러너는 예전과 똑같이 URL 두 개만 본다.
+
+class FakeStore:
+    bucket = "our-bucket"
+
+    def __init__(self):
+        self.signed = []
+
+    def presigned_url(self, key, expires=None, filename=None):
+        self.signed.append(("get", self.bucket, key))
+        return f"https://signed.test/{self.bucket}/{key}?get"
+
+    def presigned_put(self, key, content_type="video/mp4", expires=None):
+        self.signed.append(("put", self.bucket, key, content_type))
+        return f"https://signed.test/{self.bucket}/{key}?put&ct={content_type}"
+
+    def for_bucket(self, bucket):
+        if bucket == self.bucket:
+            return self
+        other = FakeStore()
+        other.bucket = bucket
+        other.signed = self.signed
+        return other
+
+
+@pytest.fixture
+def store(monkeypatch):
+    s = FakeStore()
+    monkeypatch.setattr("face_anonymizer.storage.s3.get_store", lambda: s)
+    return s
+
+
+PATH_JOB = {
+    "video_id": "v-2",
+    "input_key": "work/v-2/analysis-720p.mp4",
+    "targets": [{"label": "deid-720p", "height": 720,
+                 "output_key": "work/v-2/analysis-720p.deid.mp4"}],
+}
+
+
+def test_paths_are_signed_with_our_own_credentials(store):
+    """저쪽은 **경로만** 넘긴다. 서명은 우리가 한다."""
+    out = remote.resolve(PATH_JOB)
+    assert out["input_url"] == \
+        "https://signed.test/our-bucket/work/v-2/analysis-720p.mp4?get"
+    assert out["targets"][0]["put_url"].startswith(
+        "https://signed.test/our-bucket/work/v-2/analysis-720p.deid.mp4?put")
+    assert ("get", "our-bucket", "work/v-2/analysis-720p.mp4") in store.signed
+
+
+def test_the_content_type_goes_into_the_signature(store):
+    """안 넣으면 올릴 때 붙는 헤더와 서명이 어긋나 403 이 난다 — 그리고 그
+    403 은 권한 문제와 구분이 안 된다."""
+    out = remote.resolve(PATH_JOB)
+    assert out["targets"][0]["content_type"] == "video/mp4"
+    assert ("put", "our-bucket", "work/v-2/analysis-720p.deid.mp4",
+            "video/mp4") in store.signed
+
+
+def test_an_already_signed_job_is_left_alone(store):
+    """저쪽이 직접 서명해 보내던 방식도 그대로 받는다 — 두 길이 같은 러너로
+    합류한다."""
+    out = remote.resolve(JOB)
+    assert out is JOB
+    assert not store.signed, "이미 서명된 잡에 또 서명했다"
+
+
+def test_an_s3_uri_can_point_at_another_bucket(store):
+    """입력이 스테이징에, 결과가 납품 버킷에 있는 구성이 정상이다."""
+    out = remote.resolve({
+        "video_id": "v-3",
+        "input_key": "s3://intake/raw/v-3.mp4",
+        "targets": [{"label": "deid", "output_key": "s3://delivery/out/v-3.mp4"}],
+    })
+    assert "/intake/raw/v-3.mp4?get" in out["input_url"]
+    assert "/delivery/out/v-3.mp4?put" in out["targets"][0]["put_url"]
+
+
+@pytest.mark.parametrize("alias", ["input_key", "input_path", "input",
+                                   "source_key", "source"])
+def test_the_caller_may_use_its_own_field_names(store, alias):
+    """이름 하나가 어긋났을 때 "input_url 이 필요합니다" 가 나오면 무엇이
+    잘못됐는지가 안 드러난다. 넉넉히 받는다."""
+    out = remote.resolve({"video_id": "v", alias: "a/b.mp4",
+                          "targets": [{"output": "c/d.mp4"}]})
+    assert "a/b.mp4?get" in out["input_url"]
+    assert "c/d.mp4?put" in out["targets"][0]["put_url"]
+
+
+def test_without_a_store_it_says_what_to_check(monkeypatch):
+    """경로로 받으려면 우리 쪽에 저장소가 있어야 한다. 없으면 **어디를 볼지**
+    말해 준다."""
+    monkeypatch.setattr("face_anonymizer.storage.s3.get_store", lambda: None)
+    monkeypatch.setattr("face_anonymizer.storage.s3.unavailable_reason",
+                        lambda: "버킷이 설정되지 않았습니다")
+    with pytest.raises(ValueError) as e:
+        remote.resolve(PATH_JOB)
+    assert "credentials/health" in str(e.value)
+
+
+def test_signing_failure_is_answered_at_submit_not_later(client, store, monkeypatch):
+    """**서명은 접수할 때 한다.** 스레드 안에서 하면 실패가 202 뒤에 숨어서,
+    저쪽은 잡을 받았다고 믿고 폴링부터 시작한다."""
+    r = client.post("/api/deident/jobs",
+                    json={"video_id": "v", "targets": [{"label": "x"}]})
+    assert r.status_code == 400
+    assert "input_url 또는 input_key" in r.json()["detail"]
+
+    r = client.post("/api/deident/jobs",
+                    json={"video_id": "v", "input_key": "a.mp4",
+                          "targets": [{"label": "x"}]})
+    assert r.status_code == 400
+    assert "output_key" in r.json()["detail"]
+
+
+# ── VRAM ──────────────────────────────────────────────────────────────────
+
+def test_vram_shows_up_where_it_is_needed(client, monkeypatch):
+    """OOM 은 나고 나서는 원인을 못 본다. **터지기 전부터 계속 남긴다.**"""
+    from face_anonymizer import gpu
+
+    monkeypatch.setattr(gpu, "snapshot", lambda device=None: {
+        "available": True, "free_mb": 3000, "total_mb": 24000,
+        "used_mb": 21000, "free_pct": 12.5, "name": "테스트GPU"})
+
+    hold = threading.Event()
+
+    def slow(job, *, on_heartbeat=None, anonymizer=None):
+        on_heartbeat({"elapsed_s": 1.0, "percent": 10.0, "stage": "detect",
+                      "stage_label": "얼굴 찾는 중", "eta_s": 9})
+        hold.wait(3)
+        return {"elapsed_s": 2.0, "review_needed": False, "targets": []}
+
+    rec = remote.submit(JOB, runner=slow)
+    for _ in range(300):
+        if rec.progress:
+            break
+        time.sleep(0.01)
+    d = client.get(f"/api/deident/jobs/{rec.id}").json()
+    assert d["progress"]["vram_free_mb"] == 3000
+    assert d["progress"]["vram_free_pct"] == 12.5
+    hold.set()
+    wait_for(rec.id, "done")
+
+
+def test_no_gpu_means_no_extra_noise(monkeypatch):
+    """못 재는 것은 불편이고, 그것 때문에 처리가 멈추는 것은 사고다."""
+    from face_anonymizer import gpu
+
+    monkeypatch.setattr(gpu, "snapshot", lambda device=None: {"available": False})
+    assert remote._vram() == {}
+    assert "CPU" in gpu.line()
+
+
+def test_the_watch_keeps_the_low_water_mark(monkeypatch):
+    """**최저값이 본체다.** 끝난 뒤에 재면 텐서가 다 반납된 뒤라 항상 넉넉해
+    보이고, 아슬아슬했는지는 도는 중에만 보인다."""
+    from face_anonymizer import gpu
+
+    seq = iter([20000, 3000, 8000, 15000])          # 도중에 3GB 까지 내려갔다
+
+    def fake(device=None):
+        return {"available": True, "free_mb": next(seq, 15000),
+                "total_mb": 24000, "used_mb": 0, "free_pct": 0.0,
+                "name": "테스트GPU"}
+
+    monkeypatch.setattr(gpu, "snapshot", fake)
+    w = gpu.Watch(every_s=0.0)                      # 누르지 않고 매번 잰다
+    for _ in range(3):
+        w.sample(force=True)
+    r = w.result()
+    assert r["vram_min_free_mb"] == 3000
+    assert r["vram_min_free_pct"] == 12.5
+    assert r["vram_total_mb"] == 24000
+
+
+def test_the_watch_is_quiet_without_a_gpu(monkeypatch):
+    from face_anonymizer import gpu
+
+    monkeypatch.setattr(gpu, "snapshot", lambda device=None: {"available": False})
+    assert gpu.Watch().result() == {}
+    assert gpu.fields() == {}
+
+
+def test_the_ui_has_a_label_for_every_vram_field():
+    """이름이 없으면 화면에 `vram_min_free_mb` 가 날것으로 뜬다."""
+    import pathlib
+    import re
+
+    html = (pathlib.Path(__file__).resolve().parent.parent / "face_anonymizer"
+            / "service" / "static" / "index.html").read_text(encoding="utf-8")
+    labels = re.search(r"const DETAIL_LABEL = \{(.*?)\n\};", html, re.S)
+    assert labels, "DETAIL_LABEL 을 찾지 못했다"
+    from face_anonymizer import gpu
+
+    class W:
+        min_free, total, name = 1, 2, "x"
+        result = gpu.Watch.result
+    names = set(gpu.Watch.result(W())) | {"vram_free_mb", "vram_free_pct",
+                                          "vram_total_mb"}
+    for n in names:
+        assert f"{n}:" in labels.group(1), f"{n} 의 한국어 이름이 없다"

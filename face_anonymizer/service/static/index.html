@@ -1088,6 +1088,11 @@ const DETAIL_LABEL = {
   action:'판정', note:'사유', job:'작업 id', queue:'큐', cold_s:'기동(초)',
   done:'성공', failed:'실패', avg_elapsed_s:'평균(초)', started_at:'시작',
   finished_at:'종료', span:'구간', review_needed:'검수 필요',
+  // GPU 여유. **최저값이 본체다** — 끝난 뒤에 재면 텐서가 다 반납된 뒤라
+  // 항상 넉넉해 보이고, 아슬아슬했는지는 도는 중에만 보인다.
+  vram_min_free_mb:'GPU 최저 여유', vram_min_free_pct:'GPU 최저 여유율',
+  vram_free_mb:'GPU 여유', vram_free_pct:'GPU 여유율',
+  vram_total_mb:'GPU 전체', vram_name:'GPU',
 };
 const DETAIL_SKIP = new Set(['at', 'ts', 'mode', 'event', 'name', 'batch',
                              'label', 'text', 'tone', 'time', 'timing']);
@@ -1104,6 +1109,10 @@ function detailHtml(k) {
     .map(([key, v]) => {
       let out = v;
       if (key === 'detection_rate') out = (v * 100).toFixed(2) + '%';
+      // 단위를 값에 붙인다. 칸 이름만으로 MB 인지 % 인지 알게 하면, 나중에
+      // 필드가 늘 때마다 이름이 길어진다.
+      else if (key.endsWith('_pct')) out = v + '%';
+      else if (key.endsWith('_mb')) out = v.toLocaleString() + ' MB';
       else if (typeof v === 'boolean') out = v ? '예' : '아니오';
       else if (Array.isArray(v)) out = v.join(', ') || '—';
       else if (typeof v === 'object') return '';

@@ -66,6 +66,18 @@
 | [025](issues/025-the-gate-asked-in-the-wrong-order.md) | 관문이 버킷부터 물었고, 열쇠가 없는데 "리전을 확인하세요" 라고 답했다 | **해결됨** |
 | [026](issues/026-two-tests-were-passing-for-the-wrong-reason.md) | 검사 둘이 엉뚱한 이유로 통과하고 있었다 — 파이썬 3.12 와 그 기계의 `.env` | **해결됨** |
 
+## 돌리는 법
+
+[`running.md`](running.md) — 도커 없이 깔기 · 명령줄 한 편 · 웹 화면 · 설정 ·
+테스트. 루트 README 는 **API 서버로 쓰는 법**만 적는다(그게 이 물건의
+목적이라서), 나머지는 그쪽에 있다.
+
+## 연동
+
+[`integration/rebornstudio.md`](integration/rebornstudio.md) — 잡 스키마 ·
+응답 · 진행률 · 실패 분류. **계약은 페이로드고 전송은 선택이다** — HTTP 로 오든
+큐로 오든 같은 러너로 합류한다.
+
 ## 보안
 
 [`security.md`](security.md) 는 문제 기록이 아니라 **재고 목록**이다. 지금

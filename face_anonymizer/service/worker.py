@@ -28,7 +28,7 @@ except ImportError:                   # pragma: no cover
 
 from ..storage import naming
 from ..storage import s3 as s3mod
-from .. import events, job_runner, timefmt
+from .. import events, gpu, job_runner, timefmt
 from . import config, errors, jobs
 
 log = logging.getLogger(__name__)
@@ -217,7 +217,7 @@ def defer(j, problem, why):
     schedule(j.id, config.DEFER_SEC)
 
 
-def fail_or_retry(j, exc, permanent):
+def fail_or_retry(j, exc, permanent, vram=None):
     """실패 처리. 일시적 오류면 다시 큐에 넣는다.
 
     같은 입력으로 같은 결과가 나올 오류(깨진 파일, 잘못된 인자)는 재시도하지
@@ -263,7 +263,10 @@ def fail_or_retry(j, exc, permanent):
         events.emit("job.failed", job=j.id, name=j.name, batch=j.batch or None,
                     code=info["code"], stage=info.get("stage") or None,
                     policy=info.get("policy"), attempts=j.attempts, detail=msg,
-                    transient=bool(info.get("retryable")))
+                    transient=bool(info.get("retryable")),
+                    # **실패에는 최저 여유를 반드시 남긴다.** OOM 이면 이 값이
+                    # 유일한 단서고, 터진 뒤에는 다시 잴 수 없다.
+                    **(vram or {}))
         # 원인 파악에 필요한 것은 사유·단계·시도 횟수이고 전부 job.json 에
         # 있다. S3 작업이면 원본도 버킷에 그대로다 — 200MB 를 붙들고 있을
         # 이유가 없다. 직접 업로드는 원본이 여기밖에 없어 남긴다.
@@ -312,14 +315,18 @@ def run(job_id):
         log.info("▶ 시작  %s%s  [%s]", j.name,
                  f"  ({j.batch})" if j.batch else "", timefmt.stamp(j.started))
     jobs.save_job(j)
+    # **도는 동안의 최저 여유를 지킨다.** 끝난 뒤에 한 번 재면 텐서가 다 반납된
+    # 뒤라 항상 넉넉해 보인다 — 아슬아슬했는지는 도는 중에만 보인다.
+    watch = gpu.Watch()
     events.emit("job.started", job=j.id, name=j.name, batch=j.batch or None,
-                attempt=j.attempts, s3_key=j.s3_key or None)
+                attempt=j.attempts, s3_key=j.s3_key or None, **gpu.fields())
 
     def progress(stage, done, total):
         # 취소는 여기서만 끊을 수 있다. 파이프라인이 프레임마다 부르는 유일한
         # 지점이라, 예외를 던지면 다음 프레임으로 넘어가지 않고 빠져나온다.
         if j.cancel:
             raise JobCancelled()
+        watch.sample()                     # 시간으로 눌러서 잰다(기본 2초)
         with jobs.LOCK:
             if j.stage != stage:
                 j.stage, j.stage_t0 = stage, time.time()
@@ -463,7 +470,8 @@ def run(job_id):
                     timing=r.get("timing"), attempts=j.attempts,
                     started_at=timefmt.iso(j.started),
                     finished_at=timefmt.iso(j.finished),
-                    span=timefmt.span(j.started, j.finished))
+                    span=timefmt.span(j.started, j.finished),
+                    **watch.result())
         if j.review:
             events.emit("job.review", job=j.id, name=j.name, batch=j.batch or None,
                         codes=[i["code"] for i in j.review],
@@ -497,10 +505,10 @@ def run(job_id):
         log.info("작업 %s 취소됨", job_id)
         events.emit("job.cancelled", job=j.id, name=j.name, batch=j.batch or None)
     except config.PERMANENT_ERRORS as e:
-        fail_or_retry(j, e, permanent=True)
+        fail_or_retry(j, e, permanent=True, vram=watch.result())
     except Exception as e:                      # noqa: BLE001 — 워커가 조용히 죽으면 안 된다
         log.exception("작업 %s 실패", job_id)
-        fail_or_retry(j, e, permanent=False)
+        fail_or_retry(j, e, permanent=False, vram=watch.result())
 
 
 def resume_orphans():

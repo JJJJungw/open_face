@@ -207,6 +207,55 @@ AccessDenied 로 거절한다.** 권한 문제가 아닌데 돌아오는 말이 
     중인 영상에 대해 화면이 그릴 수 있는 값은 이것뿐이다(§5). 실패 화면에는
     `error` 말고 `problem.title` · `problem.hint` 를 띄워 주세요.
 
+## 4-0. 클라우드 접근은 **이쪽이 맡는다** (2026-08-20 결정 — 방향 전환)
+
+앞의 §0~§3 은 "저쪽이 서명하고 우리는 URL 만 받는다" 를 전제로 쓰였다.
+**그 전제가 뒤집혔다.**
+
+| | 예전 전제 | 지금 |
+|---|---|---|
+| 자격 증명 | 저쪽 `.env` 하나 | **우리 `.env`** |
+| 잡에 실리는 것 | presigned GET/PUT | **입력 경로 · 출력 경로** |
+| 서명하는 쪽 | 저쪽 `build_jobs` | **우리 `service/remote.resolve`** |
+
+**러너는 안 바뀌었다.** 경로를 서명된 URL 로 바꾸는 일을 **문 하나에서** 하기
+때문이다(`remote.resolve`). 그래서 `job_runner.run_job` 은 예전과 똑같이 URL 두
+개만 보고, 저쪽이 직접 서명해 보내는 방식도 **그대로 받는다** — 둘 다 같은 곳으로
+합류한다. 이 전환의 값이 그것이다: 방향이 뒤집혔는데 러너·진행률·실패 분류·검수
+판정이 한 줄도 안 바뀌었다.
+
+### 저쪽이 보내는 것
+
+```json
+{"video_id": "uuid", "token": "펜싱 토큰",
+ "input_key": "work/<video_id>/analysis-720p.mp4",
+ "targets": [{"label": "deid-720p", "height": 720,
+              "output_key": "work/<video_id>/analysis-720p.deid.mp4"}]}
+```
+
+`s3://버킷/키` 도 받는다(입력이 스테이징, 결과가 납품 버킷인 구성). 필드 이름은
+넉넉히 본다 — `input_key`·`input_path`·`input`·`source_key`·`source` 와
+`put_key`·`output_key`·`output_path`·`output`. 이름 하나가 어긋났을 때 나는
+오류가 "input_url 이 필요합니다" 면 무엇이 잘못됐는지가 안 드러난다.
+
+### 붙이기 전에 칠 것 — `GET /api/credentials/health`
+
+```json
+{"ok": true, "credentials": {"source": "환경 변수 (AWS_ACCESS_KEY_ID)", "present": true},
+ "provider": "s3", "bucket": "…", "read": true, "write": true, "checked_ms": 143}
+```
+
+**읽기와 쓰기를 따로 본다.** 읽기만 되는 자격 증명이 흔하고, 그 둘은 사람이 할
+일이 다르다(정책에 `s3:PutObject` 를 더하는 일이다). 안 되면 503 과 함께
+`problem.title`·`hint` 가 온다 — 키 없음 / 키 틀림 / 권한 없음 / 버킷 없음 /
+못 닿음이 각각 다른 딱지다(issues/025).
+
+### 서명은 **접수할 때** 한다
+
+스레드 안에서 서명하면 실패가 202 뒤에 숨는다. 저쪽은 잡을 받았다고 믿고 폴링을
+시작하고, 경로 오타 하나가 **리스 만료까지 안 드러난다.** 그래서 경로가 없거나
+저장소가 설정 안 돼 있으면 그 자리에서 400 이다.
+
 ## 4-1. HTTP 문 — 저쪽이 실제로 부르는 방법 (구현됨)
 
 `service/remote.py` · 라우트 둘. **새 처리 로직이 없다** — `job_runner.run_job` 을

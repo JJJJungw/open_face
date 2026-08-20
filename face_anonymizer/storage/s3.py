@@ -488,6 +488,39 @@ class S3Store:
         except Exception as e:                      # noqa: BLE001
             raise wrap(e, f"다운로드 주소를 만들지 못했습니다 ({key})") from e
 
+    def for_bucket(self, bucket):
+        """**같은 자격 증명으로 다른 버킷을 본다.**
+
+        부르는 쪽이 `s3://다른버킷/키` 를 넘길 수 있다 — 입력이 스테이징에,
+        결과가 납품 버킷에 있는 구성이 정상이다. 클라이언트를 그대로 물려주므로
+        접속을 새로 만들지 않는다.
+        """
+        if not bucket or bucket == self.bucket:
+            return self
+        return S3Store(bucket=bucket, client=self.client, config=self.config,
+                       output_prefix=self.output_prefix,
+                       root_prefix=self.root_prefix)
+
+    def presigned_put(self, key, content_type="video/mp4", expires=None):
+        """그 자리에 **올릴 수 있는** 임시 URL.
+
+        부르는 쪽이 경로만 넘기고 자격 증명은 우리가 들 때 쓴다(2026-08-20 결정).
+        키를 여기서 서명해 두면 러너는 예전과 똑같이 **URL 두 개만** 보게 되고,
+        저쪽이 직접 서명해서 보내는 경우와 한 줄도 갈라지지 않는다.
+
+        **Content-Type 을 서명에 넣는다.** 안 넣으면 올릴 때 붙는 헤더와 서명이
+        어긋나 403 이 나는데, 그 403 은 권한 문제와 구분이 안 된다 — 이관 당일에
+        키와 정책을 며칠 뒤지게 되는 종류다.
+        """
+        try:
+            return self.client.generate_presigned_url(
+                "put_object",
+                Params={"Bucket": self.bucket, "Key": key,
+                        "ContentType": content_type},
+                ExpiresIn=int(expires or URL_TTL))
+        except Exception as e:                      # noqa: BLE001
+            raise wrap(e, f"업로드 주소를 만들지 못했습니다 ({key})") from e
+
     def exists(self, key):
         try:
             self.client.head_object(Bucket=self.bucket, Key=key)

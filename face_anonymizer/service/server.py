@@ -28,7 +28,7 @@ from urllib.parse import quote
 from fastapi import Body, FastAPI, Query, Request, Response
 from fastapi.responses import HTMLResponse
 
-from .. import events, logsetup, timefmt
+from .. import events, gpu, logsetup, timefmt
 from ..core.anonymize import METHODS
 from ..core.pipeline import parse_bitrate
 from ..storage import naming, providers
@@ -52,8 +52,12 @@ async def lifespan(_app):
     # 복구와 정리 스레드는 둘 다 남의 작업을 망가뜨릴 수 있는 동작이라,
     # 순서를 뒤로 미루면 확인했을 때는 이미 늦다.
     jobs.claim_jobs_dir()
-    log.info("서버 기동 — 작업 폴더 %s", config.JOBS_DIR)
+    log.info("서버 기동 — 작업 폴더 %s · %s", config.JOBS_DIR, gpu.line())
     remote.announce()          # 잡 접수 문이 열려 있는지를 기록으로 남긴다
+    # 자격 증명이 **어디서** 오고 있는지도 기동에 남긴다. 안 되는 날 이 한 줄이
+    # 없으면 엉뚱한 데를 뒤진다 — 실제로 확인은 /api/credentials/health 가 한다.
+    _src, _has = s3mod.credential_source()
+    log.info("자격 증명: %s%s", _src, "" if _has else " — 없습니다")
     events.emit("server.started", jobs_dir=config.JOBS_DIR)
     worker.resume_orphans()
     if config.SWEEP_SEC > 0 and _sweeper is None:
@@ -206,6 +210,10 @@ def health(response: Response):
             "model_loaded": worker._anonymizer is not None,
             "model": worker.model_status(), "model_error": worker.model_error,
             "device": config.DEVICE or "auto", "imgsz": config.IMGSZ,
+            # **GPU 여유를 여기에도 싣는다.** OOM 이 났을 때 "그 순간 얼마나
+            # 남아 있었나" 는 사후에 못 잰다. 지켜보는 쪽이 이 값을 계속
+            # 긁어 두면 터지기 전의 추세가 남는다.
+            "vram": gpu.snapshot(),
             "methods": list(METHODS)}
     loaded = worker._anonymizer is not None
     if loaded:
@@ -444,6 +452,68 @@ def s3_objects(prefix: str = ""):
             "folders": folders, "objects": objects,
             "output_prefix": store.output_prefix}
 
+
+
+def _problem(p, detail=""):
+    """딱지를 **몸통에 실어 보낼 모양**으로. 던지지 않고 200/503 본문에 넣는다."""
+    d = p.as_dict()
+    if detail:
+        d["detail"] = detail
+    return d
+
+
+@app.get("/api/credentials/health")
+def credentials_health(response: Response):
+    """**자격 증명이 뚫려 있나.** 붙이기 전에 이것부터 친다.
+
+    "설정했는데 왜 안 되지" 를 첫 영상에서 만나지 않게 하는 자리다. 넣어 둔 값이
+    맞는지, 그 값으로 **실제로 읽고 쓸 수 있는지**까지 본다 — 키가 맞아도 권한이
+    없으면 결과를 못 올리고, 그건 900건을 넣은 뒤에 알게 된다.
+
+    읽기와 쓰기를 **따로** 본다. 읽기만 되는 자격 증명이 흔하고, 그 둘은 사람이
+    할 일이 다르다(정책에 `s3:PutObject` 를 더하는 일이다).
+    """
+    src, has = s3mod.credential_source()
+    store = s3mod.get_store()
+    cfg = getattr(store, "config", None) or s3mod.CONFIG
+    out = {"ok": False, "credentials": {"source": src, "present": has},
+           "provider": cfg.provider, "bucket": cfg.bucket or None,
+           "endpoint": cfg.endpoint, "region": cfg.region,
+           "read": None, "write": None}
+    if store is None:
+        response.status_code = 503
+        out["problem"] = _problem(errors.S3_NOT_CONFIGURED,
+                                  s3mod.unavailable_reason())
+        return out
+
+    started = time.time()
+    try:
+        store.list("")
+        out["read"] = True
+    except s3mod.S3Error as e:
+        out["read"] = False
+        response.status_code = 503
+        out["problem"] = _problem(e.problem or errors.S3_UPSTREAM, str(e))
+        out["checked_ms"] = round((time.time() - started) * 1000)
+        return out
+
+    probe = (cfg.output_prefix or "") + ".fa-credential-check"
+    try:
+        store.client.put_object(Bucket=store.bucket, Key=probe, Body=b"ok")
+        store.client.delete_object(Bucket=store.bucket, Key=probe)
+        out["write"] = True
+    except Exception as e:                          # noqa: BLE001
+        out["write"] = False
+        response.status_code = 503
+        err = s3mod.wrap(e, f"결과를 쓰지 못합니다 ({probe})")
+        out["problem"] = _problem(err.problem or errors.S3_UPSTREAM, str(err))
+        out["checked_ms"] = round((time.time() - started) * 1000)
+        return out
+
+    out["ok"] = True
+    out["checked_ms"] = round((time.time() - started) * 1000)
+    out["detail"] = "읽기와 쓰기 모두 확인했습니다"
+    return out
 
 
 # ── 저쪽이 우리를 부르는 문 ────────────────────────────────────────────────

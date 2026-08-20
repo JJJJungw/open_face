@@ -1,191 +1,93 @@
 # face-anonymizer
 
-영상 속 얼굴을 검출해 **모자이크·블러·박스**로 비식별화한다. 검출은
-**YOLO-FaceV2**, 추적은 **ByteTrack**, 끊긴 프레임은 보간으로 메꿔 순간 누출을
-막고, 원본 오디오는 유지한다.
+**사용자가 지정한 클라우드의 영상에서 얼굴을 지운다.** 목적은 그것 하나다.
 
-```
-검출(YOLO-FaceV2) → 추적(ByteTrack) → 트랙 보간 → 익명화 렌더 → 오디오 합성
-```
-
-프레임 단위 검출은 어떤 프레임에서 얼굴을 순간적으로 놓칠 수 있고, 비식별화
-파이프라인에서 그건 곧 프라이버시 누출이다. 그래서 트랙을 잇고, 관측 사이의 빈
-구간을 보간으로 채우고, 마지막 관측 이후에도 몇 프레임 더 가린다.
-
-> **블러는 복원될 수 있다.** 약한 블러는 디블러링 모델로 부분 복원될 여지가
-> 있다. 강한 비식별화가 필요하면 `mosaic`(강하게) 또는 `box` 를 쓴다.
+영상 한 편을 받아 얼굴을 검출하고(YOLO-FaceV2) 추적으로 이어 붙여(ByteTrack)
+모자이크·블러·박스로 가린 뒤 돌려준다. 원본 오디오는 유지한다. 프레임 하나를
+놓치면 그게 곧 누출이라, 끊긴 구간은 보간으로 채우고 마지막 관측 뒤에도 몇
+프레임 더 가린다.
 
 ---
 
-## 시작하기
-
-**파이썬 3.11 이다**(`.python-version`). 3.12 이상은 막아 두었다 — 붙을 곳이 3.11 로
-묶여 있고, 개발과 배포가 다른 파이썬에서 도는 것이 실제로 우리를 물었다
-(docs/issues/026).
+## 띄우기
 
 ```bash
-git clone <저장소> face-anonymizer && cd face-anonymizer
-python3.11 -m venv .venv && source .venv/bin/activate
-pip install -r requirements/base.txt
-
-# ffmpeg 는 시스템 패키지 (오디오 합성용)
-#   Ubuntu/Debian: sudo apt install ffmpeg   |   macOS: brew install ffmpeg
-
-python scripts/setup_weights.py     # 검출기 리포 + 가중치 (한 번만)
-```
-
-**명령줄로 한 편**
-
-```bash
-face-anonymize input.mp4                              # 기본 (모자이크)
-face-anonymize input.mp4 --method box                 # 완전히 가리기
-face-anonymize input.mp4 --imgsz 1600 --conf 0.20     # 작은 얼굴 대응
-```
-
-**서버로 여러 편** — 웹 화면에서 버킷을 훑어 폴더째 제출하고 진행률을 본다.
-
-```bash
-pip install -r requirements/base.txt -r requirements/serve.txt
-uvicorn face_anonymizer.service.server:app --host 127.0.0.1 --port 8000
-```
-
-처음 열면 **어디에 붙을지부터 묻는다**(AWS S3 · NCP · S3 호환). 정하고 나면
-파일 브라우저로 들어간다.
-
-> ⚠ **이 API 에는 아직 인증이 없다.** 믿을 수 있는 망 안에서 띄우는 것을
-> 전제한다. 무엇이 열려 있고 무엇을 막았는지는
-> [`docs/security.md`](docs/security.md) 에 재고 목록으로 적어 뒀다.
-
----
-
-## 구조
-
-```
-face_anonymizer/   패키지 — 두 얼굴(서버 · 큐 워커)이 한 몸을 쓴다
-scripts/           준비·배포 스크립트 (가중치 내려받기, EC2 세팅)
-requirements/      의존성 — base · serve · worker · dev
-tests/             회귀 테스트. 가중치·torch·GPU 없이 1분 안에 돈다
-tools/             손으로 돌리는 도구 (MSA 큐 왕복 검증)
-docs/              문제와 해결 기록 · 연동 규약 · 보안 재고
-weights/           가중치 (커밋하지 않는다)
-third_party/       YOLO-FaceV2 리포 (체크포인트 unpickle 에 필요)
-```
-
-**자세한 것은 폴더마다 README 를 둔다.** 이 파일은 지도이고, 왜 그렇게
-만들었는지는 각 폴더에 있다.
-
-| 폴더 | 무엇이 있나 |
-|---|---|
-| [`face_anonymizer/`](face_anonymizer/README.md) | 패키지 지도 · 처리 파라미터 · 두 얼굴의 관계 |
-| [`core/`](face_anonymizer/core/README.md) | 한 편이 처리되는 순서 · 입력 코덱 · 알려진 제약 |
-| [`service/`](face_anonymizer/service/README.md) | HTTP API · 웹 UI · 큐 · 검수 · 오류 체계 |
-| [`msa/`](face_anonymizer/msa/README.md) | 남의 큐에서 일을 꺼내 오는 워커 |
-| [`storage/`](face_anonymizer/storage/README.md) | 저장소 고르기 · 이름 규칙 · 가중치 조달 |
-| [`requirements/`](requirements/README.md) | 쓰임새별로 무엇을 깔아야 하는가 |
-| [`scripts/`](scripts/README.md) | 가중치 준비 · EC2 부트스트랩 |
-| [`tests/`](tests/README.md) | 무엇을 가짜로 두는지 · 골라서 돌리는 법 |
-| [`tools/`](tools/README.md) | 큐 왕복 검증 |
-| [`docs/`](docs/README.md) | 겪은 문제와 판단의 기록 |
-
----
-
-## 설정
-
-조절할 수 있는 값은 전부 환경 변수다. 띄울 때마다 `export` 를 치는 대신 `.env`
-를 둔다.
-
-```bash
-cp .env.example .env      # 필요한 줄만 고친다
-```
-
-규칙은 둘이다. **실제 환경 변수가 파일보다 우선**하고(한 번만 다르게 돌려
-보려면 `FA_CRF=19 uvicorn ...` 처럼 앞에 붙인다), **파일이 없어도 전부
-기본값으로 돈다.** `.env` 는 커밋하지 않는다 — 버킷 이름 같은 실제 값은 거기만
-둔다.
-
-목록과 기본값은 [`.env.example`](.env.example) 에 주석으로 다 적혀 있다. 코드가
-읽는 값과 그 파일이 어긋나면 테스트가 실패한다.
-
----
-
-## 세 가지로 쓴다
-
-**단독 운영** — 우리가 서버를 갖고, 사람이 웹 화면으로 일을 시킨다. 버킷을 훑어
-폴더째 제출하고 진행률·검수·로그를 화면에서 본다.
-→ [`service/README`](face_anonymizer/service/README.md)
-
-**HTTP 로 부르기** — 남의 시스템이 **잡 하나를 우리 API 에 보낸다.** 서명된 URL
-두 개(입력·출력)만 받고, 저장소 자격 증명은 우리 쪽에 없다. 아래 참고.
-
-**큐 워커(MSA)** — 남의 시스템이 큐에 넣은 일을 우리가 꺼내 온다. 인바운드
-포트가 없다.
-→ [`msa/README`](face_anonymizer/msa/README.md) ·
-[연동 규약](docs/integration/rebornstudio.md)
-
-셋 다 같은 `core/` 를 쓰고, 뒤의 둘은 **같은 러너**(`job_runner.run_job`)로
-합류한다 — 계약은 페이로드고 전송은 선택이다. 처리 기본값도 한 벌을 나눠 쓴다.
-두 벌로 뒀더니 큐 경로가 조용히 다른 설정으로 돌고 있었다([issues/009](docs/issues/009-queue-path-ran-untuned.md)).
-
----
-
-## 컨테이너로 붙이기
-
-```bash
-docker compose up --build          # 8000 포트로 뜬다
+docker compose up --build          # 8000 포트
 curl localhost:8000/api/health
 ```
 
-잡 하나를 보내고 결과를 가져가는 것이 전부다.
+## 먼저 자격 증명부터
+
+**클라우드 접근은 이 서버가 맡는다.** 부르는 쪽은 경로만 넘긴다. 그래서 붙이기
+전에 이것부터 친다 — 되는지 안 되는지, 안 되면 왜 안 되는지가 한 번에 나온다.
+
+```bash
+curl localhost:8000/api/credentials/health
+# → {"ok":true,"credentials":{"source":"환경 변수 (AWS_ACCESS_KEY_ID)"},
+#    "bucket":"…","read":true,"write":true}
+# → 503 {"ok":false,"read":true,"write":false,"problem":{"title":"이 버킷에 대한 권한이 없습니다",…}}
+```
+
+자격 증명은 `.env` 에 둔다(`FA_S3_BUCKET` · `FA_S3_REGION` · `FA_S3_ENDPOINT` 와
+`AWS_ACCESS_KEY_ID` · `AWS_SECRET_ACCESS_KEY`). AWS·NCP·R2·MinIO·Wasabi 가 전부
+같은 모양이고, 엔드포인트 한 줄만 다르다. EC2 라면 IAM 역할을 붙여도 된다 —
+**어디서 온 자격 증명이든 위 응답의 `source` 가 말해 준다.**
+
+## 부르기
+
+일 하나를 넣고, 결과를 가져간다. 그게 전부다.
 
 ```bash
 curl -X POST localhost:8000/api/deident/jobs \
   -H 'Content-Type: application/json' \
   -d '{"video_id":"v-1","token":"fencing-1",
-       "input_url":"<presigned GET>",
+       "input_key":"work/v-1/analysis-720p.mp4",
        "targets":[{"label":"deid-720p","height":720,
-                   "put_url":"<presigned PUT>","content_type":"video/mp4"}]}'
+                   "output_key":"work/v-1/analysis-720p.deid.mp4"}]}'
 # → 202 {"job_id":"…","status":"running"}
 
 curl localhost:8000/api/deident/jobs/<job_id>
-# → {"status":"running","progress":{"percent":46.2,"stage_label":"얼굴 찾는 중",…}}
-# → {"status":"done","result":{…}}  또는  {"status":"failed","problem":{…}}
+# running → {"progress":{"percent":46.2,"stage_label":"얼굴 찾는 중","eta_s":21,
+#                        "vram_free_mb":3000,"vram_free_pct":12.5}}
+# done    → {"result":{…}}
+# failed  → {"problem":{"title":…,"hint":…},"transient":true}
 ```
 
-**문은 기본으로 활짝 열려 있지 않다.** 아무 설정이 없으면 **같은 기계에서만**
-열린다. 밖에서 부르려면 둘 중 하나다.
+`s3://다른버킷/키` 도 받는다 — 입력이 스테이징에, 결과가 납품 버킷에 있어도 된다.
+**이미 서명해 둔 URL 이 있으면** `input_url` · `put_url` 로 보내도 된다. 그때는
+우리 자격 증명을 안 쓴다. 두 방식이 **같은 러너로 합류하므로** 섞어 써도 된다.
 
-| 설정 | 뜻 |
+### 알아 둘 것 셋
+
+| | |
 |---|---|
-| `FA_REMOTE_TOKEN=아무값` | `X-Deident-Token` 헤더에 같은 값을 보내야 열린다 |
-| `FA_REMOTE_OPEN=1` | **인증 없이** 연다. 붙여 보는 단계용 — 기동 로그가 경고한다 |
-
-바쁘면 `429` 로 거절한다(`FA_REMOTE_MAX_INFLIGHT`, 기본 1). **대기열을 만들지
-않는다** — 부르는 쪽이 이미 재시도를 갖고 있고, 두 곳이 각자 판단하면 같은
-영상이 몇 배로 돈다.
+| **문** | 기본은 **같은 기계에서만** 열린다. `FA_REMOTE_OPEN=1` 이면 아무나, `FA_REMOTE_TOKEN=값` 이면 `X-Deident-Token` 헤더로 |
+| **동시에 한 편** | 넘치면 `429`. **대기열을 만들지 않는다** — 부르는 쪽이 이미 재시도를 갖고 있다 (`FA_REMOTE_MAX_INFLIGHT`) |
+| **GPU 여유** | `/api/health` 의 `vram` 과 진행률·로그에 계속 남는다. OOM 은 **나고 나서는 원인을 못 본다** |
 
 GPU 는 있으면 쓰고 없으면 CPU 로 돈다(느리다). `docker-compose.yml` 의 `deploy`
-블록을 지우면 CPU 로 뜬다. 자세한 계약은
-[연동 규약 §4-1](docs/integration/rebornstudio.md).
+블록을 지우면 CPU 로 뜬다.
 
 ---
 
-## 테스트
+## 그 밖에
 
-```bash
-pip install -r requirements/dev.txt
-pytest -q
-```
+이 파일은 지도다. **자세한 것은 폴더마다 README 를 둔다.**
 
-가중치도 GPU 도 없이 1분 안에 돈다 — 가짜 검출기를 주입하기 때문이다. 자세한
-것은 [`tests/README`](tests/README.md).
+| | |
+|---|---|
+| [돌리는 법](docs/running.md) | 도커 없이 · 명령줄 한 편 · 웹 화면 · 설정 · 테스트 |
+| [`face_anonymizer/`](face_anonymizer/README.md) | 패키지 지도 · 처리 파라미터 |
+| [`core/`](face_anonymizer/core/README.md) | 한 편이 처리되는 순서 · 입력 코덱 · 알려진 제약 |
+| [`service/`](face_anonymizer/service/README.md) | HTTP API · 웹 UI · 큐 · 검수 · 오류 체계 |
+| [`storage/`](face_anonymizer/storage/README.md) | 저장소 고르기 · 이름 규칙 · 가중치 조달 |
+| [`msa/`](face_anonymizer/msa/README.md) | 큐에서 일을 꺼내 오는 워커 (전송만 다른 같은 러너) |
+| [연동 규약](docs/integration/rebornstudio.md) | 잡 스키마 · 응답 · 진행률 · 실패 분류 |
+| [`docs/`](docs/README.md) | 겪은 문제와 판단의 기록 |
+| [`tests/`](tests/README.md) · [`scripts/`](scripts/README.md) · [`tools/`](tools/README.md) · [`requirements/`](requirements/README.md) | 검사 · 준비 · 도구 · 의존성 |
 
----
-
-## 기록
-
-만들면서 겪은 문제와 그것을 어떻게 판단하고 고쳤는지는
-[`docs/`](docs/README.md) 에 남긴다. 고친 코드만 보면 **고르지 않은 선택지**가
-사라지기 때문이다 — 더 쉬운 방법이 있는데 왜 안 썼는지, 어떤 대가를 받아들였는지.
+> ⚠ **이 서버에는 아직 인증이 없다**(위 "문" 한 줄이 전부다). 믿을 수 있는 망
+> 안에서 띄우는 것을 전제한다 — [`docs/security.md`](docs/security.md).
 
 ---
 
@@ -193,14 +95,8 @@ pytest -q
 
 **GPL-3.0-or-later.** 검출기 YOLO-FaceV2(및 베이스 YOLOv5)가 GPL-3.0 이므로
 파생물인 이 프로젝트도 같은 조건이다. supervision(ByteTrack)은 MIT 로 호환된다.
-가중치는 저장소에 넣지 않고 업스트림 릴리스를 그대로
-가리킨다([issues/012](docs/issues/012-the-model-was-tied-to-our-bucket.md)).
-
-> `LICENSE` 의 `<YOUR NAME OR ORG>` 는 배포 전에 실제 저작자명으로 바꿔야 한다.
-
-## 크레딧
+가중치는 저장소에 넣지 않고 릴리스를 가리킨다([issues/012](docs/issues/012-the-model-was-tied-to-our-bucket.md)).
 
 - **YOLO-FaceV2** — Krasjet-Yu
-  ([논문](https://www.sciencedirect.com/science/article/abs/pii/S0031320324004655)),
-  clibdev 포크
+  ([논문](https://www.sciencedirect.com/science/article/abs/pii/S0031320324004655)), clibdev 포크
 - **ByteTrack** — supervision / Roboflow
