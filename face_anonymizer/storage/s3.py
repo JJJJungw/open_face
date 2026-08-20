@@ -258,7 +258,7 @@ def client_config():
         return Config(signature_version="s3v4")
 
 
-def make_client(config=None):
+def make_client(config=None, creds=None):
     """boto3 클라이언트. **엔드포인트를 넘길 수 있다.**
 
     NCP Object Storage · Cloudflare R2 · MinIO · Wasabi 는 전부 S3 API 를 그대로
@@ -272,7 +272,9 @@ def make_client(config=None):
     """
     import boto3                                   # noqa: PLC0415 — 지연 임포트
     c = config or CONFIG
-    kw = {"region_name": c.region, **(_creds or {})}
+    # `creds` 는 **이 호출에만** 쓰는 열쇠다. 레지스트리가 활성이 아닌 제공자를
+    # 재 볼 때 전역을 안 건드리고 붙어 보려고 쓴다(storage/registry.py).
+    kw = {"region_name": c.region, **(creds or _creds or {})}
     cfg = client_config()
     if cfg is not None:
         kw["config"] = cfg

@@ -31,7 +31,7 @@ from fastapi.responses import HTMLResponse
 from .. import events, gpu, logsetup, timefmt
 from ..core.anonymize import METHODS
 from ..core.pipeline import parse_bitrate
-from ..storage import naming, providers
+from ..storage import naming, providers, registry
 from ..storage import s3 as s3mod
 from . import config, errors, jobs, metrics, remote, worker
 from .config import JOB_DEFAULTS
@@ -54,6 +54,9 @@ async def lifespan(_app):
     jobs.claim_jobs_dir()
     log.info("서버 기동 — 작업 폴더 %s · %s", config.JOBS_DIR, gpu.line())
     remote.announce()          # 잡 접수 문이 열려 있는지를 기록으로 남긴다
+    # **어느 클라우드를 쓸지 여기서 정한다.** 못 정해도 서버는 뜬다 — 그래야
+    # 화면으로 들어와 왜 못 정했는지를 볼 수 있다(못 뜨면 고칠 길도 같이 막힌다).
+    registry.resolve()
     # 자격 증명이 **어디서** 오고 있는지도 기동에 남긴다. 안 되는 날 이 한 줄이
     # 없으면 엉뚱한 데를 뒤진다 — 실제로 확인은 /api/credentials/health 가 한다.
     _src, _has = s3mod.credential_source()
@@ -514,6 +517,45 @@ def credentials_health(response: Response):
     out["checked_ms"] = round((time.time() - started) * 1000)
     out["detail"] = "읽기와 쓰기 모두 확인했습니다"
     return out
+
+
+# ── 붙을 수 있는 클라우드 ──────────────────────────────────────────────────
+#
+# **불이 들어오는 것과 활성인 것은 다르다.** 불은 여럿 들어올 수 있고 활성은
+# 항상 하나다 — 그래서 잡은 어느 클라우드인지 말할 필요가 없다.
+
+@app.get("/api/clouds")
+def clouds(probe: bool = Query(True, description="실제로 붙어 보나")):
+    """카드 화면이 그리는 것. 제공자마다 설정·자격 증명·붙는지.
+
+    `probe=0` 이면 재지 않고 설정만 돌려준다 — 화면을 먼저 회색으로 그려 두고
+    확인은 뒤따라오게 할 때 쓴다. 잰 결과는 잠깐 캐시한다(FA_CLOUD_PROBE_TTL).
+    """
+    d = registry.listing()
+    for row in d["clouds"]:
+        row["probe"] = (registry.probe(row["id"])
+                        if probe and row["configured"] and row["supported"]
+                        else None)
+    return d
+
+
+@app.post("/api/clouds/{cloud_id}/activate")
+def cloud_activate(cloud_id: str):
+    """활성을 바꾼다. **도는 동안만이다** — 다시 띄우면 .env 로 돌아간다.
+
+    돌고 있는 작업이 있으면 거절한다. 그 밑에서 바꾸면 그 작업은 A 에서 받아
+    B 에 올린다 — 몇 분 뒤에 실패로 남고 원인이 전혀 안 드러난다.
+    """
+    _refuse_if_busy()
+    try:
+        cfg = registry.activate(cloud_id)
+    except ValueError as e:
+        raise errors.INVALID_INPUT(str(e)) from e
+    events.emit("storage.activated", provider=cfg.provider, bucket=cfg.bucket)
+    return {"ok": True, "active": cloud_id, "current": cfg.as_dict(),
+            "probe": registry.probe(cloud_id, force=True),
+            "detail": "이 서버가 도는 동안만 유지됩니다. "
+                      "계속 쓰시려면 .env 의 FA_STORAGE_ACTIVE 를 바꿔 주세요."}
 
 
 # ── 저쪽이 우리를 부르는 문 ────────────────────────────────────────────────

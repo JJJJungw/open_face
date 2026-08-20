@@ -248,7 +248,10 @@ def test_the_screen_does_not_open_before_it_is_configured(fresh):
     html = fresh.get("/").text
     assert 'id="setup"' in html
     assert '<div class="app" hidden>' in html      # 통과해야 열린다
-    assert "어디에 붙을지" in html
+    assert "붙을 수 있는 클라우드" in html
+    # 다만 **가두지는 않는다.** 자격 증명이 안 돼 있어도 카드가 사유를 띄우고
+    # '시작하기' 는 눌린다 — API 서버에서 막는 것은 도움이 아니라 방해다.
+    assert 'onclick="enterApp()"' in html
 
 
 # ── 보안 ────────────────────────────────────────────────────────────────────

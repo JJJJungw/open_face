@@ -137,12 +137,19 @@ def test_every_setting_is_documented():
     doc = set(re.findall(r"^#?(FA_[A-Z0-9_]+)=",
                          (root / ".env.example").read_text(encoding="utf-8"), re.M))
 
+    # **만들어지는 이름은 따로 본다.** 제공자별 설정은 `FA_ + 제공자id + _ + 이름`
+    # 으로 조립되므로 코드에 문자열로 안 나타나고, 다 적으면 마흔 줄이 된다.
+    # 대신 그 조합이 무엇인지는 registry 가 알고 있다 — 거기를 정본으로 본다.
+    from face_anonymizer.storage import registry
+    dynamic = registry.env_names()
+
     # 이 파일을 찾는 데 쓰이는 값이라 이 파일에 못 적는다 — 닭과 달걀이다.
-    missing = {k: v for k, v in used.items() if k not in doc and k != "FA_ENV_FILE"}
+    missing = {k: v for k, v in used.items()
+               if k not in doc and k != "FA_ENV_FILE" and k not in dynamic}
     assert not missing, "\n".join(f"  {k}  ({v})" for k, v in sorted(missing.items()))
 
     # 반대쪽도 본다. 안 읽는 값이 문서에 남아 있으면 넣어도 아무 일이 없다.
-    stale = doc - set(used) - {"FA_ENV_FILE"}
+    stale = doc - set(used) - {"FA_ENV_FILE"} - dynamic
     assert not stale, sorted(stale)
 
 
