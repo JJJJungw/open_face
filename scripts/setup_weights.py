@@ -24,8 +24,13 @@ ROOT = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
 REPO_DIR = os.path.join(ROOT, "third_party", "YOLO-FaceV2")
 WEIGHTS = os.path.join(ROOT, "weights", "yolo-facev2.pt")   # paths.DEFAULT_WEIGHTS 와 같은 자리
 
-REPO_URL = "https://github.com/clibdev/YOLO-FaceV2.git"
-WEIGHTS_URL = "https://github.com/clibdev/YOLO-FaceV2/releases/latest/download/yolo-facev2.pt"
+REPO_URL = os.environ.get("FA_WEIGHTS_REPO") or \
+    "https://github.com/clibdev/YOLO-FaceV2.git"
+
+# 가중치 주소는 **여기 안 적는다.** `storage/weights.py` 의 PUBLIC_URL 하나가
+# 정본이고, 그게 `FA_WEIGHTS_URL` 을 본다. 예전에는 같은 주소가 두 곳에 있었고
+# 이쪽만 환경 변수를 안 봤다 — 사내 미러를 넣어도 이 폴백만 엉뚱한 데로 갔다.
+# 지금은 안 터지지만, 주소를 바꾸는 날 한 곳만 바뀐다(docs/issues/014 의 패턴).
 
 sys.path.insert(0, ROOT)
 
@@ -54,9 +59,11 @@ def ensure_weights():
     except store.WeightsUnavailable as e:
         print(f"S3 에서 받지 못함 — GitHub 릴리스로 받습니다.\n  ({e})")
 
-    print(f"내려받는 중: {WEIGHTS_URL}")
-    urllib.request.urlretrieve(WEIGHTS_URL, WEIGHTS)
-    print("가중치 준비: GitHub 에서 받음")
+    # **주소는 store 가 갖고 있다.** 여기서 다시 적으면 두 곳이 되고, 그때부터
+    # `FA_WEIGHTS_URL` 로 미러를 넣어도 이 줄만 안 따라온다.
+    print(f"내려받는 중: {store.PUBLIC_URL}")
+    urllib.request.urlretrieve(store.PUBLIC_URL, WEIGHTS)
+    print("가중치 준비: 공개 릴리스에서 받음")
     print("  → 다음부터 S3 에서 받으려면: python scripts/setup_weights.py --upload")
 
 

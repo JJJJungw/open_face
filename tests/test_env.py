@@ -169,3 +169,35 @@ def test_the_python_version_is_written_in_one_voice():
     # 상한은 바로 다음 마이너여야 한다 — 3.11 을 고정한다는 뜻이다.
     major, minor = pin.split(".")
     assert (hi.group(1), hi.group(2)) == (major, str(int(minor) + 1)), spec.group(1)
+
+
+def test_the_weights_url_is_written_in_one_place():
+    """가중치 주소가 두 곳에 있으면, 미러를 넣어도 한 곳만 따라온다.
+
+    예전에는 `scripts/setup_weights.py` 가 자기 상수를 들고 있었고 그쪽만
+    `FA_WEIGHTS_URL` 을 안 봤다. 지금은 안 터진다 — S3 가 먼저 답하니까.
+    그래서 더 나쁘다. **틀어진 채로 조용히 도는 종류**다.
+    """
+    import pathlib
+    import re
+
+    root = pathlib.Path(__file__).resolve().parent.parent
+    src = (root / "scripts" / "setup_weights.py").read_text(encoding="utf-8")
+    code = "\n".join(ln for ln in src.splitlines() if not ln.lstrip().startswith("#"))
+    assert "releases/latest/download" not in code, (
+        "setup_weights.py 가 가중치 주소를 또 들고 있다 — "
+        "storage/weights.py 의 PUBLIC_URL 하나가 정본이다")
+    assert "store.PUBLIC_URL" in code, "정본을 안 쓰고 있다"
+
+
+def test_the_public_url_is_the_only_hardcoded_one():
+    """반대쪽도 본다. 정본이 환경 변수를 실제로 보는가."""
+    import os
+
+    from face_anonymizer.storage import weights
+    assert "FA_WEIGHTS_URL" in (
+        pathlib_read := __import__("pathlib").Path(
+            weights.__file__).read_text(encoding="utf-8"))
+    assert pathlib_read.count("releases/latest/download") == 1
+    assert weights.PUBLIC_URL and (
+        os.environ.get("FA_WEIGHTS_URL") in (None, "", weights.PUBLIC_URL))
