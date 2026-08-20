@@ -54,22 +54,44 @@ class S3Error(RuntimeError):
     problem = None
 
 
+def _problems():
+    """HTTP 응답용 딱지표. **없으면 없는 대로 간다.**
+
+    이 표는 `service/errors` 에 있고 그 모듈은 fastapi 를 끈다. 그런데 큐 워커
+    컨테이너에는 fastapi 를 **일부러 안 깐다** — HTTP 를 안 받으니까
+    (requirements/worker.txt). 그래서 거기서 S3 오류가 나면 딱지를 가지러
+    갔다가 `No module named 'fastapi'` 로 죽었다. **진짜 원인(AccessDenied)이
+    사라지고 엉뚱한 메시지가 나간다** — 권한 문제인데 설치가 잘못된 줄 알고
+    엉뚱한 데를 뒤지게 된다.
+
+    딱지는 **부가 정보**다. HTTP 상태 코드를 고르는 데 쓰는 것이고, 워커에는
+    응답 자체가 없어서 쓸 데가 없다. `S3Error.problem` 도 원래 None 이 기본이다.
+    그러니 못 가져오면 안 붙이고, 오류 메시지는 그대로 내보낸다.
+    """
+    try:
+        from ..service import errors                 # 지연 임포트 (순환 방지)
+    except ImportError:
+        return None
+    return errors
+
+
 def wrap(e, what):
     """botocore 예외를 원인이 드러나는 S3Error 로."""
-    from ..service import errors                     # 지연 임포트 (순환 방지)
+    errors = _problems()
     code = ""
     resp = getattr(e, "response", None)
     if isinstance(resp, dict):
         code = str(resp.get("Error", {}).get("Code", ""))
+    err = S3Error(f"{what}: {e}")
+    if errors is None:
+        return err                                   # 워커 — 딱지 없이 그대로
     if code in ("AccessDenied", "403", "SignatureDoesNotMatch",
                 "InvalidAccessKeyId", "ExpiredToken", "AllAccessDisabled"):
-        p = errors.S3_ACCESS_DENIED
+        err.problem = errors.S3_ACCESS_DENIED
     elif code in ("NoSuchKey", "NoSuchBucket", "404"):
-        p = errors.S3_OBJECT_NOT_FOUND
+        err.problem = errors.S3_OBJECT_NOT_FOUND
     else:
-        p = errors.S3_UPSTREAM
-    err = S3Error(f"{what}: {e}")
-    err.problem = p
+        err.problem = errors.S3_UPSTREAM
     return err
 
 

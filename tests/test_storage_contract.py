@@ -11,9 +11,15 @@
   3. **한 줄만 바꾸면 통째로 갈아 끼워지나** — 이게 요구의 본체다
 """
 
+import pathlib
+import subprocess
+import sys
+import textwrap
+
 import pytest
 
 from face_anonymizer.storage import base, providers
+from face_anonymizer.storage import s3 as s3mod
 
 
 def _cfg(pid):
@@ -172,3 +178,64 @@ def test_the_contract_stays_small():
     같이 고치면서 '정말 필요한가' 를 한 번 더 묻게 된다.
     """
     assert len(base.CONTRACT) == 13
+
+
+# ── 워커 컨테이너에는 fastapi 가 없다 (docs/issues/024) ──────────────────────
+
+def test_an_s3_error_survives_without_fastapi():
+    """**큐 워커에는 웹 프레임워크를 일부러 안 깐다.**
+
+    HTTP 를 안 받으니 requirements/worker.txt 에 fastapi 가 없다. 그런데
+    `wrap()` 이 오류에 붙일 딱지를 가지러 `service/errors` 를 임포트했고, 그
+    모듈이 fastapi 를 끈다. 그래서 워커에서 S3 오류가 나면 **진짜 원인이
+    ImportError 로 바뀌어** 나갔다 — 권한 문제인데 설치가 잘못된 줄 알게 된다.
+
+    딱지는 HTTP 상태 코드를 고르는 데 쓰는 부가 정보이고 워커에는 응답 자체가
+    없다. 못 가져오면 안 붙이고 메시지는 그대로 내보낸다.
+
+    **새 프로세스에서 확인한다.** 같은 프로세스에서 sys.modules 를 지워도 부모
+    패키지가 속성으로 들고 있어서 재임포트가 안 일어난다 — 처음에 그렇게 짰다가
+    통과하는 것처럼 보였다. 워커 컨테이너는 애초에 fastapi 가 **없는** 프로세스다.
+    """
+    code = textwrap.dedent("""
+        import sys
+        class Block:
+            def find_module(self, name, path=None):
+                return self if name.split(".")[0] == "fastapi" else None
+            def load_module(self, name):
+                raise ImportError("No module named 'fastapi'")
+        sys.meta_path.insert(0, Block())
+
+        from face_anonymizer.storage import s3 as s3mod
+        class Denied(Exception):
+            response = {"Error": {"Code": "AccessDenied"}}
+        err = s3mod.wrap(Denied("Access Denied"), "내려받지 못했습니다")
+        assert "Access Denied" in str(err), "진짜 원인이 사라졌다"
+        assert err.problem is None, "워커에는 딱지를 붙일 수 없다"
+
+        # 지원하지 않는 제공자도 같은 길을 탄다.
+        from face_anonymizer.storage import base
+        n = base.NotImplementedStore(type("C", (), {"provider": "gcs"})())
+        try:
+            n.check()
+        except s3mod.S3Error as e:
+            assert "지원하지 않습니다" in str(e), e
+        print("OK")
+    """)
+    p = subprocess.run([sys.executable, "-c", code], capture_output=True,
+                       text=True, cwd=str(pathlib.Path(__file__).parent.parent))
+    assert p.returncode == 0, f"워커 경로가 죽었다:\n{p.stderr[-800:]}"
+    assert "OK" in p.stdout
+
+
+def test_the_label_is_still_attached_where_it_is_used(monkeypatch):
+    """서버에서는 딱지가 붙어야 한다 — 권한·오타·장애가 다른 상태 코드다."""
+    class Denied(Exception):
+        response = {"Error": {"Code": "AccessDenied"}}
+
+    class Missing(Exception):
+        response = {"Error": {"Code": "NoSuchKey"}}
+
+    pytest.importorskip("fastapi")
+    assert s3mod.wrap(Denied("x"), "y").problem.code == "s3_access_denied"
+    assert s3mod.wrap(Missing("x"), "y").problem.code == "s3_object_not_found"

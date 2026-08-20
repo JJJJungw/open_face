@@ -89,10 +89,12 @@ class NotImplementedStore:
         self.output_prefix = getattr(config, "output_prefix", "") or ""
 
     def _no(self, what):
-        from .s3 import S3Error                     # noqa: PLC0415 (순환 방지)
-        from ..service import errors                # noqa: PLC0415
+        from .s3 import S3Error, _problems          # noqa: PLC0415 (순환 방지)
         e = S3Error(f"{self.name} 는 아직 지원하지 않습니다 ({what})")
-        e.problem = errors.S3_NOT_CONFIGURED
+        # 딱지는 HTTP 계층에서만 쓴다. 워커에는 fastapi 가 없고 응답도 없다.
+        errors = _problems()
+        if errors is not None:
+            e.problem = errors.S3_NOT_CONFIGURED
         return e
 
     def check(self):
