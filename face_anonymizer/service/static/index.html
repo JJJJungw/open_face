@@ -1340,8 +1340,83 @@ function storageView(d) {
       esc(d.lock_reason)}</div>` : ''}`;
 }
 
-// 첫 실행 — 여기서 정한다. 열쇠 칸은 **이미 있으면 안 보여 준다.** 대부분은
-// 인스턴스 역할이나 aws configure 로 이미 있어서, 물어보면 오히려 헷갈린다.
+// 단계 표시. **번호를 붙이는 것이 요점이다** — 어느 칸부터 채워야 하는지가
+// 화면에 적혀 있지 않으면 사람은 위에서부터 채우고, 위에 있던 것이 버킷 이름이라
+// 열쇠 없이 저장을 누르게 된다.
+function stepLabel(n, text) {
+  return `<div style="margin:18px 0 8px;display:flex;gap:8px;align-items:baseline">
+    <b style="font-size:11.5px;color:var(--faint)">${esc(n)}</b>
+    <b style="font-size:13px">${esc(text)}</b></div>`;
+}
+
+// 고른 제공자의 자격 증명 **사실**. 안내가 아니다.
+//
+// 셋만 말한다 — 키 없이 붙는 길이 이 제공자에 있나, 키는 어디서 발급받나,
+// 영구히 두려면 어떤 이름으로 두나. 그 뒤(정책을 어떻게 짜나, 역할을 어떻게
+// 붙이나)는 그 사람의 콘솔 일이고 우리 화면이 해 줄 수 있는 게 없다.
+function credHint(p, cr) {
+  if (!p || !p.supported) return '';
+  const k = p.credentials || {}, out = [];
+  out.push(k.ambient
+    ? `<div>${esc(k.ambient)}</div>`
+    : `<div><b>${esc(p.name)}</b> 는 키가 있어야 붙습니다 —
+         키 없이 붙는 길이 없습니다.</div>`);
+  if (k.where)
+    out.push(`<div style="color:var(--faint);margin-top:2px">키 발급 —
+      ${esc(k.where)}${k.url ? ` · <a href="${esc(k.url)}" target="_blank"
+        rel="noopener noreferrer">${esc(k.url)}</a>` : ''}</div>`);
+  if (!cr.present && (k.env || []).length)
+    out.push(`<div style="color:var(--faint);margin-top:2px">서버에 영구히
+      두실 때 쓰는 이름 — <code>${k.env.map(x => esc(x)).join('</code> · <code>')}</code></div>`);
+  return out.join('');
+}
+
+// 열쇠 칸. **이미 있어도 보여 준다.**
+//
+// 예전에는 자격 증명이 하나라도 잡히면 이 칸을 통째로 숨기고 "이미 있어서 따로
+// 넣지 않으셔도 됩니다" 라고 했다. 그런데 잡힌 것이 **고른 제공자의 것이라는
+// 보장이 없다** — `~/.aws/credentials` 가 있는 기계에서 NCP 를 고르면 그 문장이
+// 뜨고, 그대로 저장하면 거절당한다. 그때 화면은 이미 "안 넣어도 된다" 고
+// 말해 놓은 뒤라 사람은 열쇠를 마지막에 의심한다.
+//
+// 있으면 있다고만 말하고(위의 '지금 자격 증명' 줄), 바꿀 길은 열어 둔다.
+function credFields(cr) {
+  if (!window.isSecureContext)
+    return `<div class="warn" style="margin-top:8px">
+      <b>지금 연결이 평문(http)이라 키 입력을 열지 않습니다.</b>
+      넣는 즉시 경로 위의 누구나 볼 수 있어서, 받아 두고 안전하다고 말할 수
+      없습니다. https 로 접속하시거나 SSH 터널로 같은 기계에서 여시면 열립니다.
+      키를 넣지 않고 위에 적힌 자리에 두셔도 됩니다.</div>`;
+  return `<div class="stgrid" style="margin-top:8px">
+      <div><label>액세스 키 ${cr.present
+        ? '<span style="color:var(--faint)">(선택)</span>' : ''}</label>
+        <input class="stin" id="stak" autocomplete="off"></div>
+      <div><label>시크릿 키 ${cr.present
+        ? '<span style="color:var(--faint)">(선택)</span>' : ''}</label>
+        <input class="stin" id="stsk" type="password" autocomplete="new-password"></div>
+      <div class="wide meta">${cr.present
+        ? `위에 잡힌 것을 그대로 쓰시려면 두 칸을 비워 두세요. 다른 클라우드의
+           키가 잡혀 있을 수도 있으니, 연결이 거절되면 여기에 새로 넣어 보세요.`
+        : `넣으신 키는 <b>메모리에만</b> 둡니다. 파일에 쓰지 않고 다시 돌려주지도
+           않습니다 — 서버를 다시 띄우면 사라지니, 계속 쓰시려면 저장 뒤에
+           안내해 드리는 두 줄을 서버 환경에 넣어 주세요.`}</div>
+    </div>`;
+}
+
+// 첫 실행 — 여기서 정한다.
+//
+// **순서가 곧 안내다.** 예전에는 버킷 이름부터 물어보고, 자격 증명은 일곱 번째
+// 줄에 상태만 한 줄 떠 있고, 키 칸은 맨 밑에 있었다. 깡통 서버에 이걸 처음
+// 올린 사람은 버킷 이름을 넣고 저장을 눌렀다가 "리전 설정과 네트워크 상태를
+// 확인해 주세요" 를 받았다 — 실제로 없는 것은 열쇠인데.
+//
+// 그래서 셋으로 나눠 번호를 붙인다. **어디에(제공자) → 무엇으로(자격 증명) →
+// 어느 칸(주소).** 붙을 수 있어야 주소가 의미가 있으므로 자격 증명이 먼저다.
+//
+// 자격 증명 안내는 **제공자가 선언한 것을 그대로 그린다**(storage/providers.py
+// 의 credentials). 우리가 IAM 정책 짜는 법을 가르치지 않는다 — 화면이 해 줄 수
+// 있는 게 없는 이야기라서다. 어디서 발급받는지, 키 없이 붙는 길이 있는지까지가
+// 사실이고, 그 뒤는 그 사람의 콘솔 일이다.
 function storageForm(d, opts) {
   const c = d.current, cr = d.credentials || {}, gate = (opts || {}).gate;
   const chips = (d.providers || []).map(p =>
@@ -1354,7 +1429,15 @@ function storageForm(d, opts) {
       아직 붙을 곳이 정해지지 않았습니다. 아래에서 고르고 저장하시면
       바로 쓰실 수 있습니다. <b>연결이 되는 것을 확인한 뒤에만 저장됩니다.</b>
     </div>` : ''}
-    <div style="display:flex;gap:6px;flex-wrap:wrap;margin-bottom:14px">${chips}</div>
+    ${stepLabel('1', '어디에 붙일까요')}
+    <div style="display:flex;gap:6px;flex-wrap:wrap">${chips}</div>
+
+    ${stepLabel('2', '무엇으로 붙을까요')}
+    <div class="meta">지금 자격 증명 — <b>${esc(cr.source || '확인 중')}</b></div>
+    <div class="meta" id="stcredhint" style="margin-top:4px"></div>
+    ${credFields(cr)}
+
+    ${stepLabel('3', '어느 칸에 넣을까요')}
     <div class="stgrid">
       <div class="wide"><label>버킷 이름</label>
         <input class="stin" id="stbucket" placeholder="예: my-bucket" autocomplete="off"></div>
@@ -1368,26 +1451,7 @@ function storageForm(d, opts) {
       <div class="wide"><label>결과 프리픽스</label>
         <input class="stin" id="stout" placeholder="예: v1/results/face/" autocomplete="off"></div>
     </div>
-    <div class="meta" style="margin-top:12px">
-      자격 증명 — <b>${esc(cr.source || '확인 중')}</b></div>
     ${weightsLine(d)}
-    ${cr.present ? `<div class="meta" style="margin-top:4px">
-        이미 있어서 따로 넣지 않으셔도 됩니다.</div>`
-      : !window.isSecureContext ? `<div class="warn" style="margin-top:8px">
-        <b>지금 연결이 평문(http)이라 키 입력을 열지 않습니다.</b>
-        넣는 즉시 경로 위의 누구나 볼 수 있어서, 받아 두고 안전하다고 말할 수
-        없습니다. https 로 접속하시거나 SSH 터널로 같은 기계에서 여시면 열립니다.
-        키를 안 넣고 서버 쪽에 인스턴스 역할·<code>aws configure</code> 를
-        두는 방법도 있습니다.</div>`
-      : `<div class="stgrid" style="margin-top:8px">
-      <div><label>액세스 키</label>
-        <input class="stin" id="stak" autocomplete="off"></div>
-      <div><label>시크릿 키</label>
-        <input class="stin" id="stsk" type="password" autocomplete="new-password"></div>
-      <div class="wide meta">넣으신 키는 <b>메모리에만</b> 둡니다. 파일에 쓰지
-        않고 다시 돌려주지도 않습니다 — 서버를 다시 띄우면 사라지니, 계속
-        쓰시려면 저장 뒤에 안내해 드리는 두 줄을 환경에 넣어 주세요.</div>
-    </div>`}
     <div id="sterr"></div>
     <div style="margin-top:14px;display:flex;gap:8px;align-items:center">
       <button id="stsave" onclick="saveStorage()">${
@@ -1427,6 +1491,10 @@ function fillProvider(pid, cur) {
   if (cur) { set('stroot', c.root_prefix || ''); set('stout', c.output_prefix || ''); }
   const req = $('#stendreq');
   if (req) req.textContent = p.needs_endpoint ? '(필요합니다)' : '(비우면 기본값)';
+  // 자격 증명 안내는 제공자마다 다르다. **안내 줄만 갈아 끼운다** — 칸까지
+  // 다시 그리면 이미 입력해 둔 키가 제공자를 바꾸는 순간 지워진다.
+  const hint = $('#stcredhint');
+  if (hint) hint.innerHTML = credHint(p, (STORAGE && STORAGE.credentials) || {});
   $('#stsave').disabled = !p.supported;
   $('#ststat').textContent = p.supported ? '' : (p.note || '아직 지원하지 않습니다');
 }

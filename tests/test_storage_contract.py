@@ -239,3 +239,69 @@ def test_the_label_is_still_attached_where_it_is_used(monkeypatch):
     pytest.importorskip("fastapi")
     assert s3mod.wrap(Denied("x"), "y").problem.code == "s3_access_denied"
     assert s3mod.wrap(Missing("x"), "y").problem.code == "s3_object_not_found"
+
+
+# ── 붙지 않는 이유 다섯 ────────────────────────────────────────────────────
+#
+# 예전에는 넷이 하나로 뭉쳐 있었다. 열쇠가 아예 없어도 "리전 설정과 네트워크
+# 상태를 확인해 주세요" 가 나갔고, 그게 재시도 대상이라 절대 성공할 수 없는
+# 호출을 95초 창 안에서 네 번 반복했다.
+
+# botocore 예외를 흉내 낸다. **실제 클래스를 임포트하지 않는다** — boto3 가
+# 없는 환경(워커)에서도 이 검사가 돌아야 하고, wrap() 도 같은 이유로 클래스가
+# 아니라 이름을 본다.
+def _named(name):
+    """자격 증명이 아예 없을 때 나오는 모양 — HTTP 응답이 없어 response 가 없다."""
+    return type(name, (Exception,), {})
+
+
+def _coded(code):
+    """저장소가 대답은 했는데 거절한 모양."""
+    return type("E", (Exception,), {"response": {"Error": {"Code": code}}})
+
+
+@pytest.mark.parametrize("exc, want", [
+    (_named("NoCredentialsError")("어디에도 없다"), "s3_no_credentials"),
+    (_named("PartialCredentialsError")("시크릿이 없다"), "s3_no_credentials"),
+    (_coded("InvalidAccessKeyId")("x"), "s3_bad_credentials"),
+    (_coded("SignatureDoesNotMatch")("x"), "s3_bad_credentials"),
+    (_coded("ExpiredToken")("x"), "s3_bad_credentials"),
+    (_coded("AccessDenied")("x"), "s3_access_denied"),
+    (_coded("NoSuchBucket")("x"), "s3_bucket_not_found"),
+    (_coded("NoSuchKey")("x"), "s3_object_not_found"),
+    (Exception("연결 실패"), "s3_upstream"),
+])
+def test_each_reason_gets_its_own_label(exc, want):
+    """사람이 다음에 할 일이 다르면 딱지도 달라야 한다.
+
+    키가 없다 / 키가 틀렸다 / 권한이 없다 / 버킷이 없다 / 못 닿는다 —
+    다섯 중 넷을 '네트워크' 로 보고하면 나머지 넷은 멀쩡한 망을 뒤진다.
+    """
+    pytest.importorskip("fastapi")
+    assert s3mod.wrap(exc, "무엇을").problem.code == want
+
+
+def test_only_the_network_case_is_worth_retrying():
+    """**재시도는 세상이 바뀔 수 있을 때만 쓸모가 있다.**
+
+    열쇠가 없는데 다섯 번 더 물어봐도 없다. 그동안 뒤에 쌓인 정상 작업이 밀린다.
+    """
+    pytest.importorskip("fastapi")
+    from face_anonymizer.service import errors
+
+    assert errors.S3_UPSTREAM.retryable
+    for p in (errors.S3_NO_CREDENTIALS, errors.S3_BAD_CREDENTIALS,
+              errors.S3_ACCESS_DENIED, errors.S3_BUCKET_NOT_FOUND):
+        assert not p.retryable, p.code
+
+
+def test_the_old_wrong_hint_is_gone():
+    """자격 증명이 없을 때 리전을 확인하라고 하지 않는다."""
+    pytest.importorskip("fastapi")
+    from face_anonymizer.service import errors
+
+    assert "리전" not in errors.S3_NO_CREDENTIALS.hint
+    assert "리전" not in errors.S3_UPSTREAM.hint
+    # 대신 실제로 볼 자리를 말한다.
+    assert "AWS_ACCESS_KEY_ID" in errors.S3_NO_CREDENTIALS.hint
+    assert "엔드포인트" in errors.S3_UPSTREAM.hint

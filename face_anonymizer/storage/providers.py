@@ -47,6 +47,30 @@ from urllib.parse import urlparse
 
 # 제공자 정의. endpoint 가 None 이면 그 제공자의 기본 엔드포인트를 쓴다는 뜻이고
 # (AWS 는 리전으로 알아서 정해진다), 빈 문자열이면 사람이 넣어야 한다는 뜻이다.
+# ── 자격 증명은 제공자마다 다르다 ───────────────────────────────────────────
+#
+# **우리는 클라우드 관리법을 가르치지 않는다.** IAM 정책을 어떻게 짜는지, 역할을
+# 어떻게 붙이는지는 그 사람의 콘솔 일이고 우리 화면이 해 줄 수 있는 게 하나도
+# 없다. 우리가 답하는 질문은 넷뿐이다 — 지금 자격 증명이 있나, 없으면 여기서
+# 받고, 실제로 붙나, 안 붙으면 왜 안 붙나.
+#
+# 그래서 여기 적는 것은 **안내가 아니라 사실**이다. 제공자가 선언하면 화면은
+# 그걸 그대로 그린다. 화면이 AWS 를 특별대우하는 게 아니라, 키 없이 붙는 길이
+# AWS 에만 있다는 것이 그냥 사실이다.
+#
+#   where    키를 어디서 발급받나 (한 줄)
+#   url      그 콘솔 주소. 없으면 빈 문자열
+#   ambient  **키 없이 붙는 길이 이 제공자에 있나.** 있으면 그 설명, 없으면 ''
+#   env      환경에 영구히 둘 때 쓰는 변수 이름
+#
+# ``env`` 가 전부 ``AWS_`` 로 시작하는 것은 우리 사정이 아니라 boto3 의 이름이다.
+# NCP 를 쓰는 사람이 "왜 AWS 변수지?" 에서 멈추지 않게 화면에 그대로 적는다.
+KEYLESS_NONE = ""       # 이 제공자에는 키 없이 붙는 길이 없다
+BOTO_ENV = ("AWS_ACCESS_KEY_ID", "AWS_SECRET_ACCESS_KEY")
+NO_CREDENTIALS = {"where": "", "url": "", "ambient": "", "env": ()}
+
+# 제공자 정의. endpoint 가 None 이면 그 제공자의 기본 엔드포인트를 쓴다는 뜻이고
+# (AWS 는 리전으로 알아서 정해진다), 빈 문자열이면 사람이 넣어야 한다는 뜻이다.
 PROVIDERS = {
     "s3": {
         "name": "AWS S3",
@@ -56,6 +80,13 @@ PROVIDERS = {
         "needs_endpoint": False,
         "store": "face_anonymizer.storage.s3:S3Store",
         "note": "자격 증명은 EC2 인스턴스 역할이면 자동으로 잡힌다.",
+        "credentials": {
+            "where": "IAM 콘솔 → 사용자 → 보안 자격 증명 → 액세스 키",
+            "url": "https://console.aws.amazon.com/iam/",
+            "ambient": "이 서버가 EC2·ECS 이고 IAM 역할이 붙어 있으면 "
+                       "키를 넣지 않아도 붙습니다.",
+            "env": BOTO_ENV,
+        },
     },
     "ncp": {
         "name": "네이버 클라우드 Object Storage",
@@ -65,6 +96,12 @@ PROVIDERS = {
         "needs_endpoint": False,
         "store": "face_anonymizer.storage.s3:S3Store",
         "note": "S3 API 를 그대로 쓴다. 액세스 키가 필요하다.",
+        "credentials": {
+            "where": "네이버 클라우드 콘솔 → 마이페이지 → 계정 관리 → 인증키 관리",
+            "url": "https://www.ncloud.com/mypage/manage/authkey",
+            "ambient": KEYLESS_NONE,
+            "env": BOTO_ENV,
+        },
     },
     "s3compat": {
         "name": "기타 S3 호환 (R2 · MinIO · Wasabi …)",
@@ -74,6 +111,13 @@ PROVIDERS = {
         "needs_endpoint": True,
         "store": "face_anonymizer.storage.s3:S3Store",
         "note": "엔드포인트 주소를 직접 넣는다.",
+        "credentials": {
+            "where": "쓰시는 저장소에서 발급합니다 — R2 는 API 토큰, "
+                     "MinIO 는 사용자 액세스 키, Wasabi 는 액세스 키",
+            "url": "",
+            "ambient": KEYLESS_NONE,
+            "env": BOTO_ENV,
+        },
     },
     # ── 아직 없는 것들 ──────────────────────────────────────────────────────
     # 목록에 두는 이유는 "이건 되나?" 를 묻지 않게 하기 위해서다. 고르면
@@ -84,6 +128,8 @@ PROVIDERS = {
         "endpoint": None, "region": None, "needs_endpoint": False,
         "store": "face_anonymizer.storage.base:NotImplementedStore",
         "note": "아직 지원하지 않는다. 구현을 하나 써서 store 를 바꾸면 된다.",
+        # 붙을 수 없는 것에 열쇠 이야기를 적으면 될 것처럼 보인다.
+        "credentials": NO_CREDENTIALS,
     },
     "azure": {
         "name": "Azure Blob Storage",
@@ -91,6 +137,7 @@ PROVIDERS = {
         "endpoint": None, "region": None, "needs_endpoint": False,
         "store": "face_anonymizer.storage.base:NotImplementedStore",
         "note": "아직 지원하지 않는다. 구현을 하나 써서 store 를 바꾸면 된다.",
+        "credentials": NO_CREDENTIALS,
     },
 }
 
@@ -182,11 +229,23 @@ def is_supported(name=None):
     return get(name).get("store", STUB) != STUB
 
 
+def credentials_of(name=None):
+    """이 제공자의 자격 증명 사실. **없으면 빈 값으로 준다.**
+
+    새 제공자를 붙이면서 이 칸을 안 채웠다고 화면이 깨지면 안 된다 — 그때
+    빠지는 건 안내 한 줄이고, 남는 건 못 쓰는 게이트다.
+    """
+    return {**NO_CREDENTIALS, **(get(name).get("credentials") or {})}
+
+
 def listing():
     """화면이 그릴 목록. 지원 여부까지 같이 준다."""
     return [{"id": k, **{kk: vv for kk, vv in v.items()
-                         if kk not in ("endpoint", "store")},
-             "endpoint": v["endpoint"], "supported": is_supported(k)}
+                         if kk not in ("endpoint", "store", "credentials")},
+             "endpoint": v["endpoint"], "supported": is_supported(k),
+             # 빈 칸을 남겨 두지 않는다 — 화면이 `p.credentials.where` 를
+             # 그리다 undefined 에서 멈추면 게이트 전체가 안 나온다.
+             "credentials": credentials_of(k)}
             for k, v in PROVIDERS.items()]
 
 

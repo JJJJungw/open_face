@@ -75,20 +75,56 @@ def _problems():
     return errors
 
 
+# 자격 증명이 **아예 없을 때** botocore 가 던지는 것들. 이쪽은 HTTP 응답이
+# 없어서 `response` 딕셔너리가 안 붙는다 — 그래서 예전에는 코드가 빈 문자열이라
+# 전부 '네트워크 오류' 로 흘러갔다. 붙지도 못한 것을 "리전을 확인하세요" 로
+# 보고하면 사람은 멀쩡한 리전을 몇 번이고 다시 본다.
+#
+# **클래스 이름으로 본다.** botocore 를 임포트해서 예외 클래스를 잡으면 boto3 가
+# 없는 환경(워커 테스트)에서 이 모듈이 통째로 못 뜬다 — 지연 임포트를 지키는
+# 이유와 같다.
+NO_CREDENTIAL_ERRORS = {
+    "NoCredentialsError",           # 체인 어디에도 없다
+    "PartialCredentialsError",      # 액세스 키만 있고 시크릿이 없다 (오타)
+    "CredentialRetrievalError",     # SSO·역할 위임에서 가져오다 실패
+    "TokenRetrievalError",
+    "UnauthorizedSSOTokenError",
+}
+
+# 키는 있는데 저장소가 그 키를 거절한 경우. 권한(정책)과 다른 문제다 —
+# 권한은 콘솔에서 정책을 고치는 일이고, 이쪽은 키 자체를 다시 보는 일이다.
+BAD_CREDENTIAL_CODES = {
+    "InvalidAccessKeyId", "SignatureDoesNotMatch", "InvalidToken",
+    "ExpiredToken", "TokenRefreshRequired", "AuthorizationHeaderMalformed",
+    "InvalidSecurity", "InvalidClientTokenId",
+}
+
+
 def wrap(e, what):
-    """botocore 예외를 원인이 드러나는 S3Error 로."""
+    """botocore 예외를 원인이 드러나는 S3Error 로.
+
+    갈래를 다섯으로 나눈다 — **사람이 다음에 할 일이 전부 다르기 때문이다**
+    (errors.S3_NO_CREDENTIALS 위 주석). 하나로 뭉치면 문구는 하나로 줄지만
+    그 하나가 다섯 중 넷에게 틀린 말을 한다.
+    """
     errors = _problems()
     code = ""
     resp = getattr(e, "response", None)
     if isinstance(resp, dict):
         code = str(resp.get("Error", {}).get("Code", ""))
+    name = type(e).__name__
     err = S3Error(f"{what}: {e}")
     if errors is None:
         return err                                   # 워커 — 딱지 없이 그대로
-    if code in ("AccessDenied", "403", "SignatureDoesNotMatch",
-                "InvalidAccessKeyId", "ExpiredToken", "AllAccessDisabled"):
+    if name in NO_CREDENTIAL_ERRORS:
+        err.problem = errors.S3_NO_CREDENTIALS
+    elif code in BAD_CREDENTIAL_CODES:
+        err.problem = errors.S3_BAD_CREDENTIALS
+    elif code in ("AccessDenied", "403", "AllAccessDisabled"):
         err.problem = errors.S3_ACCESS_DENIED
-    elif code in ("NoSuchKey", "NoSuchBucket", "404"):
+    elif code == "NoSuchBucket":
+        err.problem = errors.S3_BUCKET_NOT_FOUND
+    elif code in ("NoSuchKey", "404"):
         err.problem = errors.S3_OBJECT_NOT_FOUND
     else:
         err.problem = errors.S3_UPSTREAM
