@@ -32,8 +32,8 @@ node_only = pytest.mark.skipif(not shutil.which("node"), reason="node 없음")
 # 관문을 그리는 데 필요한 것 전부. 화면 전체를 브라우저에 띄우지 않고 이
 # 함수들만 떼어 실제로 돌린다 — 문자열을 눈으로 읽는 검사는 순서가 바뀌어도
 # 통과한다.
-NEEDED = ("esc", "stepLabel", "credHint", "credFields", "weightsLine",
-          "storageForm")
+NEEDED = ("esc", "stepLabel", "credHint", "credHomes", "credHomeList",
+          "credHelp", "credFields", "weightsLine", "storageForm")
 
 
 def _js():
@@ -64,10 +64,12 @@ globalThis.window = {{ isSecureContext: {json.dumps(secure)} }};
 {_js()}
 const d = {json.dumps(d, ensure_ascii=False)};
 let html = storageForm(d, {{ gate: true }});
-// fillProvider 가 나중에 채우는 자리다. 여기서는 직접 넣어 같은 화면을 만든다.
+// fillProvider 가 나중에 채우는 자리들이다. 여기서는 직접 넣어 같은 화면을 만든다.
 const p = d.providers.find(x => x.id === {json.dumps(provider)});
 html = html.replace('<div class="meta" id="stcredhint" style="margin-top:4px"></div>',
   '<div class="meta" id="stcredhint">' + credHint(p, d.credentials) + '</div>');
+html = html.replace('<div id="stcredhelp"></div>',
+  '<div id="stcredhelp">' + credHelp(p, d.credentials) + '</div>');
 console.log(html);
 """
     r = subprocess.run(["node", "-e", harness],
@@ -91,7 +93,9 @@ def test_credentials_come_before_the_bucket():
 def test_the_three_steps_are_numbered_in_order():
     """번호가 없으면 사람은 그냥 위에서부터 채운다."""
     html = render()
-    order = [m.group(1) for m in re.finditer(r">(\d)</b>", html)]
+    # 단계 번호만 센다. 안내판 안에도 번호가 붙은 항목이 있어서, 그냥
+    # `>(\d)</b>` 로 훑으면 그것까지 섞인다 — 처음에 그렇게 짰다가 걸렸다.
+    order = re.findall(r'color:var\(--faint\)">(\d)</b>', html)
     assert order == ["1", "2", "3"], order
 
 
@@ -132,6 +136,50 @@ def test_plain_http_still_refuses_to_take_keys():
     assert "평문(http)" in html
     # 그래도 **다음에 할 일**은 말해 준다 — 제공자별 안내는 그대로 있다.
     assert 'id="stcredhint"' in html
+
+
+@node_only
+def test_the_panel_says_where_a_key_goes_to_stay():
+    """**대가를 나중에 알게 하지 않는다.**
+
+    화면에 넣은 열쇠는 메모리에만 있다. 그 사실이 필요해지는 것은 서버를 다시
+    띄운 뒤인데, 그때 알림창은 이미 닫혀 있다. 그래서 넣기 전에, 닫히지 않는
+    자리에 적어 둔다.
+    """
+    html = render("s3")
+    assert "서버에 계속 남기려면" in html
+    assert "AWS_ACCESS_KEY_ID=" in html
+    assert "aws_secret_access_key = " in html
+
+
+@node_only
+def test_the_panel_opens_only_when_there_is_nothing_yet():
+    """이미 잡힌 사람에게는 소음이다. 없는 사람에게만 펼쳐 준다."""
+    assert "<details open" in render("s3", present=False)
+    assert "<details open" not in render("s3", present=True)
+
+
+@node_only
+def test_the_credentials_file_is_not_advertised_as_aws_only():
+    """`~/.aws/credentials` 는 **제공자와 무관하게** boto3 가 읽는다.
+
+    파일 이름 때문에 AWS 전용으로 보인다. 이걸 안 적으면 NCP·R2 를 쓰는 사람은
+    환경 변수 말고는 길이 없는 줄 안다.
+    """
+    ncp = render("ncp")
+    assert "~/.aws/credentials" in ncp
+    assert "제공자와 무관하게" in ncp
+
+
+@node_only
+def test_the_keyless_path_is_listed_only_where_it_exists():
+    """AWS 는 셋, 나머지는 둘. 없는 길을 적으면 그건 그냥 틀린 말이다."""
+    def homes(html):
+        return re.findall(r'<b>(\d)</b> &nbsp;', html)
+
+    assert homes(render("s3")) == ["1", "2", "3"]
+    assert homes(render("ncp")) == ["1", "2"]
+    assert "키를 두지 않는 길" not in render("ncp")
 
 
 # ── 표 자체 ────────────────────────────────────────────────────────────────

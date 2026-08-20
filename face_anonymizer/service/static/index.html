@@ -286,7 +286,14 @@
   details > summary::before{content:'▸';color:var(--faint);font-size:10px}
   details[open] > summary::before{content:'▾'}
   details > summary:hover{color:var(--accent-ink)}
+  details > summary::-webkit-details-marker{display:none}
   details > summary #dsum{color:var(--faint);font-size:11.5px}
+  /* 그대로 베껴 넣는 것들 — 환경 변수 두 줄, 자격 증명 파일 세 줄. 손으로
+     다시 치게 하면 오타가 나고, 오타 난 열쇠는 '권한 없음' 으로 돌아온다. */
+  .credbox{margin:4px 0 0;padding:8px 10px;background:var(--raise);
+    border:1px solid var(--line);border-radius:7px;font-size:11.5px;
+    line-height:1.65;white-space:pre;overflow-x:auto;color:var(--fg);
+    font-family:ui-monospace,SFMono-Regular,Menlo,Consolas,monospace}
   label{display:block;font-size:11px;color:var(--faint);margin-bottom:4px}
   select,input[type=number]{width:100%;background:var(--surface);color:var(--fg);
     border:1px solid var(--line);border-radius:7px;padding:6px 8px;font-size:12.5px}
@@ -1371,6 +1378,52 @@ function credHint(p, cr) {
   return out.join('');
 }
 
+// 열쇠가 **계속 사는 자리**들. 제공자가 선언한 것에서 그대로 따라온다.
+//
+// 화면에 넣은 열쇠는 메모리에만 있다. 그건 이 방식의 값이자 대가인데, 대가
+// 쪽을 나중에 알게 하면 안 된다 — 서버를 다시 띄운 다음에 "왜 안 되지" 로
+// 만나면 그때는 원인이 열쇠라는 생각을 마지막에 한다.
+function credHomes(p) {
+  const k = (p && p.credentials) || {}, env = k.env || [], out = [];
+  if (env.length) {
+    out.push({ t: '환경 변수', c: env.map(n => n + '=…').join('\n') });
+    // **파일 이름이 `.aws` 라서 AWS 전용처럼 보이지만 아니다.** boto3 는
+    // 제공자와 무관하게 이 파일을 읽는다. 이걸 안 적으면 NCP·R2 를 쓰는
+    // 사람은 환경 변수 말고는 길이 없는 줄 안다.
+    out.push({ t: '~/.aws/credentials 파일 (제공자와 무관하게 읽습니다)',
+               c: '[default]\naws_access_key_id = …\naws_secret_access_key = …' });
+  }
+  if (k.ambient) out.push({ t: '키를 두지 않는 길', note: k.ambient });
+  return out;
+}
+
+function credHomeList(p) {
+  return credHomes(p).map((h, i) => `<div style="margin-top:9px">
+    <div style="font-size:12px"><b>${i + 1}</b> &nbsp;${esc(h.t)}</div>
+    ${h.c ? `<div class="credbox">${esc(h.c)}</div>`
+          : `<div class="meta" style="margin-top:3px">${esc(h.note)}</div>`}
+  </div>`).join('');
+}
+
+// 관문에서는 **접어 둔다.** 이미 잡혀 있는 사람(대부분)에게는 소음이고, 없는
+// 사람에게만 필요하다. 그래서 없을 때만 펼쳐진 채로 뜬다.
+//
+// `bare` 는 저장 직후 화면용이다. 그 자리에는 이미 "메모리에만 있습니다" 가
+// 큰 글씨로 떠 있고 입력 칸도 없으므로, 접는 것도 머리말도 군더더기다.
+function credHelp(p, cr, opts) {
+  if (!p || !p.supported) return '';
+  const homes = credHomeList(p);
+  if (!homes) return '';
+  if ((opts || {}).bare) return homes;
+  return `<details ${cr.present ? '' : 'open'} style="margin-top:10px">
+    <summary>서버에 계속 남기려면</summary>
+    <div class="meta" style="margin-top:6px">아래 칸에 넣으시면 지금 바로
+      됩니다. 다만 <b>메모리에만</b> 있어서 서버를 다시 띄우면 사라집니다.
+      계속 쓰시려면 서버 쪽에 두세요.</div>
+    ${homes}
+  </details>`;
+}
+
 // 열쇠 칸. **이미 있어도 보여 준다.**
 //
 // 예전에는 자격 증명이 하나라도 잡히면 이 칸을 통째로 숨기고 "이미 있어서 따로
@@ -1435,6 +1488,7 @@ function storageForm(d, opts) {
     ${stepLabel('2', '무엇으로 붙을까요')}
     <div class="meta">지금 자격 증명 — <b>${esc(cr.source || '확인 중')}</b></div>
     <div class="meta" id="stcredhint" style="margin-top:4px"></div>
+    <div id="stcredhelp"></div>
     ${credFields(cr)}
 
     ${stepLabel('3', '어느 칸에 넣을까요')}
@@ -1493,8 +1547,11 @@ function fillProvider(pid, cur) {
   if (req) req.textContent = p.needs_endpoint ? '(필요합니다)' : '(비우면 기본값)';
   // 자격 증명 안내는 제공자마다 다르다. **안내 줄만 갈아 끼운다** — 칸까지
   // 다시 그리면 이미 입력해 둔 키가 제공자를 바꾸는 순간 지워진다.
+  const cr = (STORAGE && STORAGE.credentials) || {};
   const hint = $('#stcredhint');
-  if (hint) hint.innerHTML = credHint(p, (STORAGE && STORAGE.credentials) || {});
+  if (hint) hint.innerHTML = credHint(p, cr);
+  const help = $('#stcredhelp');
+  if (help) help.innerHTML = credHelp(p, cr);
   $('#stsave').disabled = !p.supported;
   $('#ststat').textContent = p.supported ? '' : (p.note || '아직 지원하지 않습니다');
 }
@@ -1555,12 +1612,33 @@ async function saveStorage() {
       `<div class="warn" style="margin-top:12px">${esc(problemText(j) || '연결하지 못했습니다')}</div>`;
     return;
   }
-  const hint = (j.persist_hint || []).length
-    ? `\n\n키는 메모리에만 있습니다. 계속 쓰시려면 환경에 넣어 주세요:\n${
-        j.persist_hint.join('\n')}`
-    : '';
-  alert(`연결했습니다 — ${j.detail}\n버킷 ${j.current.bucket}${hint}`);
+  // **열쇠를 방금 넣은 사람은 바로 안 들여보낸다.**
+  //
+  // 예전에는 alert 하나로 "환경에 넣어 주세요" 두 줄을 던지고 곧장 통과시켰다.
+  // 알림창은 닫으면 사라지고 복사도 안 된다 — 그 두 줄이 필요해지는 것은
+  // 서버를 다시 띄운 **뒤**인데, 그때는 이미 없다.
+  //
+  // 열쇠를 안 넣은 사람(이미 환경에 있는 사람)은 이 판이 할 말이 없으므로
+  // 예전처럼 그냥 통과시킨다.
+  if ((j.persist_hint || []).length) return persistStep(j);
+  alert(`연결했습니다 — ${j.detail}\n버킷 ${j.current.bucket}`);
   enterApp();
+}
+
+// 저장은 끝났다. 남은 것은 **이 열쇠를 어디에 둬야 다음에도 사는가** 하나다.
+function persistStep(j) {
+  const p = (STORAGE.providers || []).find(x => x.id === j.current.provider);
+  $('#setup-body').innerHTML = `
+    <div class="meta" style="margin-bottom:4px">연결했습니다 —
+      ${esc(j.detail)}</div>
+    <div style="font-size:15px;font-weight:600;margin-bottom:12px">
+      ${esc(j.current.name)} · ${esc(j.current.bucket)}</div>
+    <div class="warn">넣으신 열쇠는 <b>메모리에만</b> 있습니다. 파일에 쓰지 않고
+      다시 돌려주지도 않습니다 — <b>서버를 다시 띄우면 사라집니다.</b>
+      계속 쓰시려면 아래 중 하나를 서버 쪽에 두세요. 지금 안 하셔도 쓰시는 데는
+      지장이 없습니다.</div>
+    ${credHelp(p, {}, { bare: true })}
+    <div style="margin-top:16px"><button onclick="enterApp()">시작하기</button></div>`;
 }
 
 async function testStorage() {
