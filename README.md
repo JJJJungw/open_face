@@ -108,19 +108,64 @@ cp .env.example .env      # 필요한 줄만 고친다
 
 ---
 
-## 두 가지로 쓴다
+## 세 가지로 쓴다
 
 **단독 운영** — 우리가 서버를 갖고, 사람이 웹 화면으로 일을 시킨다. 버킷을 훑어
 폴더째 제출하고 진행률·검수·로그를 화면에서 본다.
 → [`service/README`](face_anonymizer/service/README.md)
 
+**HTTP 로 부르기** — 남의 시스템이 **잡 하나를 우리 API 에 보낸다.** 서명된 URL
+두 개(입력·출력)만 받고, 저장소 자격 증명은 우리 쪽에 없다. 아래 참고.
+
 **큐 워커(MSA)** — 남의 시스템이 큐에 넣은 일을 우리가 꺼내 온다. 인바운드
-포트가 없고 자격 증명도 없다(서명된 URL 만 받는다).
+포트가 없다.
 → [`msa/README`](face_anonymizer/msa/README.md) ·
 [연동 규약](docs/integration/rebornstudio.md)
 
-둘 다 같은 `core/` 를 쓰고 처리 기본값도 한 벌을 나눠 쓴다. 두 벌로 뒀더니 큐
-경로가 조용히 다른 설정으로 돌고 있었다([issues/009](docs/issues/009-queue-path-ran-untuned.md)).
+셋 다 같은 `core/` 를 쓰고, 뒤의 둘은 **같은 러너**(`job_runner.run_job`)로
+합류한다 — 계약은 페이로드고 전송은 선택이다. 처리 기본값도 한 벌을 나눠 쓴다.
+두 벌로 뒀더니 큐 경로가 조용히 다른 설정으로 돌고 있었다([issues/009](docs/issues/009-queue-path-ran-untuned.md)).
+
+---
+
+## 컨테이너로 붙이기
+
+```bash
+docker compose up --build          # 8000 포트로 뜬다
+curl localhost:8000/api/health
+```
+
+잡 하나를 보내고 결과를 가져가는 것이 전부다.
+
+```bash
+curl -X POST localhost:8000/api/deident/jobs \
+  -H 'Content-Type: application/json' \
+  -d '{"video_id":"v-1","token":"fencing-1",
+       "input_url":"<presigned GET>",
+       "targets":[{"label":"deid-720p","height":720,
+                   "put_url":"<presigned PUT>","content_type":"video/mp4"}]}'
+# → 202 {"job_id":"…","status":"running"}
+
+curl localhost:8000/api/deident/jobs/<job_id>
+# → {"status":"running","progress":{"percent":46.2,"stage_label":"얼굴 찾는 중",…}}
+# → {"status":"done","result":{…}}  또는  {"status":"failed","problem":{…}}
+```
+
+**문은 기본으로 활짝 열려 있지 않다.** 아무 설정이 없으면 **같은 기계에서만**
+열린다. 밖에서 부르려면 둘 중 하나다.
+
+| 설정 | 뜻 |
+|---|---|
+| `FA_REMOTE_TOKEN=아무값` | `X-Deident-Token` 헤더에 같은 값을 보내야 열린다 |
+| `FA_REMOTE_OPEN=1` | **인증 없이** 연다. 붙여 보는 단계용 — 기동 로그가 경고한다 |
+
+바쁘면 `429` 로 거절한다(`FA_REMOTE_MAX_INFLIGHT`, 기본 1). **대기열을 만들지
+않는다** — 부르는 쪽이 이미 재시도를 갖고 있고, 두 곳이 각자 판단하면 같은
+영상이 몇 배로 돈다.
+
+GPU 는 있으면 쓰고 없으면 CPU 로 돈다(느리다). `docker-compose.yml` 의 `deploy`
+블록을 지우면 CPU 로 뜬다. 자세한 계약은
+[연동 규약 §4-1](docs/integration/rebornstudio.md).
 
 ---
 

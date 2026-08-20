@@ -33,7 +33,7 @@ from ..core.anonymize import METHODS
 from ..core.pipeline import parse_bitrate
 from ..storage import naming, providers
 from ..storage import s3 as s3mod
-from . import config, errors, jobs, metrics, worker
+from . import config, errors, jobs, metrics, remote, worker
 from .config import JOB_DEFAULTS
 from .webui import INDEX_HTML
 
@@ -53,6 +53,7 @@ async def lifespan(_app):
     # 순서를 뒤로 미루면 확인했을 때는 이미 늦다.
     jobs.claim_jobs_dir()
     log.info("서버 기동 — 작업 폴더 %s", config.JOBS_DIR)
+    remote.announce()          # 잡 접수 문이 열려 있는지를 기록으로 남긴다
     events.emit("server.started", jobs_dir=config.JOBS_DIR)
     worker.resume_orphans()
     if config.SWEEP_SEC > 0 and _sweeper is None:
@@ -443,6 +444,49 @@ def s3_objects(prefix: str = ""):
             "folders": folders, "objects": objects,
             "output_prefix": store.output_prefix}
 
+
+
+# ── 저쪽이 우리를 부르는 문 ────────────────────────────────────────────────
+#
+# **여기는 잡 페이로드를 받는다.** 위의 `POST /api/jobs` 는 우리 버킷의 키를
+# 받는 문이라 모양이 다르다 — 그쪽은 저장소를 우리가 고르고, 이쪽은 서명된 URL
+# 두 개가 들어온다. 둘은 같은 러너(`job_runner.run_job`)로 합류한다.
+#
+# 새로 짜는 처리 로직이 없다. 문만 다는 것이다(docs/integration §0).
+
+@app.post("/api/deident/jobs", status_code=202)
+def deident_submit(request: Request, body: dict = Body(default={})):
+    """잡 하나를 받아 **바로 돌려보낸다**(202). 결과는 아래 GET 으로 가져간다.
+
+    동기로 붙들지 않는 이유는 한 편이 분 단위라서다. 요청을 그만큼 붙들면
+    게이트웨이가 먼저 끊고, 그 재시도가 곧 중복 처리가 된다.
+    """
+    ok, why = remote.door_open(request)
+    if not ok:
+        raise errors.REMOTE_FORBIDDEN(why)
+    try:
+        rec = remote.submit(body)
+    except remote.Busy as e:
+        raise errors.REMOTE_BUSY(str(e)) from e
+    except ValueError as e:
+        raise errors.INVALID_INPUT(str(e)) from e
+    return rec.view()
+
+
+@app.get("/api/deident/jobs/{job_id}")
+def deident_status(job_id: str, request: Request):
+    """진행과 결과. 하트비트를 우리가 밀지 않고 **저쪽이 당겨 간다.**
+
+    큐 경로는 리스 연장 메시지를 보내야 해서 밀었지만, HTTP 에서는 부르는 쪽이
+    이미 붙어 있다. 같은 값(진행률·단계·남은 시간)이 `progress` 에 실린다.
+    """
+    ok, why = remote.door_open(request)
+    if not ok:
+        raise errors.REMOTE_FORBIDDEN(why)
+    rec = remote.get(job_id)
+    if rec is None:
+        raise errors.REMOTE_JOB_NOT_FOUND(job_id)
+    return rec.view()
 
 
 def check_admission():

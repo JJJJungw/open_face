@@ -80,12 +80,20 @@ def main():
     ap = argparse.ArgumentParser(description=__doc__.splitlines()[0])
     ap.add_argument("--upload", action="store_true",
                     help="지금 있는 가중치를 S3 에 올린다")
+    # 컨테이너 빌드용. **리포는 건너뛸 수 없다** — 체크포인트를 unpickle 하려면
+    # 그 리포의 모듈이 임포트돼야 해서, 없으면 모델 로드가 통째로 실패한다.
+    # 가중치는 볼륨이나 S3 로 나중에 넣을 수 있으므로 이쪽만 뺀다.
+    ap.add_argument("--repo-only", action="store_true",
+                    help="검출기 리포만 준비하고 가중치는 건너뛴다")
     args = ap.parse_args()
 
     if args.upload:
         return upload()
 
     ensure_repo()
+    if args.repo_only:
+        print(f"\n리포만 준비했습니다. 가중치는 따로 넣어 주세요: {WEIGHTS}")
+        return
     ensure_weights()
     size = os.path.getsize(WEIGHTS) / 1e6 if os.path.exists(WEIGHTS) else 0
     print(f"\n준비 완료. 가중치 {size:.1f} MB")

@@ -175,6 +175,19 @@ INSECURE_TRANSPORT = _p(
     "insecure_transport", 400, "평문 연결로는 비밀 값을 받지 않습니다",
     "https 로 접속하시거나, 같은 기계에서(또는 SSH 터널로) 접속해 주세요. "
     "키를 넣지 않고 인스턴스 역할·aws configure 를 쓰시는 방법도 있습니다.")
+# ── 저쪽이 우리를 부르는 문 (service/remote.py) ────────────────────────────
+REMOTE_FORBIDDEN = _p(
+    "remote_forbidden", 403, "이 문을 열 수 없습니다",
+    "요청에 X-Deident-Token 헤더가 필요합니다. 서버에 FA_REMOTE_TOKEN 을 "
+    "설정하고 같은 값을 보내 주세요.")
+REMOTE_BUSY = _p(
+    "remote_busy", 429, "지금은 받을 수 없습니다",
+    "처리 중인 잡이 상한에 찼습니다. 잠시 뒤 다시 보내 주세요 — "
+    "이 서버는 대기열을 만들지 않습니다.", retryable=True)
+REMOTE_JOB_NOT_FOUND = _p(
+    "remote_job_not_found", 404, "그런 잡이 없습니다",
+    "job_id 를 확인해 주세요. 끝난 잡의 기록은 일정 시간 뒤 지워집니다.")
+
 STORAGE_BUSY = _p(
     "storage_busy", 409, "처리 중인 작업이 있어 연결을 끊을 수 없습니다",
     "진행 중이거나 대기 중인 작업이 끝난 뒤에 다시 시도해 주세요. "

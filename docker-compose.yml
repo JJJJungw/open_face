@@ -1,0 +1,48 @@
+# 붙여 보기용 한 장. **이 파일 그대로 시험한다.**
+#
+#   docker compose up --build
+#   curl localhost:8000/api/health
+#
+# 저쪽(rebornstudio) 스택 옆에 얹을 때는 이 서비스만 그쪽 네트워크에 넣으면
+# 된다. 저쪽 compose 파일은 건드리지 않는다 — `docker-compose.override.yml`
+# 로 얹거나, 이 파일을 `-f` 로 같이 준다.
+#
+#   docker compose -f infra/profiles/local/docker-compose.yml \
+#                  -f /경로/face-anonymizer/docker-compose.yml up
+services:
+  deident:
+    build:
+      context: .
+      # 바깥으로 못 나가는 망에서 빌드할 때: BAKE_WEIGHTS=0 으로 두고
+      # weights/ 를 볼륨으로 물린다. CPU 로만 쓸 거면 TORCH_INDEX 를 비운다.
+      args:
+        BAKE_WEIGHTS: "1"
+    image: face-anonymizer:local
+    ports:
+      - "8000:8000"
+    environment:
+      # **시험용이다.** 인증 없이 아무나 부를 수 있다 — 기동 로그가 그렇게
+      # 말한다. 공개된 망에 띄울 때는 이걸 지우고 FA_REMOTE_TOKEN 을 쓴다.
+      FA_REMOTE_OPEN: "1"
+      # FA_REMOTE_TOKEN: "여기에-아무-값"
+      #
+      # GPU 는 한 장이다. 두 편을 동시에 올리면 둘 다 느려지거나 터진다.
+      # 넘치면 429 로 거절한다 — 대기열을 만들지 않는다(저쪽이 이미 갖고 있다).
+      FA_REMOTE_MAX_INFLIGHT: "1"
+      FA_PRELOAD: "1"
+    volumes:
+      - deident-data:/data
+    # 한 편이 분 단위다. 즉시 죽이면 처리 중이던 것이 흔적 없이 사라진다.
+    stop_grace_period: 600s
+    # GPU 를 쓰려면 호스트에 nvidia-container-toolkit 이 있어야 한다.
+    # 없으면 이 블록을 통째로 지운다 — CPU 로도 뜬다(느릴 뿐이다).
+    deploy:
+      resources:
+        reservations:
+          devices:
+            - driver: nvidia
+              count: 1
+              capabilities: [gpu]
+
+volumes:
+  deident-data:
