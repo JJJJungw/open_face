@@ -144,3 +144,28 @@ def test_every_setting_is_documented():
     # 반대쪽도 본다. 안 읽는 값이 문서에 남아 있으면 넣어도 아무 일이 없다.
     stale = doc - set(used) - {"FA_ENV_FILE"}
     assert not stale, sorted(stale)
+
+
+def test_the_python_version_is_written_in_one_voice():
+    """`pyproject.toml` 과 `.python-version` 이 같은 말을 하는가.
+
+    같은 사실이 두 곳에 적혀 있으면 언젠가 갈라진다 — 이 저장소가 그걸로 이미
+    여러 번 물렸다(docs/issues/014 · 023). 여기서는 특히 나쁜데, 갈라져도
+    **아무 증상이 없다가** 배포한 파이썬이 개발한 파이썬과 달라지는 것으로만
+    드러난다. 그게 docs/issues/026 이었다.
+    """
+    import pathlib
+    import re
+
+    root = pathlib.Path(__file__).resolve().parent.parent
+    pin = (root / ".python-version").read_text(encoding="utf-8").strip()
+    spec = re.search(r'^requires-python\s*=\s*"([^"]+)"',
+                     (root / "pyproject.toml").read_text(encoding="utf-8"), re.M)
+    assert spec, "requires-python 을 찾지 못했다"
+    lo = re.search(r">=\s*(\d+\.\d+)", spec.group(1))
+    hi = re.search(r"<\s*(\d+)\.(\d+)", spec.group(1))
+    assert lo and hi, f"하한과 상한이 둘 다 있어야 한다: {spec.group(1)}"
+    assert lo.group(1) == pin, f".python-version={pin} 인데 하한은 {lo.group(1)}"
+    # 상한은 바로 다음 마이너여야 한다 — 3.11 을 고정한다는 뜻이다.
+    major, minor = pin.split(".")
+    assert (hi.group(1), hi.group(2)) == (major, str(int(minor) + 1)), spec.group(1)

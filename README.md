@@ -19,9 +19,13 @@
 
 ## 시작하기
 
+**파이썬 3.11 이다**(`.python-version`). 3.12 이상은 막아 두었다 — 붙을 곳이 3.11 로
+묶여 있고, 개발과 배포가 다른 파이썬에서 도는 것이 실제로 우리를 물었다
+(docs/issues/026).
+
 ```bash
 git clone <저장소> face-anonymizer && cd face-anonymizer
-python -m venv .venv && source .venv/bin/activate
+python3.11 -m venv .venv && source .venv/bin/activate
 pip install -r requirements/base.txt
 
 # ffmpeg 는 시스템 패키지 (오디오 합성용)
