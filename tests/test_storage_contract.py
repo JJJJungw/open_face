@@ -196,15 +196,30 @@ def test_an_s3_error_survives_without_fastapi():
     **새 프로세스에서 확인한다.** 같은 프로세스에서 sys.modules 를 지워도 부모
     패키지가 속성으로 들고 있어서 재임포트가 안 일어난다 — 처음에 그렇게 짰다가
     통과하는 것처럼 보였다. 워커 컨테이너는 애초에 fastapi 가 **없는** 프로세스다.
+
+    **그리고 차단이 먹었는지를 먼저 확인한다.** 처음에는 `find_module` /
+    `load_module` 로 막았는데, 그 훅은 **파이썬 3.12 에서 제거됐다.** 3.11 에서는
+    막히고 3.12 에서는 조용히 통과한다 — 즉 새 파이썬에서는 이 검사가 아무것도
+    안 보면서 통과할 수 있었다. 검사가 죽는 것보다 검사가 살아 있는 척하는 게
+    훨씬 나쁘다.
     """
     code = textwrap.dedent("""
         import sys
         class Block:
-            def find_module(self, name, path=None):
-                return self if name.split(".")[0] == "fastapi" else None
-            def load_module(self, name):
-                raise ImportError("No module named 'fastapi'")
+            # find_spec 이다. find_module/load_module 은 3.12 에서 사라졌다.
+            def find_spec(self, name, path=None, target=None):
+                if name.split(".")[0] == "fastapi":
+                    raise ImportError("No module named 'fastapi'")
+                return None
         sys.meta_path.insert(0, Block())
+
+        # 차단이 실제로 먹는가. 안 먹으면 아래 단언들은 아무 의미가 없다.
+        try:
+            import fastapi
+        except ImportError:
+            pass
+        else:
+            raise AssertionError("차단이 안 먹었다 — 이 검사는 아무것도 안 본다")
 
         from face_anonymizer.storage import s3 as s3mod
         class Denied(Exception):

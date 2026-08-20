@@ -64,6 +64,7 @@
 | [023](issues/023-things-that-had-to-agree-and-didnt.md) | 같아야 하는 것들이 또 갈라졌다 — 검수 누락 · OOM 문구 · 실패가 전부 '영구' | **해결됨** |
 | [024](issues/024-the-worker-had-no-fastapi.md) | 워커에 없는 라이브러리를 오류 처리가 불렀다 — 진짜 원인이 ImportError 로 바뀜 | **해결됨** |
 | [025](issues/025-the-gate-asked-in-the-wrong-order.md) | 관문이 버킷부터 물었고, 열쇠가 없는데 "리전을 확인하세요" 라고 답했다 | **해결됨** |
+| [026](issues/026-two-tests-were-passing-for-the-wrong-reason.md) | 검사 둘이 엉뚱한 이유로 통과하고 있었다 — 파이썬 3.12 와 그 기계의 `.env` | **해결됨** |
 
 ## 보안
 

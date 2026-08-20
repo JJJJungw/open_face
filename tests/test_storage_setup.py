@@ -49,9 +49,20 @@ class FakeClient:
 
 @pytest.fixture
 def fresh(tmp_path, monkeypatch):
-    """아직 아무것도 안 정해진 서버. 진짜 첫 실행처럼."""
+    """아직 아무것도 안 정해진 서버. 진짜 첫 실행처럼.
+
+    **환경부터 비운다.** `from_env()` 는 환경 변수를 저장 파일보다 먼저 본다 —
+    그게 맞는 순서다(`.env` 를 고쳤는데 안 바뀌면 사람은 있지도 않은 문제를
+    찾는다). 그런데 이 뒷정리를 안 하면 "진짜 첫 실행" 이 그 기계의 `.env` 를
+    물려받는다. 실제로 EC2 에서 이 검사가 실제 버킷 이름을 읽고 실패했다 —
+    코드가 아니라 그 기계의 설정을 보고 있었던 것이다.
+    """
     monkeypatch.setenv("FA_JOBS_DIR", str(tmp_path))
     monkeypatch.delenv("FA_ALLOW_STORAGE_EDIT", raising=False)
+    for k in ("FA_S3_BUCKET", "FA_S3_REGION", "FA_S3_ENDPOINT",
+              "FA_S3_ROOT_PREFIX", "FA_S3_OUTPUT_PREFIX",
+              "FA_STORAGE_PROVIDER", "FA_STORAGE_STORE"):
+        monkeypatch.delenv(k, raising=False)
     monkeypatch.setattr(config, "JOBS_DIR", str(tmp_path))
     monkeypatch.setattr(s3mod, "CONFIG",
                         providers.StorageConfig(provider="s3", bucket=""))
